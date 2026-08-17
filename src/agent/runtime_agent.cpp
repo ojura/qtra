@@ -117,8 +117,8 @@ RuntimeAgent::RuntimeAgent(MainWindow* window,
     , m_cube(cube)
     , m_socketName(std::move(socketName))
     , m_registry(window, this)
-    , m_modules(cube)
     , m_unsafeEnabled(qEnvironmentVariableIntValue("QT_RUNTIME_AGENT_UNSAFE") == 1)
+    , m_modules(cube)
 {
     setObjectName(QStringLiteral("runtimeAgent"));
     m_monotonicClock.start();
@@ -206,6 +206,16 @@ RuntimeAgent::RuntimeAgent(MainWindow* window,
 
 RuntimeAgent::~RuntimeAgent()
 {
+    // Qt drops a destroyed receiver's connections in ~QObject, which runs after
+    // these members are gone. Anything the members emit on the way out would
+    // still reach the lambdas installed in the constructor, so cut those first.
+    if (m_cube != nullptr) {
+        disconnect(m_cube, nullptr, this, nullptr);
+    }
+    if (m_window != nullptr) {
+        disconnect(m_window, nullptr, this, nullptr);
+    }
+
     const bool ownedEndpoint = m_server.isListening();
     m_server.close();
     if (ownedEndpoint) {

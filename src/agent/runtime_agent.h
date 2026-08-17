@@ -107,7 +107,6 @@ private:
     QLocalServer m_server;
     QHash<QLocalSocket*, ClientState> m_clients;
     ObjectRegistry m_registry;
-    ModuleManager m_modules;
     QElapsedTimer m_monotonicClock;
     quint64 m_eventSequence = 0;
     QQueue<QJsonObject> m_eventHistory;
@@ -115,4 +114,9 @@ private:
     // job IDs while retaining a plain uint64 wire representation.
     quint64 m_nextOperationId = (quint64{1} << 63);
     bool m_unsafeEnabled = false;
+
+    // Declared last so it is destroyed first. ~ModuleManager rolls the active
+    // patch back, which makes CubeWidget emit stateChanged, and the handler for
+    // that signal reads m_eventHistory and m_monotonicClock above.
+    ModuleManager m_modules;
 };
