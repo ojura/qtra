@@ -1,0 +1,1036 @@
+#include "agent/runtime_agent.h"
+
+#include "cube_widget.h"
+#include "main_window.h"
+
+#include <QAbstractButton>
+#include <QAction>
+#include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonParseError>
+#include <QLocalSocket>
+#include <QMetaMethod>
+#include <QMetaProperty>
+#include <QProcessEnvironment>
+#include <QTimer>
+
+#include <cerrno>
+#include <cstring>
+#include <dlfcn.h>
+#include <exception>
+#include <sys/uio.h>
+#include <unistd.h>
+
+namespace {
+
+constexpr qsizetype maximumRequestBytes = 1024 * 1024;
+constexpr qsizetype maximumUnsafeTransferBytes = 64 * 1024;
+
+QString pointerString(const void* pointer)
+{
+    return QStringLiteral("0x%1").arg(reinterpret_cast<quintptr>(pointer), 0, 16);
+}
+
+bool parseAddress(const QJsonValue& value, quintptr& address)
+{
+    bool ok = false;
+    if (value.isString()) {
+        QString text = value.toString().trimmed();
+        int base = 10;
+        if (text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+            text.remove(0, 2);
+            base = 16;
+        }
+        address = static_cast<quintptr>(text.toULongLong(&ok, base));
+        return ok;
+    }
+    if (value.isDouble()) {
+        const double number = value.toDouble();
+        if (number >= 0.0 && number <= 9'007'199'254'740'991.0) {
+            address = static_cast<quintptr>(number);
+            return true;
+        }
+    }
+    return false;
+}
+
+QJsonObject parseObjectOrRaw(const QByteArray& json)
+{
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(json, &parseError);
+    if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+        return document.object();
+    }
+    return QJsonObject{{QStringLiteral("raw"), QString::fromUtf8(json)}};
+}
+
+QString errnoText(const char* operation)
+{
+    return QStringLiteral("%1 failed: %2 (errno=%3)")
+        .arg(QString::fromLatin1(operation), QString::fromLocal8Bit(std::strerror(errno)))
+        .arg(errno);
+}
+
+} // namespace
+
+RuntimeAgent::RuntimeAgent(MainWindow* window,
+                           CubeWidget* cube,
+                           QString socketName,
+                           QObject* parent)
+    : QObject(parent)
+    , m_window(window)
+    , m_cube(cube)
+    , m_socketName(std::move(socketName))
+    , m_registry(QCoreApplication::instance(), this)
+    , m_modules(cube)
+    , m_unsafeEnabled(qEnvironmentVariableIntValue("QT_RUNTIME_AGENT_UNSAFE") == 1)
+{
+    setObjectName(QStringLiteral("runtimeAgent"));
+    m_monotonicClock.start();
+
+    connect(&m_server, &QLocalServer::newConnection,
+            this, &RuntimeAgent::acceptConnections);
+
+    connect(m_cube, &CubeWidget::stateChanged, this, [this] {
+        publishEvent(QStringLiteral("cube.stateChanged"), cubeState());
+    });
+    connect(m_cube, &CubeWidget::frameRendered, this,
+            [this](const qulonglong frame, const float angle) {
+                // High-rate events are deliberately throttled. A real client can
+                // install a native observer snippet when it needs every frame.
+                if ((frame % 60U) == 0U) {
+                    publishEvent(QStringLiteral("cube.frame"), QJsonObject{
+                        {QStringLiteral("frameIndex"), QString::number(frame)},
+                        {QStringLiteral("angleDegrees"), angle},
+                    });
+                }
+            });
+    connect(m_cube, &CubeWidget::activePatchChanged, this, [this](const QString& name) {
+        publishEvent(QStringLiteral("patch.changed"), QJsonObject{
+            {QStringLiteral("name"), name},
+            {QStringLiteral("status"), m_modules.patchStatus()},
+        });
+    });
+
+    connect(m_window, &MainWindow::demoJobStarted, this,
+            [this](const qulonglong id, const QString& name) {
+                publishEvent(QStringLiteral("operation.started"), QJsonObject{
+                    {QStringLiteral("operationId"), QString::number(id)},
+                    {QStringLiteral("kind"), QStringLiteral("demoJob")},
+                    {QStringLiteral("name"), name},
+                });
+            });
+    connect(m_window, &MainWindow::demoJobProgress, this,
+            [this](const qulonglong id, const int percent) {
+                publishEvent(QStringLiteral("operation.progress"), QJsonObject{
+                    {QStringLiteral("operationId"), QString::number(id)},
+                    {QStringLiteral("percent"), percent},
+                });
+            });
+    connect(m_window, &MainWindow::demoJobFinished, this,
+            [this](const qulonglong id, const QString& outcome) {
+                publishEvent(QStringLiteral("operation.finished"), QJsonObject{
+                    {QStringLiteral("operationId"), QString::number(id)},
+                    {QStringLiteral("kind"), QStringLiteral("demoJob")},
+                    {QStringLiteral("outcome"), outcome},
+                });
+            });
+
+    for (QAction* action : m_window->findChildren<QAction*>()) {
+        (void)m_registry.idFor(action);
+        connect(action, &QAction::triggered, this, [this, action](const bool checked) {
+            publishEvent(QStringLiteral("action.triggered"), QJsonObject{
+                {QStringLiteral("objectName"), action->objectName()},
+                {QStringLiteral("text"), action->text()},
+                {QStringLiteral("checked"), checked},
+            });
+        });
+    }
+}
+
+RuntimeAgent::~RuntimeAgent()
+{
+    m_server.close();
+    QLocalServer::removeServer(m_socketName);
+}
+
+bool RuntimeAgent::start(QString& error)
+{
+    if (m_socketName.isEmpty()) {
+        error = QStringLiteral("socket name is empty");
+        return false;
+    }
+
+    QLocalServer::removeServer(m_socketName);
+    m_server.setSocketOptions(QLocalServer::UserAccessOption);
+    if (!m_server.listen(m_socketName)) {
+        error = m_server.errorString();
+        return false;
+    }
+    return true;
+}
+
+QObject* RuntimeAgent::findObject(const QString& objectName) const
+{
+    return m_registry.byObjectName(objectName);
+}
+
+void RuntimeAgent::publishEvent(const QString& name, const QJsonObject& data)
+{
+    QJsonObject message{
+        {QStringLiteral("event"), name},
+        {QStringLiteral("sequence"), QString::number(++m_eventSequence)},
+        {QStringLiteral("monotonicNs"), QString::number(m_monotonicClock.nsecsElapsed())},
+        {QStringLiteral("data"), data},
+    };
+
+    for (auto iterator = m_clients.begin(); iterator != m_clients.end(); ++iterator) {
+        if (clientWantsEvent(iterator.value(), name)) {
+            sendObject(iterator.key(), message);
+        }
+    }
+}
+
+void RuntimeAgent::acceptConnections()
+{
+    while (m_server.hasPendingConnections()) {
+        QLocalSocket* socket = m_server.nextPendingConnection();
+        if (socket == nullptr) {
+            continue;
+        }
+        m_clients.insert(socket, ClientState{});
+        connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
+            readClient(socket);
+        });
+        connect(socket, &QLocalSocket::disconnected, this, [this, socket] {
+            removeClient(socket);
+        });
+        sendObject(socket, QJsonObject{
+            {QStringLiteral("event"), QStringLiteral("agent.connected")},
+            {QStringLiteral("sequence"), QString::number(++m_eventSequence)},
+            {QStringLiteral("monotonicNs"), QString::number(m_monotonicClock.nsecsElapsed())},
+            {QStringLiteral("data"), hello()},
+        });
+    }
+}
+
+void RuntimeAgent::readClient(QLocalSocket* socket)
+{
+    auto iterator = m_clients.find(socket);
+    if (iterator == m_clients.end()) {
+        return;
+    }
+
+    iterator->input += socket->readAll();
+    if (iterator->input.size() > maximumRequestBytes) {
+        sendError(socket, QJsonValue(), QStringLiteral("request_too_large"),
+                  QStringLiteral("request buffer exceeded 1 MiB"));
+        socket->disconnectFromServer();
+        return;
+    }
+
+    while (true) {
+        const qsizetype newline = iterator->input.indexOf('\n');
+        if (newline < 0) {
+            break;
+        }
+        QByteArray line = iterator->input.left(newline).trimmed();
+        iterator->input.remove(0, newline + 1);
+        if (!line.isEmpty()) {
+            handleLine(socket, line);
+        }
+    }
+}
+
+void RuntimeAgent::removeClient(QLocalSocket* socket)
+{
+    m_clients.remove(socket);
+    socket->deleteLater();
+}
+
+void RuntimeAgent::handleLine(QLocalSocket* socket, const QByteArray& line)
+{
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        sendError(socket, QJsonValue(), QStringLiteral("invalid_json"),
+                  parseError.errorString());
+        return;
+    }
+
+    const QJsonObject request = document.object();
+    const QJsonValue requestId = request.value(QStringLiteral("id"));
+    const QString command = request.value(QStringLiteral("command")).toString();
+    const QJsonObject parameters = request.value(QStringLiteral("params")).toObject();
+    if (command.isEmpty()) {
+        sendError(socket, requestId, QStringLiteral("missing_command"),
+                  QStringLiteral("request.command must be a non-empty string"));
+        return;
+    }
+    dispatchRequest(socket, requestId, command, parameters);
+}
+
+void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
+                                   const QJsonValue& requestId,
+                                   const QString& command,
+                                   const QJsonObject& parameters)
+{
+    if (command == QStringLiteral("hello")) {
+        sendSuccess(socket, requestId, hello());
+        return;
+    }
+    if (command == QStringLiteral("help")) {
+        sendSuccess(socket, requestId, commandList());
+        return;
+    }
+    if (command == QStringLiteral("cube.state")) {
+        sendSuccess(socket, requestId, cubeState());
+        return;
+    }
+    if (command == QStringLiteral("cube.pause")) {
+        m_cube->setRunning(false);
+        sendSuccess(socket, requestId, cubeState());
+        return;
+    }
+    if (command == QStringLiteral("cube.resume")) {
+        m_cube->setRunning(true);
+        sendSuccess(socket, requestId, cubeState());
+        return;
+    }
+    if (command == QStringLiteral("cube.reset")) {
+        m_cube->resetCube();
+        sendSuccess(socket, requestId, cubeState());
+        return;
+    }
+    if (command == QStringLiteral("cube.speed")) {
+        if (!parameters.contains(QStringLiteral("degreesPerSecond"))) {
+            sendError(socket, requestId, QStringLiteral("missing_parameter"),
+                      QStringLiteral("degreesPerSecond is required"));
+            return;
+        }
+        m_cube->setAngularVelocity(
+            static_cast<float>(parameters.value(QStringLiteral("degreesPerSecond")).toDouble()));
+        sendSuccess(socket, requestId, cubeState());
+        return;
+    }
+    if (command == QStringLiteral("cube.wireframe")) {
+        m_cube->setWireframe(parameters.value(QStringLiteral("enabled")).toBool());
+        sendSuccess(socket, requestId, cubeState());
+        return;
+    }
+    if (command == QStringLiteral("cube.capture")) {
+        QString path = parameters.value(QStringLiteral("path")).toString();
+        if (path.isEmpty()) {
+            path = QDir::temp().filePath(
+                QStringLiteral("qt-runtime-cube-%1-%2.png")
+                    .arg(QCoreApplication::applicationPid())
+                    .arg(m_eventSequence + 1));
+        }
+        path = QFileInfo(path).absoluteFilePath();
+        QString error;
+        if (!m_cube->captureFramebuffer(path, &error)) {
+            sendError(socket, requestId, QStringLiteral("capture_failed"), error);
+            return;
+        }
+        QFile file(path);
+        QByteArray digest;
+        if (file.open(QIODevice::ReadOnly)) {
+            digest = QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256).toHex();
+        }
+        const QJsonObject result{
+            {QStringLiteral("path"), path},
+            {QStringLiteral("bytes"), QFileInfo(path).size()},
+            {QStringLiteral("sha256"), QString::fromLatin1(digest)},
+        };
+        publishEvent(QStringLiteral("cube.capture.finished"), result);
+        sendSuccess(socket, requestId, result);
+        return;
+    }
+
+    if (command == QStringLiteral("object.tree")) {
+        QString error;
+        QObject* root = parameters.isEmpty() ? QCoreApplication::instance()
+                                             : resolveObject(parameters, error);
+        if (root == nullptr) {
+            sendError(socket, requestId, QStringLiteral("object_not_found"), error);
+            return;
+        }
+        sendSuccess(socket, requestId,
+                    m_registry.tree(root, parameters.value(QStringLiteral("maxDepth")).toInt(8)));
+        return;
+    }
+    if (command == QStringLiteral("object.list")) {
+        sendSuccess(socket, requestId, m_registry.flatList());
+        return;
+    }
+    if (command == QStringLiteral("object.describe")) {
+        QString error;
+        QObject* object = resolveObject(parameters, error);
+        if (object == nullptr) {
+            sendError(socket, requestId, QStringLiteral("object_not_found"), error);
+            return;
+        }
+        sendSuccess(socket, requestId, m_registry.describe(
+            object, parameters.value(QStringLiteral("includeValues")).toBool(true)));
+        return;
+    }
+    if (command == QStringLiteral("object.get")) {
+        QString error;
+        QObject* object = resolveObject(parameters, error);
+        if (object == nullptr) {
+            sendError(socket, requestId, QStringLiteral("object_not_found"), error);
+            return;
+        }
+        const QString propertyName = parameters.value(QStringLiteral("property")).toString();
+        if (propertyName.isEmpty()) {
+            sendError(socket, requestId, QStringLiteral("missing_parameter"),
+                      QStringLiteral("property is required"));
+            return;
+        }
+        const QVariant value = object->property(propertyName.toUtf8().constData());
+        if (!value.isValid()) {
+            sendError(socket, requestId, QStringLiteral("property_not_found"), propertyName);
+            return;
+        }
+        sendSuccess(socket, requestId, ObjectRegistry::variantToJson(value));
+        return;
+    }
+    if (command == QStringLiteral("object.set")) {
+        QString error;
+        QObject* object = resolveObject(parameters, error);
+        if (object == nullptr) {
+            sendError(socket, requestId, QStringLiteral("object_not_found"), error);
+            return;
+        }
+        const QString propertyName = parameters.value(QStringLiteral("property")).toString();
+        const QByteArray propertyUtf8 = propertyName.toUtf8();
+        const int propertyIndex = object->metaObject()->indexOfProperty(propertyUtf8.constData());
+        bool written = false;
+        if (propertyIndex >= 0) {
+            const QMetaProperty property = object->metaObject()->property(propertyIndex);
+            QVariant value;
+            if (!ObjectRegistry::jsonToPropertyValue(
+                    parameters.value(QStringLiteral("value")), property, value, error)) {
+                sendError(socket, requestId, QStringLiteral("conversion_failed"), error);
+                return;
+            }
+            written = property.write(object, value);
+        } else {
+            written = object->setProperty(
+                propertyUtf8.constData(),
+                parameters.value(QStringLiteral("value")).toVariant());
+        }
+        if (!written) {
+            sendError(socket, requestId, QStringLiteral("property_write_failed"), propertyName);
+            return;
+        }
+        sendSuccess(socket, requestId, m_registry.describe(object));
+        return;
+    }
+    if (command == QStringLiteral("object.invoke")) {
+        QString error;
+        QObject* object = resolveObject(parameters, error);
+        if (object == nullptr) {
+            sendError(socket, requestId, QStringLiteral("object_not_found"), error);
+            return;
+        }
+        const QByteArray methodName = parameters.value(QStringLiteral("method")).toString().toUtf8();
+        bool invoked = false;
+        QString matchedSignature;
+        const QMetaObject* metaObject = object->metaObject();
+        for (int index = 0; index < metaObject->methodCount(); ++index) {
+            const QMetaMethod method = metaObject->method(index);
+            if (method.name() == methodName && method.parameterCount() == 0) {
+                invoked = method.invoke(object, Qt::DirectConnection);
+                matchedSignature = QString::fromLatin1(method.methodSignature());
+                break;
+            }
+        }
+        if (!invoked) {
+            sendError(socket, requestId, QStringLiteral("invoke_failed"),
+                      QStringLiteral("no invokable zero-argument method named %1")
+                          .arg(QString::fromUtf8(methodName)));
+            return;
+        }
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("invoked"), true},
+            {QStringLiteral("signature"), matchedSignature},
+        });
+        return;
+    }
+    if (command == QStringLiteral("action.trigger")) {
+        QString error;
+        QObject* object = resolveObject(parameters, error);
+        QAction* action = qobject_cast<QAction*>(object);
+        if (action == nullptr) {
+            sendError(socket, requestId, QStringLiteral("not_an_action"), error.isEmpty()
+                ? QStringLiteral("selected object is not a QAction") : error);
+            return;
+        }
+        action->trigger();
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("objectName"), action->objectName()},
+            {QStringLiteral("checked"), action->isChecked()},
+        });
+        return;
+    }
+    if (command == QStringLiteral("widget.click")) {
+        QString error;
+        QObject* object = resolveObject(parameters, error);
+        QAbstractButton* button = qobject_cast<QAbstractButton*>(object);
+        if (button == nullptr) {
+            sendError(socket, requestId, QStringLiteral("not_a_button"), error.isEmpty()
+                ? QStringLiteral("selected object is not a QAbstractButton") : error);
+            return;
+        }
+        button->click();
+        sendSuccess(socket, requestId, true);
+        return;
+    }
+
+    if (command == QStringLiteral("event.subscribe")) {
+        auto iterator = m_clients.find(socket);
+        if (iterator == m_clients.end()) {
+            sendError(socket, requestId, QStringLiteral("client_gone"), QStringLiteral("client not found"));
+            return;
+        }
+        iterator->allEvents = parameters.value(QStringLiteral("all")).toBool(false);
+        iterator->eventPrefixes.clear();
+        for (const QJsonValue& value : parameters.value(QStringLiteral("prefixes")).toArray()) {
+            iterator->eventPrefixes.append(value.toString());
+        }
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("all"), iterator->allEvents},
+            {QStringLiteral("prefixes"), QJsonArray::fromStringList(iterator->eventPrefixes)},
+        });
+        return;
+    }
+
+    if (command == QStringLiteral("module.list")) {
+        sendSuccess(socket, requestId, m_modules.list());
+        return;
+    }
+    if (command == QStringLiteral("snippet.load")) {
+        QString error;
+        ModuleManager::LoadedModule* module = m_modules.loadSnippet(
+            parameters.value(QStringLiteral("path")).toString(), error);
+        if (module == nullptr) {
+            sendError(socket, requestId, QStringLiteral("load_failed"), error);
+            return;
+        }
+        const QJsonObject result{
+            {QStringLiteral("moduleId"), QString::number(module->id)},
+            {QStringLiteral("name"), module->name},
+            {QStringLiteral("path"), module->path},
+        };
+        publishEvent(QStringLiteral("snippet.loaded"), result);
+        sendSuccess(socket, requestId, result);
+        return;
+    }
+    if (command == QStringLiteral("snippet.run")) {
+        bool ok = false;
+        const quint64 moduleId = parameters.value(QStringLiteral("moduleId")).toString().toULongLong(&ok);
+        if (!ok && parameters.value(QStringLiteral("moduleId")).isDouble()) {
+            ok = true;
+        }
+        ModuleManager::LoadedModule* module = m_modules.module(
+            ok ? (parameters.value(QStringLiteral("moduleId")).isDouble()
+                ? static_cast<quint64>(parameters.value(QStringLiteral("moduleId")).toDouble())
+                : moduleId) : 0);
+        if (module == nullptr || module->kind != ModuleManager::Kind::Snippet) {
+            sendError(socket, requestId, QStringLiteral("module_not_found"),
+                      QStringLiteral("snippet module was not found"));
+            return;
+        }
+
+        const QString executor = parameters.value(QStringLiteral("executor")).toString(
+            QStringLiteral("gui"));
+        QObject* target = nullptr;
+        if (executor == QStringLiteral("object")) {
+            QString error;
+            target = resolveObject(parameters.value(QStringLiteral("target")).toObject(), error);
+            if (target == nullptr) {
+                sendError(socket, requestId, QStringLiteral("object_not_found"), error);
+                return;
+            }
+        }
+
+        const quint64 operationId = m_nextOperationId++;
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("operationId"), QString::number(operationId)},
+            {QStringLiteral("moduleId"), QString::number(module->id)},
+            {QStringLiteral("executor"), executor},
+        });
+
+        // Reserve the selected ID for runSnippet without complicating its API.
+        --m_nextOperationId;
+        runSnippet(module, executor, target, parameters.value(QStringLiteral("request")));
+        return;
+    }
+    if (command == QStringLiteral("patch.load")) {
+        QString error;
+        ModuleManager::LoadedModule* module = m_modules.loadCubePatch(
+            parameters.value(QStringLiteral("path")).toString(), error);
+        if (module == nullptr) {
+            sendError(socket, requestId, QStringLiteral("load_failed"), error);
+            return;
+        }
+        const QJsonObject result{
+            {QStringLiteral("moduleId"), QString::number(module->id)},
+            {QStringLiteral("name"), module->name},
+            {QStringLiteral("path"), module->path},
+        };
+        publishEvent(QStringLiteral("patch.loaded"), result);
+        sendSuccess(socket, requestId, result);
+        return;
+    }
+    if (command == QStringLiteral("patch.activate")) {
+        bool ok = false;
+        quint64 moduleId = parameters.value(QStringLiteral("moduleId")).toString().toULongLong(&ok);
+        if (!ok && parameters.value(QStringLiteral("moduleId")).isDouble()) {
+            moduleId = static_cast<quint64>(parameters.value(QStringLiteral("moduleId")).toDouble());
+            ok = true;
+        }
+        const QString mode = parameters.value(QStringLiteral("mode")).toString(
+            QStringLiteral("dispatch"));
+        QString error;
+        const bool activated = mode == QStringLiteral("entry")
+            ? m_modules.activateEntryPatch(moduleId, error)
+            : m_modules.activateDispatchPatch(moduleId, error);
+        if (!activated) {
+            sendError(socket, requestId, QStringLiteral("patch_failed"), error);
+            return;
+        }
+        const QJsonObject result = m_modules.patchStatus();
+        publishEvent(QStringLiteral("patch.activated"), result);
+        sendSuccess(socket, requestId, result);
+        return;
+    }
+    if (command == QStringLiteral("patch.rollback")) {
+        QString error;
+        if (!m_modules.rollback(error)) {
+            sendError(socket, requestId, QStringLiteral("rollback_failed"), error);
+            return;
+        }
+        const QJsonObject result = m_modules.patchStatus();
+        publishEvent(QStringLiteral("patch.rolledBack"), result);
+        sendSuccess(socket, requestId, result);
+        return;
+    }
+    if (command == QStringLiteral("patch.status")) {
+        sendSuccess(socket, requestId, m_modules.patchStatus());
+        return;
+    }
+
+    if (command == QStringLiteral("symbol.resolve")) {
+        const QByteArray name = parameters.value(QStringLiteral("name")).toString().toUtf8();
+        ::dlerror();
+        void* address = ::dlsym(RTLD_DEFAULT, name.constData());
+        const char* loaderError = ::dlerror();
+        if (loaderError != nullptr) {
+            sendError(socket, requestId, QStringLiteral("symbol_not_found"),
+                      QString::fromLocal8Bit(loaderError));
+            return;
+        }
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("name"), QString::fromUtf8(name)},
+            {QStringLiteral("address"), pointerString(address)},
+        });
+        return;
+    }
+    if (command == QStringLiteral("unsafe.status")) {
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("enabled"), m_unsafeEnabled},
+            {QStringLiteral("environment"), QStringLiteral("QT_RUNTIME_AGENT_UNSAFE=1")},
+        });
+        return;
+    }
+    if (command == QStringLiteral("unsafe.memory.read")) {
+        if (!m_unsafeEnabled) {
+            sendError(socket, requestId, QStringLiteral("unsafe_disabled"),
+                      QStringLiteral("start with QT_RUNTIME_AGENT_UNSAFE=1"));
+            return;
+        }
+        quintptr address = 0;
+        const qsizetype size = parameters.value(QStringLiteral("size")).toInt();
+        if (!parseAddress(parameters.value(QStringLiteral("address")), address)
+            || size <= 0 || size > maximumUnsafeTransferBytes) {
+            sendError(socket, requestId, QStringLiteral("invalid_range"),
+                      QStringLiteral("use a hex address string and size in 1..65536"));
+            return;
+        }
+        QByteArray data(size, Qt::Uninitialized);
+        iovec local{data.data(), static_cast<std::size_t>(size)};
+        iovec remote{reinterpret_cast<void*>(address), static_cast<std::size_t>(size)};
+        const ssize_t transferred = ::process_vm_readv(
+            ::getpid(), &local, 1, &remote, 1, 0);
+        if (transferred < 0) {
+            sendError(socket, requestId, QStringLiteral("memory_read_failed"),
+                      errnoText("process_vm_readv"));
+            return;
+        }
+        data.truncate(static_cast<qsizetype>(transferred));
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("address"), pointerString(reinterpret_cast<void*>(address))},
+            {QStringLiteral("bytesRead"), transferred},
+            {QStringLiteral("base64"), QString::fromLatin1(data.toBase64())},
+        });
+        return;
+    }
+    if (command == QStringLiteral("unsafe.memory.write")) {
+        if (!m_unsafeEnabled) {
+            sendError(socket, requestId, QStringLiteral("unsafe_disabled"),
+                      QStringLiteral("start with QT_RUNTIME_AGENT_UNSAFE=1"));
+            return;
+        }
+        quintptr address = 0;
+        const QByteArray data = QByteArray::fromBase64(
+            parameters.value(QStringLiteral("base64")).toString().toLatin1());
+        if (!parseAddress(parameters.value(QStringLiteral("address")), address)
+            || data.isEmpty() || data.size() > maximumUnsafeTransferBytes) {
+            sendError(socket, requestId, QStringLiteral("invalid_range"),
+                      QStringLiteral("use a hex address string and 1..65536 base64 bytes"));
+            return;
+        }
+        iovec local{const_cast<char*>(data.constData()), static_cast<std::size_t>(data.size())};
+        iovec remote{reinterpret_cast<void*>(address), static_cast<std::size_t>(data.size())};
+        const ssize_t transferred = ::process_vm_writev(
+            ::getpid(), &local, 1, &remote, 1, 0);
+        if (transferred < 0) {
+            sendError(socket, requestId, QStringLiteral("memory_write_failed"),
+                      errnoText("process_vm_writev"));
+            return;
+        }
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("address"), pointerString(reinterpret_cast<void*>(address))},
+            {QStringLiteral("bytesWritten"), transferred},
+        });
+        return;
+    }
+    if (command == QStringLiteral("unsafe.crash")) {
+        if (!m_unsafeEnabled) {
+            sendError(socket, requestId, QStringLiteral("unsafe_disabled"),
+                      QStringLiteral("start with QT_RUNTIME_AGENT_UNSAFE=1"));
+            return;
+        }
+        sendSuccess(socket, requestId, QStringLiteral("crashing now"));
+        socket->flush();
+        volatile int* pointer = nullptr;
+        *pointer = 1;
+        return;
+    }
+
+    if (command == QStringLiteral("process.quit")) {
+        sendSuccess(socket, requestId, true);
+        socket->flush();
+        QTimer::singleShot(0, QCoreApplication::instance(), &QCoreApplication::quit);
+        return;
+    }
+
+    sendError(socket, requestId, QStringLiteral("unknown_command"), command);
+}
+
+void RuntimeAgent::sendSuccess(QLocalSocket* socket,
+                               const QJsonValue& requestId,
+                               const QJsonValue& result)
+{
+    sendObject(socket, QJsonObject{
+        {QStringLiteral("id"), requestId},
+        {QStringLiteral("ok"), true},
+        {QStringLiteral("result"), result},
+    });
+}
+
+void RuntimeAgent::sendError(QLocalSocket* socket,
+                             const QJsonValue& requestId,
+                             const QString& code,
+                             const QString& message)
+{
+    sendObject(socket, QJsonObject{
+        {QStringLiteral("id"), requestId},
+        {QStringLiteral("ok"), false},
+        {QStringLiteral("error"), QJsonObject{
+            {QStringLiteral("code"), code},
+            {QStringLiteral("message"), message},
+        }},
+    });
+}
+
+void RuntimeAgent::sendObject(QLocalSocket* socket, const QJsonObject& object)
+{
+    if (socket == nullptr || socket->state() == QLocalSocket::UnconnectedState) {
+        return;
+    }
+    socket->write(QJsonDocument(object).toJson(QJsonDocument::Compact));
+    socket->write("\n");
+}
+
+QObject* RuntimeAgent::resolveObject(const QJsonObject& parameters, QString& error) const
+{
+    if (parameters.contains(QStringLiteral("objectName"))) {
+        const QString name = parameters.value(QStringLiteral("objectName")).toString();
+        if (QObject* object = m_registry.byObjectName(name); object != nullptr) {
+            return object;
+        }
+        error = QStringLiteral("no QObject named %1").arg(name);
+        return nullptr;
+    }
+    if (parameters.contains(QStringLiteral("id"))) {
+        bool ok = false;
+        quint64 id = parameters.value(QStringLiteral("id")).toString().toULongLong(&ok);
+        if (!ok && parameters.value(QStringLiteral("id")).isDouble()) {
+            id = static_cast<quint64>(parameters.value(QStringLiteral("id")).toDouble());
+            ok = true;
+        }
+        if (ok) {
+            if (QObject* object = m_registry.byId(id); object != nullptr) {
+                return object;
+            }
+        }
+        error = QStringLiteral("no live QObject with id %1").arg(id);
+        return nullptr;
+    }
+    error = QStringLiteral("objectName or id is required");
+    return nullptr;
+}
+
+QJsonObject RuntimeAgent::cubeState() const
+{
+    return QJsonObject{
+        {QStringLiteral("angleDegrees"), m_cube->angleDegrees()},
+        {QStringLiteral("angularVelocity"), m_cube->angularVelocity()},
+        {QStringLiteral("running"), m_cube->isRunning()},
+        {QStringLiteral("wireframe"), m_cube->isWireframe()},
+        {QStringLiteral("frameIndex"), QString::number(m_cube->frameIndex())},
+        {QStringLiteral("activePatch"), m_cube->activePatch()},
+        {QStringLiteral("address"), pointerString(m_cube)},
+    };
+}
+
+QJsonObject RuntimeAgent::hello() const
+{
+#ifdef NDEBUG
+    constexpr bool optimizedBuild = true;
+#else
+    constexpr bool optimizedBuild = false;
+#endif
+    return QJsonObject{
+        {QStringLiteral("name"), QStringLiteral("qt-runtime-agent-demo")},
+        {QStringLiteral("protocolVersion"), 1},
+        {QStringLiteral("agentAbi"), QStringLiteral("0x%1").arg(RUNTIME_AGENT_ABI_V1, 8, 16, QLatin1Char('0'))},
+        {QStringLiteral("cubePatchAbi"), QStringLiteral("0x%1").arg(CUBE_STEP_ABI_V1, 8, 16, QLatin1Char('0'))},
+        {QStringLiteral("pid"), QCoreApplication::applicationPid()},
+        {QStringLiteral("uid"), static_cast<int>(::getuid())},
+        {QStringLiteral("socket"), m_socketName},
+        {QStringLiteral("qtVersion"), QString::fromLatin1(qVersion())},
+        {QStringLiteral("compiler"), QString::fromLatin1(__VERSION__)},
+        {QStringLiteral("optimizedBuild"), optimizedBuild},
+        {QStringLiteral("unsafeEnabled"), m_unsafeEnabled},
+        {QStringLiteral("sourceDir"), QStringLiteral(DEMO_SOURCE_DIR)},
+        {QStringLiteral("buildDir"), QStringLiteral(DEMO_BUILD_DIR)},
+        {QStringLiteral("buildType"), QStringLiteral(DEMO_BUILD_TYPE)},
+        {QStringLiteral("cube"), cubeState()},
+        {QStringLiteral("patch"), m_modules.patchStatus()},
+    };
+}
+
+QJsonArray RuntimeAgent::commandList() const
+{
+    const QStringList commands{
+        QStringLiteral("hello"), QStringLiteral("help"),
+        QStringLiteral("cube.state"), QStringLiteral("cube.pause"),
+        QStringLiteral("cube.resume"), QStringLiteral("cube.reset"),
+        QStringLiteral("cube.speed"), QStringLiteral("cube.wireframe"),
+        QStringLiteral("cube.capture"),
+        QStringLiteral("object.tree"), QStringLiteral("object.list"),
+        QStringLiteral("object.describe"), QStringLiteral("object.get"),
+        QStringLiteral("object.set"), QStringLiteral("object.invoke"),
+        QStringLiteral("action.trigger"), QStringLiteral("widget.click"),
+        QStringLiteral("event.subscribe"), QStringLiteral("module.list"),
+        QStringLiteral("snippet.load"), QStringLiteral("snippet.run"),
+        QStringLiteral("patch.load"), QStringLiteral("patch.activate"),
+        QStringLiteral("patch.rollback"), QStringLiteral("patch.status"),
+        QStringLiteral("symbol.resolve"), QStringLiteral("unsafe.status"),
+        QStringLiteral("unsafe.memory.read"), QStringLiteral("unsafe.memory.write"),
+        QStringLiteral("unsafe.crash"), QStringLiteral("process.quit"),
+    };
+    return QJsonArray::fromStringList(commands);
+}
+
+void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
+                              const QString& executor,
+                              QObject* target,
+                              const QJsonValue& request)
+{
+    auto invocation = std::make_shared<SnippetInvocation>();
+    invocation->agent = this;
+    invocation->operationId = m_nextOperationId++;
+    if (request.isObject()) {
+        invocation->requestJson = QJsonDocument(request.toObject()).toJson(QJsonDocument::Compact);
+    } else if (request.isArray()) {
+        invocation->requestJson = QJsonDocument(request.toArray()).toJson(QJsonDocument::Compact);
+    } else {
+        invocation->requestJson = "{}";
+    }
+
+    invocation->host = RuntimeAgentHostV1{
+        RUNTIME_AGENT_ABI_V1,
+        sizeof(RuntimeAgentHostV1),
+        this,
+        invocation.get(),
+        &RuntimeAgent::hostLog,
+        &RuntimeAgent::hostEmitEvent,
+        &RuntimeAgent::hostFindQObject,
+        &RuntimeAgent::hostFindSymbol,
+        &RuntimeAgent::hostRequestJson,
+        &RuntimeAgent::hostCompleteJson,
+        &RuntimeAgent::hostFail,
+        &RuntimeAgent::hostMonotonicTimeNs,
+    };
+
+    publishEvent(QStringLiteral("operation.started"), QJsonObject{
+        {QStringLiteral("operationId"), QString::number(invocation->operationId)},
+        {QStringLiteral("kind"), QStringLiteral("snippet")},
+        {QStringLiteral("moduleId"), QString::number(module->id)},
+        {QStringLiteral("name"), module->name},
+        {QStringLiteral("executor"), executor},
+    });
+
+    auto callback = [this, module, invocation] {
+        executeSnippet(module, invocation);
+    };
+
+    if (executor == QStringLiteral("render")) {
+        m_cube->enqueueRenderCallback(std::move(callback));
+    } else if (executor == QStringLiteral("object") && target != nullptr) {
+        QMetaObject::invokeMethod(target, std::move(callback), Qt::QueuedConnection);
+    } else {
+        QMetaObject::invokeMethod(m_window, std::move(callback), Qt::QueuedConnection);
+    }
+}
+
+void RuntimeAgent::executeSnippet(ModuleManager::LoadedModule* module,
+                                  const std::shared_ptr<SnippetInvocation>& invocation)
+{
+    try {
+        module->snippet->run(&invocation->host);
+    } catch (const std::exception& exception) {
+        invocation->error = QString::fromUtf8(exception.what());
+    } catch (...) {
+        invocation->error = QStringLiteral("snippet threw a non-standard C++ exception");
+    }
+
+    QJsonObject event{
+        {QStringLiteral("operationId"), QString::number(invocation->operationId)},
+        {QStringLiteral("kind"), QStringLiteral("snippet")},
+        {QStringLiteral("moduleId"), QString::number(module->id)},
+        {QStringLiteral("name"), module->name},
+    };
+    if (invocation->error.isEmpty()) {
+        event.insert(QStringLiteral("outcome"), QStringLiteral("completed"));
+        event.insert(QStringLiteral("result"), parseSnippetResult(invocation->resultJson));
+    } else {
+        event.insert(QStringLiteral("outcome"), QStringLiteral("failed"));
+        event.insert(QStringLiteral("error"), invocation->error);
+    }
+    publishEvent(QStringLiteral("operation.finished"), event);
+}
+
+QJsonValue RuntimeAgent::parseSnippetResult(const QByteArray& json) const
+{
+    if (json.isEmpty()) {
+        return QJsonObject{};
+    }
+    QJsonParseError error;
+    const QJsonDocument document = QJsonDocument::fromJson(json, &error);
+    if (error.error != QJsonParseError::NoError) {
+        return QJsonObject{
+            {QStringLiteral("invalidJson"), QString::fromUtf8(json)},
+            {QStringLiteral("parseError"), error.errorString()},
+        };
+    }
+    return document.isArray() ? QJsonValue(document.array()) : QJsonValue(document.object());
+}
+
+bool RuntimeAgent::clientWantsEvent(const ClientState& state, const QString& eventName) const
+{
+    if (state.allEvents) {
+        return true;
+    }
+    for (const QString& prefix : state.eventPrefixes) {
+        if (eventName.startsWith(prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RuntimeAgent::hostLog(void* agentContext,
+                           const std::int32_t level,
+                           const char* message)
+{
+    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    const QString text = QString::fromUtf8(message != nullptr ? message : "");
+    switch (level) {
+    case RUNTIME_AGENT_LOG_ERROR: qCritical().noquote() << "[snippet]" << text; break;
+    case RUNTIME_AGENT_LOG_WARNING: qWarning().noquote() << "[snippet]" << text; break;
+    case RUNTIME_AGENT_LOG_DEBUG: qDebug().noquote() << "[snippet]" << text; break;
+    default: qInfo().noquote() << "[snippet]" << text; break;
+    }
+    agent->publishEvent(QStringLiteral("snippet.log"), QJsonObject{
+        {QStringLiteral("level"), level},
+        {QStringLiteral("message"), text},
+    });
+}
+
+void RuntimeAgent::hostEmitEvent(void* agentContext,
+                                 const char* name,
+                                 const char* objectJson)
+{
+    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    const QString eventName = QString::fromUtf8(name != nullptr ? name : "snippet.event");
+    agent->publishEvent(eventName,
+                        parseObjectOrRaw(QByteArray(objectJson != nullptr ? objectJson : "{}")));
+}
+
+void* RuntimeAgent::hostFindQObject(void* agentContext, const char* objectName)
+{
+    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    return agent->findObject(QString::fromUtf8(objectName != nullptr ? objectName : ""));
+}
+
+void* RuntimeAgent::hostFindSymbol(void*, const char* symbolName)
+{
+    ::dlerror();
+    return ::dlsym(RTLD_DEFAULT, symbolName != nullptr ? symbolName : "");
+}
+
+const char* RuntimeAgent::hostRequestJson(void* invocationContext)
+{
+    auto* invocation = static_cast<SnippetInvocation*>(invocationContext);
+    return invocation->requestJson.constData();
+}
+
+void RuntimeAgent::hostCompleteJson(void* invocationContext, const char* resultJson)
+{
+    auto* invocation = static_cast<SnippetInvocation*>(invocationContext);
+    invocation->resultJson = QByteArray(resultJson != nullptr ? resultJson : "{}");
+    invocation->completed = true;
+}
+
+void RuntimeAgent::hostFail(void* invocationContext, const char* error)
+{
+    auto* invocation = static_cast<SnippetInvocation*>(invocationContext);
+    invocation->error = QString::fromUtf8(error != nullptr ? error : "snippet failed");
+}
+
+std::uint64_t RuntimeAgent::hostMonotonicTimeNs(void* agentContext)
+{
+    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    return static_cast<std::uint64_t>(agent->m_monotonicClock.nsecsElapsed());
+}

@@ -1,0 +1,43 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Optimized Qt runtime-agent demo",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_QT_APP": "ON"
+      }
+    },
+    {
+      "name": "selftest-only",
+      "displayName": "Hotpatch self-test without Qt",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/selftest",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "BUILD_QT_APP": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "selftest-only", "configurePreset": "selftest-only" }
+  ],
+  "testPresets": [
+    {
+      "name": "selftest-only",
+      "configurePreset": "selftest-only",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

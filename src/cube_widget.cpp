@@ -1,0 +1,378 @@
+#include "cube_widget.h"
+
+#include <QFileInfo>
+#include <QImage>
+#include <QMetaObject>
+#include <QMutexLocker>
+#include <QOpenGLContext>
+#include <QThread>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <utility>
+
+namespace {
+
+constexpr std::array<float, 36 * 6> cubeVertices{
+    // position              // per-face color
+    // front
+    -1, -1,  1,             1, 0, 0,
+     1, -1,  1,             1, 0, 0,
+     1,  1,  1,             1, 0, 0,
+    -1, -1,  1,             1, 0, 0,
+     1,  1,  1,             1, 0, 0,
+    -1,  1,  1,             1, 0, 0,
+    // back
+     1, -1, -1,             0, 1, 1,
+    -1, -1, -1,             0, 1, 1,
+    -1,  1, -1,             0, 1, 1,
+     1, -1, -1,             0, 1, 1,
+    -1,  1, -1,             0, 1, 1,
+     1,  1, -1,             0, 1, 1,
+    // left
+    -1, -1, -1,             0, 1, 0,
+    -1, -1,  1,             0, 1, 0,
+    -1,  1,  1,             0, 1, 0,
+    -1, -1, -1,             0, 1, 0,
+    -1,  1,  1,             0, 1, 0,
+    -1,  1, -1,             0, 1, 0,
+    // right
+     1, -1,  1,             1, 0, 1,
+     1, -1, -1,             1, 0, 1,
+     1,  1, -1,             1, 0, 1,
+     1, -1,  1,             1, 0, 1,
+     1,  1, -1,             1, 0, 1,
+     1,  1,  1,             1, 0, 1,
+    // top
+    -1,  1,  1,             1, 1, 0,
+     1,  1,  1,             1, 1, 0,
+     1,  1, -1,             1, 1, 0,
+    -1,  1,  1,             1, 1, 0,
+     1,  1, -1,             1, 1, 0,
+    -1,  1, -1,             1, 1, 0,
+    // bottom
+    -1, -1, -1,             0, 0, 1,
+     1, -1, -1,             0, 0, 1,
+     1, -1,  1,             0, 0, 1,
+    -1, -1, -1,             0, 0, 1,
+     1, -1,  1,             0, 0, 1,
+    -1, -1,  1,             0, 0, 1,
+};
+
+constexpr auto vertexShader = R"glsl(
+#version 330 core
+layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec3 inColor;
+
+uniform mat4 mvp;
+out vec3 vertexColor;
+
+void main()
+{
+    vertexColor = inColor;
+    gl_Position = mvp * vec4(inPosition, 1.0);
+}
+)glsl";
+
+constexpr auto fragmentShader = R"glsl(
+#version 330 core
+in vec3 vertexColor;
+uniform vec3 tint;
+out vec4 fragmentColor;
+
+void main()
+{
+    fragmentColor = vec4(clamp(vertexColor * tint, 0.0, 1.0), 1.0);
+}
+)glsl";
+
+} // namespace
+
+CubeWidget::CubeWidget(QWidget* parent)
+    : QOpenGLWidget(parent)
+{
+    setObjectName(QStringLiteral("cubeView"));
+    setMinimumSize(520, 420);
+    setFocusPolicy(Qt::StrongFocus);
+
+    m_timer.setObjectName(QStringLiteral("cubeAnimationTimer"));
+    m_timer.setTimerType(Qt::PreciseTimer);
+    m_timer.setInterval(16);
+    connect(&m_timer, &QTimer::timeout, this, &CubeWidget::advanceAnimation);
+
+    m_clock.start();
+    m_lastTickNanoseconds = m_clock.nsecsElapsed();
+    m_timer.start();
+}
+
+CubeWidget::~CubeWidget()
+{
+    makeCurrent();
+    m_vertexArray.destroy();
+    m_vertexBuffer.destroy();
+    doneCurrent();
+}
+
+void CubeWidget::setAngleDegrees(const float angle)
+{
+    const float normalized = normalizeAngle(angle);
+    if (qFuzzyCompare(m_angleDegrees, normalized)) {
+        return;
+    }
+    m_angleDegrees = normalized;
+    emit stateChanged();
+    update();
+}
+
+void CubeWidget::setAngularVelocity(const float degreesPerSecond)
+{
+    const float clamped = std::clamp(degreesPerSecond, -1440.0F, 1440.0F);
+    if (qFuzzyCompare(m_angularVelocity, clamped)) {
+        return;
+    }
+    m_angularVelocity = clamped;
+    emit stateChanged();
+}
+
+void CubeWidget::setRunning(const bool running)
+{
+    if (running == m_timer.isActive()) {
+        return;
+    }
+    if (running) {
+        m_lastTickNanoseconds = m_clock.nsecsElapsed();
+        m_timer.start();
+    } else {
+        m_timer.stop();
+    }
+    emit runningChanged(running);
+    emit stateChanged();
+}
+
+void CubeWidget::setWireframe(const bool wireframe)
+{
+    if (m_wireframe == wireframe) {
+        return;
+    }
+    m_wireframe = wireframe;
+    emit wireframeChanged(wireframe);
+    emit stateChanged();
+    update();
+}
+
+void CubeWidget::installDispatchStep(CubeStepFunctionV1 function, const QString& patchName)
+{
+    if (function == nullptr) {
+        function = &cube_step_builtin_v1;
+    }
+    m_stepFunction.store(function, std::memory_order_release);
+    setActivePatchLabel(patchName.isEmpty() ? QStringLiteral("dispatch patch") : patchName);
+}
+
+void CubeWidget::resetDispatchStep()
+{
+    m_stepFunction.store(&cube_step_builtin_v1, std::memory_order_release);
+    setActivePatchLabel(QStringLiteral("builtin"));
+}
+
+void CubeWidget::setActivePatchLabel(const QString& label)
+{
+    if (m_activePatch == label) {
+        return;
+    }
+    m_activePatch = label;
+    emit activePatchChanged(m_activePatch);
+    emit stateChanged();
+}
+
+void CubeWidget::enqueueRenderCallback(std::function<void()> callback)
+{
+    if (!callback) {
+        return;
+    }
+    {
+        QMutexLocker lock(&m_renderQueueMutex);
+        m_renderQueue.emplace_back(std::move(callback));
+    }
+
+    if (QThread::currentThread() == thread()) {
+        update();
+    } else {
+        QMetaObject::invokeMethod(this, &CubeWidget::update, Qt::QueuedConnection);
+    }
+}
+
+bool CubeWidget::captureFramebuffer(const QString& path, QString* error)
+{
+    if (!isValid()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("the OpenGL widget does not yet have a valid context");
+        }
+        return false;
+    }
+
+    const QImage image = grabFramebuffer();
+    if (image.isNull()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("grabFramebuffer returned a null image");
+        }
+        return false;
+    }
+    if (!image.save(path, "PNG")) {
+        if (error != nullptr) {
+            *error = QStringLiteral("could not save PNG to %1").arg(path);
+        }
+        return false;
+    }
+    return true;
+}
+
+void CubeWidget::resetCube()
+{
+    m_angleDegrees = 24.0F;
+    m_angularVelocity = 75.0F;
+    m_tint = QVector3D(1.0F, 1.0F, 1.0F);
+    m_scale = 1.0F;
+    emit stateChanged();
+    update();
+}
+
+void CubeWidget::increaseSpeed()
+{
+    setAngularVelocity(m_angularVelocity * 1.35F);
+}
+
+void CubeWidget::decreaseSpeed()
+{
+    setAngularVelocity(m_angularVelocity / 1.35F);
+}
+
+void CubeWidget::toggleRunning()
+{
+    setRunning(!isRunning());
+}
+
+void CubeWidget::initializeGL()
+{
+    initializeOpenGLFunctions();
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glClearColor(0.055F, 0.065F, 0.085F, 1.0F);
+
+    initializeShaders();
+    initializeGeometry();
+}
+
+void CubeWidget::resizeGL(const int width, const int height)
+{
+    m_projection.setToIdentity();
+    const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0F;
+    m_projection.perspective(45.0F, aspect, 0.1F, 100.0F);
+}
+
+void CubeWidget::paintGL()
+{
+    std::vector<std::function<void()>> callbacks;
+    {
+        QMutexLocker lock(&m_renderQueueMutex);
+        callbacks.swap(m_renderQueue);
+    }
+    for (auto& callback : callbacks) {
+        callback();
+    }
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glPolygonMode(GL_FRONT_AND_BACK, m_wireframe ? GL_LINE : GL_FILL);
+
+    QMatrix4x4 view;
+    view.translate(0.0F, 0.0F, -5.4F);
+
+    QMatrix4x4 model;
+    model.rotate(m_angleDegrees, QVector3D(0.72F, 1.0F, 0.31F));
+    model.scale(m_scale);
+
+    m_program.bind();
+    m_program.setUniformValue("mvp", m_projection * view * model);
+    m_program.setUniformValue("tint", m_tint);
+    m_vertexArray.bind();
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    m_vertexArray.release();
+    m_program.release();
+
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    emit frameRendered(m_frameIndex, m_angleDegrees);
+}
+
+void CubeWidget::advanceAnimation()
+{
+    const qint64 now = m_clock.nsecsElapsed();
+    float delta = static_cast<float>(now - m_lastTickNanoseconds) / 1'000'000'000.0F;
+    m_lastTickNanoseconds = now;
+    delta = std::clamp(delta, 0.0F, 0.1F);
+    m_elapsedSeconds += delta;
+    ++m_frameIndex;
+
+    const CubeStepInputV1 input{
+        m_angleDegrees,
+        m_angularVelocity,
+        delta,
+        m_elapsedSeconds,
+        m_frameIndex,
+    };
+    const CubeStepFunctionV1 step = m_stepFunction.load(std::memory_order_acquire);
+    const CubeStepOutputV1 output = step != nullptr
+        ? step(&input)
+        : cube_step_builtin_v1(&input);
+
+    m_angleDegrees = normalizeAngle(output.angle_degrees);
+    m_tint = QVector3D(output.tint_r, output.tint_g, output.tint_b);
+    m_scale = std::clamp(output.scale, 0.05F, 8.0F);
+
+    // Do not emit a high-frequency generic stateChanged signal every frame. The
+    // frameRendered event is the explicit high-rate channel and the agent
+    // throttles its publication by default.
+    update();
+}
+
+void CubeWidget::initializeGeometry()
+{
+    m_vertexArray.create();
+    m_vertexArray.bind();
+
+    m_vertexBuffer.create();
+    m_vertexBuffer.bind();
+    m_vertexBuffer.setUsagePattern(QOpenGLBuffer::StaticDraw);
+    m_vertexBuffer.allocate(cubeVertices.data(),
+                            static_cast<int>(cubeVertices.size() * sizeof(float)));
+
+    m_program.bind();
+    m_program.enableAttributeArray(0);
+    m_program.setAttributeBuffer(0, GL_FLOAT, 0, 3, 6 * sizeof(float));
+    m_program.enableAttributeArray(1);
+    m_program.setAttributeBuffer(1, GL_FLOAT, 3 * sizeof(float), 3, 6 * sizeof(float));
+    m_program.release();
+
+    m_vertexBuffer.release();
+    m_vertexArray.release();
+}
+
+void CubeWidget::initializeShaders()
+{
+    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)) {
+        qFatal("vertex shader compilation failed: %s", qPrintable(m_program.log()));
+    }
+    if (!m_program.addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader)) {
+        qFatal("fragment shader compilation failed: %s", qPrintable(m_program.log()));
+    }
+    if (!m_program.link()) {
+        qFatal("shader link failed: %s", qPrintable(m_program.log()));
+    }
+}
+
+float CubeWidget::normalizeAngle(float angle) noexcept
+{
+    angle = std::fmod(angle, 360.0F);
+    return angle < 0.0F ? angle + 360.0F : angle;
+}
