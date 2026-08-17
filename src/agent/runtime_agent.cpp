@@ -216,6 +216,15 @@ RuntimeAgent::~RuntimeAgent()
         disconnect(m_window, nullptr, this, nullptr);
     }
 
+    // The client sockets are children of m_server, so ~QLocalServer deletes
+    // them, and that runs after m_clients has already been destroyed. Each
+    // socket aborts on the way out and emits disconnected, which would reach
+    // removeClient. Cut those connections while every member is still alive.
+    for (auto iterator = m_clients.cbegin(); iterator != m_clients.cend(); ++iterator) {
+        disconnect(iterator.key(), nullptr, this, nullptr);
+    }
+    m_clients.clear();
+
     const bool ownedEndpoint = m_server.isListening();
     m_server.close();
     if (ownedEndpoint) {
