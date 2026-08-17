@@ -10,6 +10,7 @@
 #include <QLocalServer>
 #include <QObject>
 #include <QPointer>
+#include <QQueue>
 #include <QStringList>
 
 #include <memory>
@@ -77,11 +78,14 @@ private:
     [[nodiscard]] QJsonArray commandList() const;
 
     void runSnippet(ModuleManager::LoadedModule* module,
+                    quint64 operationId,
                     const QString& executor,
                     QObject* target,
                     const QJsonValue& request);
     void executeSnippet(ModuleManager::LoadedModule* module,
                         const std::shared_ptr<SnippetInvocation>& invocation);
+    void finishSnippet(ModuleManager::LoadedModule* module,
+                       const std::shared_ptr<SnippetInvocation>& invocation);
 
     [[nodiscard]] QJsonValue parseSnippetResult(const QByteArray& json) const;
     [[nodiscard]] bool clientWantsEvent(const ClientState& state,
@@ -106,6 +110,9 @@ private:
     ModuleManager m_modules;
     QElapsedTimer m_monotonicClock;
     quint64 m_eventSequence = 0;
-    quint64 m_nextOperationId = 1;
+    QQueue<QJsonObject> m_eventHistory;
+    // Keep native snippet operation IDs disjoint from MainWindow's small demo
+    // job IDs while retaining a plain uint64 wire representation.
+    quint64 m_nextOperationId = (quint64{1} << 63);
     bool m_unsafeEnabled = false;
 };

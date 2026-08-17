@@ -7,9 +7,11 @@
 #include <QFileDialog>
 #include <QFuture>
 #include <QLabel>
+#include <QKeySequence>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QProgressBar>
 #include <QStatusBar>
 #include <QThread>

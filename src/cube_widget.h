@@ -18,14 +18,19 @@
 #include <functional>
 #include <vector>
 
+class QOpenGLDebugLogger;
+
 class CubeWidget final : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
     Q_PROPERTY(float angleDegrees READ angleDegrees WRITE setAngleDegrees NOTIFY stateChanged)
     Q_PROPERTY(float angularVelocity READ angularVelocity WRITE setAngularVelocity NOTIFY stateChanged)
     Q_PROPERTY(bool running READ isRunning WRITE setRunning NOTIFY runningChanged)
     Q_PROPERTY(bool wireframe READ isWireframe WRITE setWireframe NOTIFY wireframeChanged)
-    Q_PROPERTY(qulonglong frameIndex READ frameIndex NOTIFY frameRendered)
+    Q_PROPERTY(qulonglong frameIndex READ frameIndex NOTIFY frameIndexChanged)
     Q_PROPERTY(QString activePatch READ activePatch NOTIFY activePatchChanged)
+    Q_PROPERTY(QString glVendor READ glVendor NOTIFY glInitialized)
+    Q_PROPERTY(QString glRenderer READ glRenderer NOTIFY glInitialized)
+    Q_PROPERTY(QString glVersion READ glVersion NOTIFY glInitialized)
 
 public:
     explicit CubeWidget(QWidget* parent = nullptr);
@@ -37,6 +42,9 @@ public:
     [[nodiscard]] bool isWireframe() const noexcept { return m_wireframe; }
     [[nodiscard]] qulonglong frameIndex() const noexcept { return m_frameIndex; }
     [[nodiscard]] QString activePatch() const { return m_activePatch; }
+    [[nodiscard]] QString glVendor() const { return m_glVendor; }
+    [[nodiscard]] QString glRenderer() const { return m_glRenderer; }
+    [[nodiscard]] QString glVersion() const { return m_glVersion; }
 
     void setAngleDegrees(float angle);
     void setAngularVelocity(float degreesPerSecond);
@@ -66,6 +74,13 @@ signals:
     void runningChanged(bool running);
     void wireframeChanged(bool wireframe);
     void activePatchChanged(const QString& name);
+    void glInitialized();
+    void glMessage(const QString& message,
+                   int severity,
+                   int source,
+                   int type,
+                   quint32 id);
+    void frameIndexChanged(qulonglong frameIndex);
     void frameRendered(qulonglong frameIndex, float angleDegrees);
 
 protected:
@@ -99,9 +114,13 @@ private:
     std::atomic<CubeStepFunctionV1> m_stepFunction{&cube_step_builtin_v1};
 
     QOpenGLShaderProgram m_program;
+    QOpenGLDebugLogger* m_debugLogger = nullptr;
     QOpenGLBuffer m_vertexBuffer{QOpenGLBuffer::VertexBuffer};
     QOpenGLVertexArrayObject m_vertexArray;
     QMatrix4x4 m_projection;
+    QString m_glVendor;
+    QString m_glRenderer;
+    QString m_glVersion;
 
     QMutex m_renderQueueMutex;
     std::vector<std::function<void()>> m_renderQueue;

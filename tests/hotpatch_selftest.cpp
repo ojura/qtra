@@ -1,12 +1,16 @@
 #include "agent/entry_hotpatch.h"
 #include "demo/cube_step_abi.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <dlfcn.h>
 #include <iostream>
 #include <string>
 
 namespace {
+
+constexpr std::array<std::uint8_t, 4> endbr64{0xF3U, 0x0FU, 0x1EU, 0xFAU};
 
 bool approximatelyEqual(float a, float b)
 {
@@ -52,6 +56,40 @@ int main(int argc, char** argv)
         return 6;
     }
 
+    // Refuse to overwrite a normal/unknown prologue. The demo patcher only
+    // accepts the all-NOP area emitted by patchable_function_entry(16, 0).
+    std::array<std::uint8_t, 16> invalidEntry{};
+    invalidEntry.fill(0xCCU);
+    runtime_agent::EntryHotpatch rejectedPatch;
+    std::string rejectedError;
+    if (rejectedPatch.apply(invalidEntry.data(),
+                            reinterpret_cast<void*>(patch->step),
+                            invalidEntry.size(),
+                            rejectedError)
+        || rejectedError.empty()) {
+        std::cerr << "non-NOP entry was not rejected\n";
+        return 7;
+    }
+
+    // A target prepared for Intel CET/IBT may only jump indirectly to another
+    // valid ENDBR64 landing pad. This test uses data buffers so the rejection
+    // path is exercised in every build, not only when -fcf-protection is on.
+    std::array<std::uint8_t, 20> cetEntry{};
+    std::copy(endbr64.begin(), endbr64.end(), cetEntry.begin());
+    std::fill(cetEntry.begin() + static_cast<std::ptrdiff_t>(endbr64.size()),
+              cetEntry.end(), 0x90U);
+    std::array<std::uint8_t, 4> nonCetReplacement{0x90U, 0x90U, 0x90U, 0x90U};
+    runtime_agent::EntryHotpatch rejectedCetPatch;
+    rejectedError.clear();
+    if (rejectedCetPatch.apply(cetEntry.data(),
+                               nonCetReplacement.data(),
+                               16,
+                               rejectedError)
+        || rejectedError.empty()) {
+        std::cerr << "CET target accepted a replacement without ENDBR64\n";
+        return 8;
+    }
+
     runtime_agent::EntryHotpatch hotpatch;
     std::string error;
     if (!hotpatch.apply(reinterpret_cast<void*>(&cube_step_builtin_v1),
@@ -59,26 +97,37 @@ int main(int argc, char** argv)
                         16,
                         error)) {
         std::cerr << "apply failed: " << error << '\n';
-        return 7;
+        return 9;
+    }
+
+    const auto* targetBytes = reinterpret_cast<const std::uint8_t*>(
+        reinterpret_cast<void*>(&cube_step_builtin_v1));
+    const bool cetTarget = std::equal(endbr64.begin(), endbr64.end(), targetBytes);
+    const auto expectedPatchAddress = reinterpret_cast<std::uintptr_t>(targetBytes)
+        + (cetTarget ? endbr64.size() : 0U);
+    if (reinterpret_cast<std::uintptr_t>(hotpatch.patchAddress()) != expectedPatchAddress
+        || (cetTarget && !std::equal(endbr64.begin(), endbr64.end(), targetBytes))) {
+        std::cerr << "patcher did not preserve/use the expected entry address\n";
+        return 10;
     }
 
     const CubeStepOutputV1 during = cube_step_builtin_v1(&input);
     if (approximatelyEqual(during.angle_degrees, before.angle_degrees)
         && approximatelyEqual(during.scale, before.scale)) {
         std::cerr << "patched function still produced the builtin result\n";
-        return 8;
+        return 11;
     }
 
     if (!hotpatch.rollback(error)) {
         std::cerr << "rollback failed: " << error << '\n';
-        return 9;
+        return 12;
     }
 
     const CubeStepOutputV1 after = cube_step_builtin_v1(&input);
     if (!approximatelyEqual(after.angle_degrees, before.angle_degrees)
         || !approximatelyEqual(after.scale, before.scale)) {
         std::cerr << "rollback did not restore the builtin function\n";
-        return 10;
+        return 13;
     }
 
     std::cout << "PASS: " << patch->name_utf8

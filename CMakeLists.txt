@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.21)
 
 project(QtRuntimeAgentDemo VERSION 0.1.0 LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
@@ -9,6 +11,17 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BUILD_QT_APP "Build the Qt 6/OpenGL application and Qt-native snippets" ON)
 option(BUILD_HOTPATCH_SELFTEST "Build the standalone raw hotpatch self-test" ON)
+option(ENABLE_CET "Build x86-64 code with Intel CET/IBT landing pads" OFF)
+
+if(ENABLE_CET)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
+       AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        add_compile_options(-fcf-protection=full)
+        add_link_options(-fcf-protection=full)
+    else()
+        message(FATAL_ERROR "ENABLE_CET currently requires GCC/Clang on x86-64")
+    endif()
+endif()
 
 add_library(cube_patch_wobble MODULE patches/wobble_patch.cpp)
 target_include_directories(cube_patch_wobble PRIVATE include)
@@ -19,7 +32,6 @@ target_include_directories(cube_patch_reverse PRIVATE include)
 set_target_properties(cube_patch_reverse PROPERTIES PREFIX "" OUTPUT_NAME "cube_patch_reverse")
 
 if(BUILD_HOTPATCH_SELFTEST)
-    enable_testing()
     add_executable(hotpatch_selftest
         tests/hotpatch_selftest.cpp
         src/cube_step.cpp
@@ -27,9 +39,14 @@ if(BUILD_HOTPATCH_SELFTEST)
     )
     target_include_directories(hotpatch_selftest PRIVATE include src)
     target_link_libraries(hotpatch_selftest PRIVATE ${CMAKE_DL_LIBS})
-    target_compile_options(hotpatch_selftest PRIVATE -O2 -Wall -Wextra -Wpedantic)
-    add_test(NAME raw-entry-hotpatch
+    target_compile_options(hotpatch_selftest PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<CONFIG:Release>:-O3>
+    )
+    add_test(NAME raw-entry-hotpatch-wobble
              COMMAND hotpatch_selftest $<TARGET_FILE:cube_patch_wobble>)
+    add_test(NAME raw-entry-hotpatch-reverse
+             COMMAND hotpatch_selftest $<TARGET_FILE:cube_patch_reverse>)
 endif()
 
 if(BUILD_QT_APP)
@@ -68,6 +85,7 @@ if(BUILD_QT_APP)
     )
     target_compile_options(qt_runtime_cube PRIVATE
         -Wall -Wextra -Wpedantic
+        $<$<CONFIG:Release>:-O3>
     )
     # Make application-owned C++ symbols available to project-native snippets.
     # The stable Host API remains the preferred route; this is the sharp-edged one.
@@ -83,15 +101,36 @@ if(BUILD_QT_APP)
 
     add_library(agent_snippet_inspect MODULE snippets/inspect_cube.cpp)
     target_include_directories(agent_snippet_inspect PRIVATE include src)
-    target_link_libraries(agent_snippet_inspect PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+    target_link_libraries(agent_snippet_inspect PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
     target_compile_options(agent_snippet_inspect PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_inspect PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_inspect")
 
     add_library(agent_snippet_observer MODULE snippets/install_observer.cpp)
     target_include_directories(agent_snippet_observer PRIVATE include src)
-    target_link_libraries(agent_snippet_observer PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+    target_link_libraries(agent_snippet_observer PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
     target_compile_options(agent_snippet_observer PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_observer PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_observer")
+
+    add_library(agent_snippet_render_probe MODULE snippets/render_probe.cpp)
+    target_include_directories(agent_snippet_render_probe PRIVATE include src)
+    target_link_libraries(agent_snippet_render_probe PRIVATE
+        Qt6::Core Qt6::Gui Qt6::OpenGL Qt6::OpenGLWidgets)
+    target_compile_options(agent_snippet_render_probe PRIVATE -fno-access-control)
+    set_target_properties(agent_snippet_render_probe PROPERTIES
+        PREFIX "" OUTPUT_NAME "agent_snippet_render_probe")
+endif()
+
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME python-tool-tests
+                 COMMAND ${Python3_EXECUTABLE} -m unittest discover
+                         -s ${CMAKE_SOURCE_DIR}/tests -p "test_*.py" -v)
+        set_tests_properties(python-tool-tests PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${CMAKE_SOURCE_DIR}/tools")
+    endif()
 endif()

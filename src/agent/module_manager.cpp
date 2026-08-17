@@ -2,7 +2,9 @@
 
 #include "cube_widget.h"
 
+#include <QFile>
 #include <QFileInfo>
+#include <QThread>
 
 #include <dlfcn.h>
 
@@ -19,6 +21,13 @@ QString dynamicLoaderError(const QString& prefix)
 QString pointerString(const void* pointer)
 {
     return QStringLiteral("0x%1").arg(reinterpret_cast<quintptr>(pointer), 0, 16);
+}
+
+void closeFailedModule(void* handle)
+{
+    if (handle != nullptr) {
+        (void)::dlclose(handle);
+    }
 }
 
 } // namespace
@@ -39,6 +48,10 @@ ModuleManager::~ModuleManager()
 ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QString& error)
 {
     const QString absolutePath = QFileInfo(path).absoluteFilePath();
+    if (path.isEmpty() || !QFileInfo(absolutePath).isFile()) {
+        error = QStringLiteral("snippet module is not a regular file: %1").arg(absolutePath);
+        return nullptr;
+    }
     const QByteArray encodedPath = QFile::encodeName(absolutePath);
     ::dlerror();
     void* handle = ::dlopen(encodedPath.constData(), RTLD_NOW | RTLD_LOCAL);
@@ -52,6 +65,7 @@ ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QSt
         ::dlsym(handle, "runtime_agent_snippet_init_v1"));
     if (init == nullptr) {
         error = dynamicLoaderError(QStringLiteral("snippet init symbol not found"));
+        closeFailedModule(handle);
         return nullptr;
     }
 
@@ -61,6 +75,7 @@ ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QSt
         || descriptor->struct_size < sizeof(RuntimeAgentSnippetV1)
         || descriptor->run == nullptr) {
         error = QStringLiteral("invalid RuntimeAgentSnippetV1 descriptor");
+        closeFailedModule(handle);
         return nullptr;
     }
 
@@ -78,6 +93,10 @@ ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QSt
 ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, QString& error)
 {
     const QString absolutePath = QFileInfo(path).absoluteFilePath();
+    if (path.isEmpty() || !QFileInfo(absolutePath).isFile()) {
+        error = QStringLiteral("cube patch module is not a regular file: %1").arg(absolutePath);
+        return nullptr;
+    }
     const QByteArray encodedPath = QFile::encodeName(absolutePath);
     ::dlerror();
     void* handle = ::dlopen(encodedPath.constData(), RTLD_NOW | RTLD_LOCAL);
@@ -91,6 +110,7 @@ ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, Q
         ::dlsym(handle, "cube_step_patch_init_v1"));
     if (init == nullptr) {
         error = dynamicLoaderError(QStringLiteral("cube patch init symbol not found"));
+        closeFailedModule(handle);
         return nullptr;
     }
 
@@ -100,6 +120,7 @@ ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, Q
         || descriptor->struct_size < sizeof(CubeStepPatchV1)
         || descriptor->step == nullptr) {
         error = QStringLiteral("invalid CubeStepPatchV1 descriptor");
+        closeFailedModule(handle);
         return nullptr;
     }
 
@@ -141,10 +162,10 @@ bool ModuleManager::activateDispatchPatch(const quint64 id, QString& error)
         return false;
     }
 
+    m_activeDispatchModule = id;
     m_cube->installDispatchStep(
         loaded->cubePatch->step,
         QStringLiteral("dispatch: %1").arg(loaded->name));
-    m_activeDispatchModule = id;
     return true;
 }
 
@@ -163,6 +184,11 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
     error = QStringLiteral("entry patch mode is implemented only for Linux/x86-64");
     return false;
 #else
+    if (QThread::currentThread() != m_cube->thread()) {
+        error = QStringLiteral("entry patches must be installed from the cube's owning thread");
+        return false;
+    }
+
     const bool wasRunning = m_cube->isRunning();
     m_cube->setRunning(false);
     std::string nativeError;
@@ -206,6 +232,9 @@ QJsonObject ModuleManager::patchStatus() const
         {QStringLiteral("mode"), mode},
         {QStringLiteral("moduleId"), moduleId == 0 ? QJsonValue() : QJsonValue(QString::number(moduleId))},
         {QStringLiteral("target"), pointerString(reinterpret_cast<void*>(&cube_step_builtin_v1))},
+        {QStringLiteral("patchAddress"), m_entryHotpatch.active()
+            ? QJsonValue(pointerString(m_entryHotpatch.patchAddress()))
+            : QJsonValue()},
         {QStringLiteral("reservedEntryBytes"), 16},
         {QStringLiteral("entryPatchActive"), m_entryHotpatch.active()},
     };

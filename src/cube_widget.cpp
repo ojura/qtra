@@ -5,6 +5,8 @@
 #include <QMetaObject>
 #include <QMutexLocker>
 #include <QOpenGLContext>
+#include <QOpenGLDebugLogger>
+#include <QOpenGLDebugMessage>
 #include <QThread>
 
 #include <algorithm>
@@ -108,10 +110,17 @@ CubeWidget::CubeWidget(QWidget* parent)
 
 CubeWidget::~CubeWidget()
 {
-    makeCurrent();
-    m_vertexArray.destroy();
-    m_vertexBuffer.destroy();
-    doneCurrent();
+    if (context() != nullptr) {
+        makeCurrent();
+        if (m_debugLogger != nullptr) {
+            m_debugLogger->stopLogging();
+            delete m_debugLogger;
+            m_debugLogger = nullptr;
+        }
+        m_vertexArray.destroy();
+        m_vertexBuffer.destroy();
+        doneCurrent();
+    }
 }
 
 void CubeWidget::setAngleDegrees(const float angle)
@@ -199,7 +208,7 @@ void CubeWidget::enqueueRenderCallback(std::function<void()> callback)
     if (QThread::currentThread() == thread()) {
         update();
     } else {
-        QMetaObject::invokeMethod(this, &CubeWidget::update, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
     }
 }
 
@@ -256,6 +265,32 @@ void CubeWidget::toggleRunning()
 void CubeWidget::initializeGL()
 {
     initializeOpenGLFunctions();
+    const auto glString = [this](const GLenum name) {
+        const GLubyte* value = glGetString(name);
+        return QString::fromLatin1(
+            value != nullptr ? reinterpret_cast<const char*>(value) : "unknown");
+    };
+    m_glVendor = glString(GL_VENDOR);
+    m_glRenderer = glString(GL_RENDERER);
+    m_glVersion = glString(GL_VERSION);
+
+    m_debugLogger = new QOpenGLDebugLogger(this);
+    if (m_debugLogger->initialize()) {
+        connect(m_debugLogger, &QOpenGLDebugLogger::messageLogged,
+                this, [this](const QOpenGLDebugMessage& message) {
+                    emit glMessage(message.message(),
+                                   static_cast<int>(message.severity()),
+                                   static_cast<int>(message.source()),
+                                   static_cast<int>(message.type()),
+                                   message.id());
+                });
+        m_debugLogger->startLogging(QOpenGLDebugLogger::AsynchronousLogging);
+        m_debugLogger->enableMessages();
+    } else {
+        delete m_debugLogger;
+        m_debugLogger = nullptr;
+    }
+
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
@@ -263,6 +298,7 @@ void CubeWidget::initializeGL()
 
     initializeShaders();
     initializeGeometry();
+    emit glInitialized();
 }
 
 void CubeWidget::resizeGL(const int width, const int height)
@@ -302,6 +338,7 @@ void CubeWidget::paintGL()
     m_program.release();
 
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    emit frameIndexChanged(m_frameIndex);
     emit frameRendered(m_frameIndex, m_angleDegrees);
 }
 

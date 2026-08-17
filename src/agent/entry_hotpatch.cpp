@@ -1,5 +1,6 @@
 #include "agent/entry_hotpatch.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -36,6 +37,7 @@ bool EntryHotpatch::apply(void* target,
                           const std::size_t reserved_bytes,
                           std::string& error)
 {
+    error.clear();
 #if !defined(__linux__) || !defined(__x86_64__)
     (void)target;
     (void)replacement;
@@ -64,10 +66,33 @@ bool EntryHotpatch::apply(void* target,
         return false;
     }
 
+    constexpr std::uint8_t endbr64[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
+    auto* targetBytes = static_cast<std::uint8_t*>(target);
+    std::size_t patchOffset = 0;
+    if (std::memcmp(targetBytes, endbr64, sizeof(endbr64)) == 0) {
+        // Preserve Intel CET/IBT's valid indirect-branch landing pad. Calls
+        // land on ENDBR64 and then fall through into the replacement jump.
+        patchOffset = sizeof(endbr64);
+        if (std::memcmp(replacement, endbr64, sizeof(endbr64)) != 0) {
+            error = "CET/IBT target requires a replacement beginning with ENDBR64";
+            return false;
+        }
+    }
+
+    auto* patchAddress = targetBytes + patchOffset;
+    std::vector<std::uint8_t> original(reserved_bytes);
+    std::memcpy(original.data(), patchAddress, reserved_bytes);
+    if (!std::all_of(original.begin(), original.end(), [](const std::uint8_t byte) {
+            return byte == 0x90U;
+        })) {
+        error = "target entry is not the expected all-NOP patchable_function_entry area";
+        return false;
+    }
+
     m_target = target;
+    m_patchAddress = patchAddress;
     m_replacement = replacement;
-    m_original.resize(reserved_bytes);
-    std::memcpy(m_original.data(), target, reserved_bytes);
+    m_original = std::move(original);
 
     std::vector<std::uint8_t> patch(reserved_bytes, 0x90U);
     patch[0] = 0x49U;
@@ -81,6 +106,7 @@ bool EntryHotpatch::apply(void* target,
 
     if (!writeBytes(patch.data(), patch.size(), error)) {
         m_target = nullptr;
+        m_patchAddress = nullptr;
         m_replacement = nullptr;
         m_original.clear();
         return false;
@@ -91,6 +117,7 @@ bool EntryHotpatch::apply(void* target,
 
 bool EntryHotpatch::rollback(std::string& error)
 {
+    error.clear();
     if (!active()) {
         error = "no entry patch is active";
         return false;
@@ -101,6 +128,7 @@ bool EntryHotpatch::rollback(std::string& error)
     }
 
     m_target = nullptr;
+    m_patchAddress = nullptr;
     m_replacement = nullptr;
     m_original.clear();
     return true;
@@ -116,7 +144,7 @@ bool EntryHotpatch::writeBytes(const std::uint8_t* bytes,
     error = "unsupported platform";
     return false;
 #else
-    if (m_target == nullptr || bytes == nullptr || size == 0) {
+    if (m_target == nullptr || m_patchAddress == nullptr || bytes == nullptr || size == 0) {
         error = "invalid write request";
         return false;
     }
@@ -127,7 +155,7 @@ bool EntryHotpatch::writeBytes(const std::uint8_t* bytes,
         return false;
     }
     const auto page_size = static_cast<std::uintptr_t>(page_size_long);
-    const auto target_address = reinterpret_cast<std::uintptr_t>(m_target);
+    const auto target_address = reinterpret_cast<std::uintptr_t>(m_patchAddress);
     const auto page_begin = target_address & ~(page_size - 1U);
 
     if (size > std::numeric_limits<std::uintptr_t>::max() - target_address) {
@@ -144,9 +172,9 @@ bool EntryHotpatch::writeBytes(const std::uint8_t* bytes,
         return false;
     }
 
-    std::memcpy(m_target, bytes, size);
-    __builtin___clear_cache(static_cast<char*>(m_target),
-                            static_cast<char*>(m_target) + size);
+    std::memcpy(m_patchAddress, bytes, size);
+    __builtin___clear_cache(static_cast<char*>(m_patchAddress),
+                            static_cast<char*>(m_patchAddress) + size);
 
     // The demo target lives in the executable's text segment. A production
     // patcher should query and restore the exact prior permissions per mapping.

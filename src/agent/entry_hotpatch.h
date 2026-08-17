@@ -8,7 +8,8 @@
 namespace runtime_agent {
 
 // Deliberately small and sharp-edged. This demo implementation is x86-64/Linux
-// only and expects a GCC patchable_function_entry region at the target address.
+// only and expects a GCC patchable_function_entry NOP region at the target
+// address, optionally following a four-byte Intel CET ENDBR64 landing pad.
 class EntryHotpatch final {
 public:
     EntryHotpatch() = default;
@@ -24,6 +25,7 @@ public:
 
     [[nodiscard]] bool active() const noexcept { return m_target != nullptr; }
     [[nodiscard]] void* target() const noexcept { return m_target; }
+    [[nodiscard]] void* patchAddress() const noexcept { return m_patchAddress; }
     [[nodiscard]] void* replacement() const noexcept { return m_replacement; }
     [[nodiscard]] std::size_t reservedBytes() const noexcept { return m_original.size(); }
 
@@ -33,6 +35,7 @@ private:
                                   std::string& error);
 
     void* m_target = nullptr;
+    void* m_patchAddress = nullptr;
     void* m_replacement = nullptr;
     std::vector<std::uint8_t> m_original;
 };

@@ -27,17 +27,103 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "BUILD_QT_APP": "OFF"
       }
+    },
+    {
+      "name": "release-lto",
+      "displayName": "Optimized Qt runtime-agent demo with LTO",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release-lto",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "BUILD_QT_APP": "ON"
+      }
+    },
+    {
+      "name": "release-cet",
+      "displayName": "Optimized Qt runtime-agent demo with Intel CET",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release-cet",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "ENABLE_CET": "ON",
+        "BUILD_QT_APP": "ON"
+      }
+    },
+    {
+      "name": "selftest-lto",
+      "displayName": "Hotpatch self-test with GCC LTO",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/selftest-lto",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "BUILD_QT_APP": "OFF"
+      }
+    },
+    {
+      "name": "selftest-cet",
+      "displayName": "Hotpatch self-test with Intel CET/IBT",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/selftest-cet",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "ENABLE_CET": "ON",
+        "BUILD_QT_APP": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "release", "configurePreset": "release" },
-    { "name": "selftest-only", "configurePreset": "selftest-only" }
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "selftest-only",
+      "configurePreset": "selftest-only"
+    },
+    {
+      "name": "release-lto",
+      "configurePreset": "release-lto"
+    },
+    {
+      "name": "selftest-lto",
+      "configurePreset": "selftest-lto"
+    },
+    {
+      "name": "selftest-cet",
+      "configurePreset": "selftest-cet"
+    },
+    {
+      "name": "release-cet",
+      "configurePreset": "release-cet"
+    }
   ],
   "testPresets": [
     {
       "name": "selftest-only",
       "configurePreset": "selftest-only",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "selftest-lto",
+      "configurePreset": "selftest-lto",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "selftest-cet",
+      "configurePreset": "selftest-cet",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

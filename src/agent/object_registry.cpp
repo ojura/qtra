@@ -122,9 +122,11 @@ QJsonObject ObjectRegistry::describe(QObject* object, const bool includeValues)
     QJsonArray properties;
     for (int index = 0; index < metaObject->propertyCount(); ++index) {
         const QMetaProperty property = metaObject->property(index);
+        const char* propertyType = property.typeName();
         QJsonObject item{
             {QStringLiteral("name"), QString::fromLatin1(property.name())},
-            {QStringLiteral("type"), QString::fromLatin1(property.typeName())},
+            {QStringLiteral("type"), QString::fromLatin1(
+                propertyType != nullptr ? propertyType : "")},
             {QStringLiteral("readable"), property.isReadable()},
             {QStringLiteral("writable"), property.isWritable()},
             {QStringLiteral("resettable"), property.isResettable()},
@@ -141,6 +143,7 @@ QJsonObject ObjectRegistry::describe(QObject* object, const bool includeValues)
     QJsonArray methods;
     for (int index = 0; index < metaObject->methodCount(); ++index) {
         const QMetaMethod method = metaObject->method(index);
+        const char* returnType = method.typeName();
         QJsonArray parameterTypes;
         for (const QByteArray& type : method.parameterTypes()) {
             parameterTypes.append(QString::fromLatin1(type));
@@ -149,7 +152,8 @@ QJsonObject ObjectRegistry::describe(QObject* object, const bool includeValues)
             {QStringLiteral("index"), index},
             {QStringLiteral("name"), QString::fromLatin1(method.name())},
             {QStringLiteral("signature"), QString::fromLatin1(method.methodSignature())},
-            {QStringLiteral("returnType"), QString::fromLatin1(method.typeName())},
+            {QStringLiteral("returnType"), QString::fromLatin1(
+                returnType != nullptr ? returnType : "")},
             {QStringLiteral("parameterTypes"), parameterTypes},
             {QStringLiteral("kind"), methodTypeName(method.methodType())},
             {QStringLiteral("access"), accessName(method.access())},
