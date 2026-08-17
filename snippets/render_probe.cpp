@@ -5,13 +5,16 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QOpenGLContext>
-#include <QOpenGLFunctions>
+#include <QOpenGLFunctions_4_5_Core>
+#include <QOpenGLVersionFunctionsFactory>
 #include <QSurfaceFormat>
 #include <QThread>
 
 namespace {
 
-QString glString(QOpenGLFunctions* functions, const GLenum name)
+using GLFunctions = QOpenGLFunctions_4_5_Core;
+
+QString glString(GLFunctions* functions, const GLenum name)
 {
     const GLubyte* value = functions->glGetString(name);
     return value != nullptr
@@ -32,9 +35,13 @@ void run(const RuntimeAgentHostV1* host)
         return;
     }
 
-    QOpenGLFunctions* functions = context->functions();
+    // The versioned class reports resolution failure, unlike the unversioned
+    // QOpenGLFunctions whose initializeOpenGLFunctions() returns void. Requires
+    // the current context to be at least 4.5 core.
+    auto* functions = QOpenGLVersionFunctionsFactory::get<GLFunctions>(context);
     if (functions == nullptr || !functions->initializeOpenGLFunctions()) {
-        host->fail(host->invocation_context, "OpenGL functions are unavailable");
+        host->fail(host->invocation_context,
+                   "OpenGL 4.5 core functions are unavailable");
         return;
     }
 

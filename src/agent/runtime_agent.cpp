@@ -825,7 +825,7 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
         data.truncate(static_cast<qsizetype>(transferred));
         sendSuccess(socket, requestId, QJsonObject{
             {QStringLiteral("address"), pointerString(reinterpret_cast<void*>(address))},
-            {QStringLiteral("bytesRead"), transferred},
+            {QStringLiteral("bytesRead"), static_cast<qint64>(transferred)},
             {QStringLiteral("base64"), QString::fromLatin1(data.toBase64())},
         });
         return;
@@ -856,7 +856,7 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
         }
         sendSuccess(socket, requestId, QJsonObject{
             {QStringLiteral("address"), pointerString(reinterpret_cast<void*>(address))},
-            {QStringLiteral("bytesWritten"), transferred},
+            {QStringLiteral("bytesWritten"), static_cast<qint64>(transferred)},
         });
         return;
     }
