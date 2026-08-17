@@ -122,6 +122,34 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_render_probe PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_render_probe PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_render_probe")
+
+    # Scene modifications. Each one installs a persistent draw hook on
+    # CubeWidget::frameRendered and accepts {"restore": true} to take itself
+    # back off. They read private CubeWidget state for the frame's angle,
+    # scale, tint, elapsed time and projection, hence -fno-access-control.
+    add_library(agent_snippet_orbit_sphere MODULE snippets/orbit_sphere.cpp)
+    target_include_directories(agent_snippet_orbit_sphere PRIVATE include src)
+    target_link_libraries(agent_snippet_orbit_sphere PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+    target_compile_options(agent_snippet_orbit_sphere PRIVATE -fno-access-control)
+    set_target_properties(agent_snippet_orbit_sphere PROPERTIES
+        PREFIX "" OUTPUT_NAME "agent_snippet_orbit_sphere")
+
+    add_library(agent_snippet_catmull_clark MODULE snippets/catmull_clark_cube.cpp)
+    target_include_directories(agent_snippet_catmull_clark PRIVATE include src)
+    target_link_libraries(agent_snippet_catmull_clark PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+    target_compile_options(agent_snippet_catmull_clark PRIVATE -fno-access-control)
+    set_target_properties(agent_snippet_catmull_clark PROPERTIES
+        PREFIX "" OUTPUT_NAME "agent_snippet_catmull_clark")
+
+    add_library(agent_snippet_mobius_ring MODULE snippets/mobius_ring.cpp)
+    target_include_directories(agent_snippet_mobius_ring PRIVATE include src)
+    target_link_libraries(agent_snippet_mobius_ring PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+    target_compile_options(agent_snippet_mobius_ring PRIVATE -fno-access-control)
+    set_target_properties(agent_snippet_mobius_ring PROPERTIES
+        PREFIX "" OUTPUT_NAME "agent_snippet_mobius_ring")
 endif()
 
 if(BUILD_TESTING)

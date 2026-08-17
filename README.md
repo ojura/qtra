@@ -252,6 +252,60 @@ python3 tools/agentctl.py snippet SOME_SNIPPET.so \
   --executor object --target-name cubeView --request '{}'
 ```
 
+### Ready-made scene modifications
+
+Three prebuilt snippets change what the widget draws. Each installs a direct
+connection to `CubeWidget::frameRendered`, which is emitted at the end of
+`paintGL()` while the context is still current and the depth buffer still holds
+the cube, so a hook there gets correct occlusion without touching `paintGL()`.
+All three read private `CubeWidget` state for the frame's angle, scale, tint,
+elapsed time, and projection, and all three are compiled with
+`-fno-access-control`.
+
+```bash
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_orbit_sphere.so --executor render --request '{}'
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_catmull_clark.so --executor render --request '{}'
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_mobius_ring.so --executor render --request '{}'
+```
+
+| module | what it does | parameters |
+| --- | --- | --- |
+| `agent_snippet_orbit_sphere` | shaded sphere on a tilted orbit | none |
+| `agent_snippet_catmull_clark` | replaces the cube with its Catmull-Clark subdivision surface, keeping the six face colors | `level` 0–5, default 2 |
+| `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
+
+Each accepts `{"restore": true}` to take itself back off. The Catmull-Clark one
+has to suppress the widget's own draw, because `paintGL()` calls
+`glDrawArrays(GL_TRIANGLES, 0, 36)` with the count baked into compiled code and
+a subdivided mesh cannot go through that buffer. It keeps the widget's 36
+original vertices, overwrites them with zeros so that draw rasterizes only
+degenerate triangles, and puts them back on restore.
+
+Re-run a loaded module rather than loading it again, so that the module's static
+state is the one that gets updated:
+
+```bash
+python3 tools/agentctl.py call snippet.run \
+  --params '{"moduleId":2,"executor":"render","request":{"level":4}}'
+python3 tools/agentctl.py call snippet.run \
+  --params '{"moduleId":3,"executor":"render","request":{"restore":true}}'
+```
+
+Loading a *different* path gives a separate module with its own copy of that
+state, which for these means a second draw hook rather than a change to the
+first. `tools/jit_snippet.py` writes a fresh path every time, precisely so
+`dlopen()` cannot hand back an already loaded object, so recompiling one of
+these and running it again does stack a second copy.
+
+Loading the *same* path twice is safe. The agent records a new module id per
+load, but `dlopen()` returns the same handle, so both ids address one copy of
+the module's static state and the second run reports that the modification is
+already installed instead of installing another one. Either id works as
+`moduleId`.
+
 ### Project-aware on-demand compilation
 
 Compile only:
@@ -425,7 +479,7 @@ src/agent/object_registry.*     QObject IDs and reflection
 src/agent/module_manager.*      dlopen, snippet, dispatch, entry patch state
 src/agent/entry_hotpatch.*      Linux/x86-64 entry rewriter
 src/cube_widget.*               OpenGL cube and execution seams
-snippets/                       native runtime code examples
+snippets/                       native runtime code examples and scene modifications
 patches/                        function replacement examples
 tools/agentctl.py               protocol client
 tools/compile_snippet.py        compile-database build oracle
