@@ -150,6 +150,14 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_mobius_ring PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_mobius_ring PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_mobius_ring")
+
+    add_library(agent_snippet_pillow_cube MODULE snippets/pillow_cube.cpp)
+    target_include_directories(agent_snippet_pillow_cube PRIVATE include src)
+    target_link_libraries(agent_snippet_pillow_cube PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+    target_compile_options(agent_snippet_pillow_cube PRIVATE -fno-access-control)
+    set_target_properties(agent_snippet_pillow_cube PROPERTIES
+        PREFIX "" OUTPUT_NAME "agent_snippet_pillow_cube")
 endif()
 
 if(BUILD_TESTING)

@@ -12,14 +12,19 @@
 // above 1 are deprecated and clamp to 1 whatever GL_ALIASED_LINE_WIDTH_RANGE
 // claims.
 //
+// Loading the snippet also adds a checkable "Mobius ring" entry to the Cube
+// menu, so the strip can be switched from the GUI as well as over the socket.
+//
 // Request: {"radius","width","tilt","spin","alpha","edgeInset"} to (re)build,
-// {"restore": true} to remove it.
+// {"toggle": true} to flip it, {"restore": true} to remove it.
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "scene_toggle.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSignalBlocker>
 #include <QMatrix4x4>
 #include <QMetaObject>
 #include <QOpenGLBuffer>
@@ -96,6 +101,9 @@ struct Band {
 };
 
 struct RingState {
+    // The context the GL objects below belong to. They exist in no other, so a
+    // frame drawn by a different context must be left alone.
+    QOpenGLContext* owner = nullptr;
     QOpenGLShaderProgram program;
     Band surface;
     Band edge;
@@ -110,6 +118,19 @@ struct RingState {
 
 RingState* ring = nullptr;
 QMetaObject::Connection drawConnection;
+QAction* toggleAction = nullptr;
+
+// The six shape values, kept outside RingState so that switching the strip off
+// and on again brings back the one that was last tuned.
+struct RingParams {
+    float radius = defaultRadius;
+    float width = defaultWidth;
+    float tiltDegrees = defaultTiltDegrees;
+    float spinDegreesPerSecond = defaultSpinDegreesPerSecond;
+    float alpha = defaultAlpha;
+    float edgeInset = defaultEdgeInset;
+};
+RingParams rememberedParams;
 
 // P(u, v) = ((R + v cos(u/2)) cos u, (R + v cos(u/2)) sin u, v sin(u/2))
 QVector3D mobiusPoint(const float radius, const float u, const float v)
@@ -221,7 +242,8 @@ void uploadGeometry(RingState* state)
 
 void drawRing(const CubeWidget* cube)
 {
-    if (ring == nullptr || ring->gl == nullptr || QOpenGLContext::currentContext() == nullptr) {
+    if (ring == nullptr || ring->gl == nullptr
+        || QOpenGLContext::currentContext() != ring->owner) {
         return;
     }
     QOpenGLFunctions_3_3_Core* gl = ring->gl;
@@ -276,28 +298,111 @@ void destroyBand(Band& band)
     band.indices.destroy();
 }
 
-void removeRing(CubeWidget* cube, const RuntimeAgentHostV1* host)
+// Needs the widget's OpenGL context to be current.
+bool installRing(CubeWidget* cube, QString& error)
 {
-    if (ring == nullptr) {
-        const QJsonObject result{
-            {QStringLiteral("removed"), false},
-            {QStringLiteral("note"), QStringLiteral("no ring was installed")},
-        };
-        host->complete_json(host->invocation_context,
-                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
-        return;
+    auto* state = new RingState();
+    state->owner = QOpenGLContext::currentContext();
+    state->gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(state->owner);
+    if (state->gl == nullptr) {
+        delete state;
+        error = QStringLiteral("no OpenGL 3.3 core function table for this context");
+        return false;
+    }
+    state->gl->initializeOpenGLFunctions();
+
+    if (!state->program.addShaderFromSourceCode(QOpenGLShader::Vertex, ringVertexShader)
+        || !state->program.addShaderFromSourceCode(QOpenGLShader::Fragment, ringFragmentShader)
+        || !state->program.link()) {
+        error = state->program.log();
+        delete state;
+        return false;
     }
 
+    state->radius = rememberedParams.radius;
+    state->width = rememberedParams.width;
+    state->tiltDegrees = rememberedParams.tiltDegrees;
+    state->spinDegreesPerSecond = rememberedParams.spinDegreesPerSecond;
+    state->alpha = rememberedParams.alpha;
+    state->edgeInset = rememberedParams.edgeInset;
+
+    state->surface.array.create();
+    state->surface.vertices.create();
+    state->surface.indices.create();
+    state->edge.array.create();
+    state->edge.vertices.create();
+    state->edge.indices.create();
+    uploadGeometry(state);
+
+    ring = state;
+    drawConnection = QObject::connect(
+        cube, &CubeWidget::frameRendered, cube,
+        [cube](qulonglong, float) { drawRing(cube); },
+        Qt::DirectConnection);
+    cube->update();
+    return true;
+}
+
+// Needs the widget's OpenGL context to be current.
+void removeRing(CubeWidget* cube)
+{
     QObject::disconnect(drawConnection);
     destroyBand(ring->surface);
     destroyBand(ring->edge);
     delete ring;
     ring = nullptr;
     cube->update();
+}
 
-    const QJsonObject result{{QStringLiteral("removed"), true}};
-    host->complete_json(host->invocation_context,
-                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+void syncToggleAction()
+{
+    if (toggleAction != nullptr) {
+        const QSignalBlocker blocker(toggleAction);
+        toggleAction->setChecked(ring != nullptr);
+    }
+}
+
+// Returns false only when an install was asked for and failed.
+bool setRingEnabled(CubeWidget* cube, const bool enabled, QString& error)
+{
+    if (enabled == (ring != nullptr)) {
+        return true;
+    }
+    bool installed = true;
+    if (enabled) {
+        installed = installRing(cube, error);
+    } else {
+        removeRing(cube);
+    }
+    syncToggleAction();
+    return installed;
+}
+
+void ensureToggleAction(CubeWidget* cube)
+{
+    if (toggleAction != nullptr) {
+        return;
+    }
+    toggleAction = scene_toggle::install(
+        cube,
+        QStringLiteral("actionMobiusRing"),
+        QStringLiteral("&Mobius ring"),
+        QStringLiteral("Ctrl+Shift+M"),
+        [cube](const bool enabled) {
+            // The menu runs on the GUI thread with no current context, and both
+            // installing and removing need one, so the work waits for a frame.
+            // A caller that already has a context current gets it immediately.
+            if (scene_toggle::ownContextIsCurrent(cube)) {
+                QString ignored;
+                setRingEnabled(cube, enabled, ignored);
+                return;
+            }
+            cube->enqueueRenderCallback([cube, enabled] {
+                QString deferred;
+                setRingEnabled(cube, enabled, deferred);
+            });
+        });
+    syncToggleAction();
 }
 
 void applyRequest(RingState* state, const QJsonObject& request)
@@ -312,6 +417,11 @@ void applyRequest(RingState* state, const QJsonObject& request)
     state->alpha = std::clamp(number(QStringLiteral("alpha"), state->alpha), 0.0F, 1.0F);
     state->edgeInset = std::clamp(
         number(QStringLiteral("edgeInset"), state->edgeInset), 0.002F, 1.0F);
+
+    rememberedParams = RingParams{
+        state->radius, state->width, state->tiltDegrees,
+        state->spinDegreesPerSecond, state->alpha, state->edgeInset,
+    };
 }
 
 QJsonObject describe(const RingState* state)
@@ -349,9 +459,29 @@ void run(const RuntimeAgentHostV1* host)
 
     const QJsonObject request =
         QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
-    if (request.value(QStringLiteral("restore")).toBool()
-        || request.value(QStringLiteral("remove")).toBool()) {
-        removeRing(cube, host);
+    ensureToggleAction(cube);
+
+    const auto complete = [host](QJsonObject result) {
+        result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
+        host->complete_json(host->invocation_context,
+                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+    };
+
+    // restore always takes it off; toggle flips whichever way it currently is.
+    const bool takeOff = request.value(QStringLiteral("restore")).toBool()
+        || request.value(QStringLiteral("remove")).toBool()
+        || (request.value(QStringLiteral("toggle")).toBool() && ring != nullptr);
+    if (takeOff) {
+        if (ring == nullptr) {
+            complete(QJsonObject{
+                {QStringLiteral("removed"), false},
+                {QStringLiteral("note"), QStringLiteral("no ring was installed")},
+            });
+            return;
+        }
+        QString error;
+        setRingEnabled(cube, false, error);
+        complete(QJsonObject{{QStringLiteral("removed"), true}});
         return;
     }
 
@@ -361,50 +491,25 @@ void run(const RuntimeAgentHostV1* host)
         cube->update();
         QJsonObject result = describe(ring);
         result.insert(QStringLiteral("rebuilt"), true);
-        host->complete_json(host->invocation_context,
-                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+        complete(result);
         return;
     }
 
-    auto* state = new RingState();
-    state->gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(context);
-    if (state->gl == nullptr) {
-        delete state;
-        host->fail(host->invocation_context, "no OpenGL 3.3 core function table for this context");
+    QString error;
+    if (!setRingEnabled(cube, true, error)) {
+        host->fail(host->invocation_context, error.toLocal8Bit().constData());
         return;
     }
-    state->gl->initializeOpenGLFunctions();
-
-    if (!state->program.addShaderFromSourceCode(QOpenGLShader::Vertex, ringVertexShader)
-        || !state->program.addShaderFromSourceCode(QOpenGLShader::Fragment, ringFragmentShader)
-        || !state->program.link()) {
-        const QByteArray log = state->program.log().toLocal8Bit();
-        delete state;
-        host->fail(host->invocation_context, log.constData());
-        return;
-    }
-
-    applyRequest(state, request);
-    state->surface.array.create();
-    state->surface.vertices.create();
-    state->surface.indices.create();
-    state->edge.array.create();
-    state->edge.vertices.create();
-    state->edge.indices.create();
-    uploadGeometry(state);
-
-    ring = state;
-    drawConnection = QObject::connect(
-        cube, &CubeWidget::frameRendered, cube,
-        [cube](qulonglong, float) { drawRing(cube); },
-        Qt::DirectConnection);
+    // The strip is up with the parameters it last had; this request may change
+    // them, which only costs a rebuild of the two bands.
+    applyRequest(ring, request);
+    uploadGeometry(ring);
     cube->update();
 
-    QJsonObject result = describe(state);
+    QJsonObject result = describe(ring);
     result.insert(QStringLiteral("installed"), true);
     result.insert(QStringLiteral("connectionValid"), static_cast<bool>(drawConnection));
-    host->complete_json(host->invocation_context,
-                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+    complete(result);
 }
 
 const RuntimeAgentSnippetV1 descriptor{

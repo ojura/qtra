@@ -4,12 +4,18 @@
 // mode is restored, while the context is still current and the depth buffer
 // still holds the cube. A direct connection to that signal is therefore a
 // per-frame draw hook that gets correct occlusion for free.
+//
+// Loading the snippet also adds a checkable "Orbiting sphere" entry to the Cube
+// menu, so the sphere can be switched from the GUI as well as over the socket.
+// {"toggle": true} flips it, {"restore": true} removes it.
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "scene_toggle.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSignalBlocker>
 #include <QMatrix4x4>
 #include <QMetaObject>
 #include <QOpenGLBuffer>
@@ -67,6 +73,9 @@ void main()
 )glsl";
 
 struct OrbitState {
+    // The context the GL objects below belong to. They exist in no other, so a
+    // frame drawn by a different context must be left alone.
+    QOpenGLContext* owner = nullptr;
     QOpenGLShaderProgram program;
     QOpenGLBuffer vertexBuffer{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer indexBuffer{QOpenGLBuffer::IndexBuffer};
@@ -76,6 +85,8 @@ struct OrbitState {
 
 OrbitState* orbit = nullptr;
 QMetaObject::Connection drawConnection;
+QAction* toggleAction = nullptr;
+int lastVertexCount = 0;
 
 // Interleaved position + normal. For a unit sphere the two are identical, but
 // keeping both means the model matrix can scale non-uniformly later.
@@ -113,7 +124,7 @@ void buildSphere(std::vector<float>& vertices, std::vector<unsigned short>& indi
 void drawOrbitingSphere(const CubeWidget* cube)
 {
     QOpenGLContext* context = QOpenGLContext::currentContext();
-    if (orbit == nullptr || context == nullptr) {
+    if (orbit == nullptr || context == nullptr || context != orbit->owner) {
         return;
     }
 
@@ -137,81 +148,24 @@ void drawOrbitingSphere(const CubeWidget* cube)
     orbit->program.release();
 }
 
-void removeSphere(CubeWidget* cube, const RuntimeAgentHostV1* host)
+// Needs the widget's OpenGL context to be current.
+bool installSphere(CubeWidget* cube, QString& error)
 {
-    if (orbit == nullptr) {
-        const QJsonObject result{
-            {QStringLiteral("removed"), false},
-            {QStringLiteral("note"), QStringLiteral("no sphere was installed")},
-        };
-        host->complete_json(host->invocation_context,
-                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
-        return;
-    }
-
-    QObject::disconnect(drawConnection);
-    orbit->vertexArray.destroy();
-    orbit->vertexBuffer.destroy();
-    orbit->indexBuffer.destroy();
-    delete orbit;
-    orbit = nullptr;
-    cube->update();
-
-    const QJsonObject result{{QStringLiteral("removed"), true}};
-    host->complete_json(host->invocation_context,
-                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
-}
-
-void run(const RuntimeAgentHostV1* host)
-{
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
-        return;
-    }
-
-    auto* cube = static_cast<CubeWidget*>(
-        host->find_qobject(host->agent_context, "cubeView"));
-    if (cube == nullptr) {
-        host->fail(host->invocation_context, "cubeView was not found");
-        return;
-    }
-    if (QOpenGLContext::currentContext() == nullptr) {
-        host->fail(host->invocation_context,
-                   "no OpenGL context is current; use executor=render");
-        return;
-    }
-
-    const QJsonObject request =
-        QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
-    if (request.value(QStringLiteral("restore")).toBool()
-        || request.value(QStringLiteral("remove")).toBool()) {
-        removeSphere(cube, host);
-        return;
-    }
-
-    if (orbit != nullptr) {
-        const QJsonObject already{
-            {QStringLiteral("installed"), true},
-            {QStringLiteral("note"), QStringLiteral("the orbiting sphere was already running")},
-        };
-        host->complete_json(host->invocation_context,
-                            QJsonDocument(already).toJson(QJsonDocument::Compact).constData());
-        return;
-    }
-
     auto* state = new OrbitState();
+    state->owner = QOpenGLContext::currentContext();
     if (!state->program.addShaderFromSourceCode(QOpenGLShader::Vertex, sphereVertexShader)
         || !state->program.addShaderFromSourceCode(QOpenGLShader::Fragment, sphereFragmentShader)
         || !state->program.link()) {
-        const QByteArray log = state->program.log().toLocal8Bit();
+        error = state->program.log();
         delete state;
-        host->fail(host->invocation_context, log.constData());
-        return;
+        return false;
     }
 
     std::vector<float> vertices;
     std::vector<unsigned short> indices;
     buildSphere(vertices, indices);
     state->indexCount = static_cast<int>(indices.size());
+    lastVertexCount = static_cast<int>(vertices.size() / 6);
 
     state->vertexArray.create();
     state->vertexArray.bind();
@@ -243,18 +197,142 @@ void run(const RuntimeAgentHostV1* host)
         cube, &CubeWidget::frameRendered, cube,
         [cube](qulonglong, float) { drawOrbitingSphere(cube); },
         Qt::DirectConnection);
+    cube->update();
+    return true;
+}
 
-    const QJsonObject result{
+// Needs the widget's OpenGL context to be current.
+void removeSphere(CubeWidget* cube)
+{
+    QObject::disconnect(drawConnection);
+    orbit->vertexArray.destroy();
+    orbit->vertexBuffer.destroy();
+    orbit->indexBuffer.destroy();
+    delete orbit;
+    orbit = nullptr;
+    cube->update();
+}
+
+void syncToggleAction()
+{
+    if (toggleAction != nullptr) {
+        const QSignalBlocker blocker(toggleAction);
+        toggleAction->setChecked(orbit != nullptr);
+    }
+}
+
+// Returns false only when an install was asked for and failed.
+bool setSphereEnabled(CubeWidget* cube, const bool enabled, QString& error)
+{
+    if (enabled == (orbit != nullptr)) {
+        return true;
+    }
+    bool installed = true;
+    if (enabled) {
+        installed = installSphere(cube, error);
+    } else {
+        removeSphere(cube);
+    }
+    syncToggleAction();
+    return installed;
+}
+
+void ensureToggleAction(CubeWidget* cube)
+{
+    if (toggleAction != nullptr) {
+        return;
+    }
+    toggleAction = scene_toggle::install(
+        cube,
+        QStringLiteral("actionOrbitSphere"),
+        QStringLiteral("&Orbiting sphere"),
+        QStringLiteral("Ctrl+Shift+O"),
+        [cube](const bool enabled) {
+            // The menu runs on the GUI thread with no current context, and both
+            // installing and removing need one, so the work waits for a frame.
+            // A caller that already has a context current gets it immediately.
+            if (scene_toggle::ownContextIsCurrent(cube)) {
+                QString ignored;
+                setSphereEnabled(cube, enabled, ignored);
+                return;
+            }
+            cube->enqueueRenderCallback([cube, enabled] {
+                QString deferred;
+                setSphereEnabled(cube, enabled, deferred);
+            });
+        });
+    syncToggleAction();
+}
+
+void run(const RuntimeAgentHostV1* host)
+{
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+        return;
+    }
+
+    auto* cube = static_cast<CubeWidget*>(
+        host->find_qobject(host->agent_context, "cubeView"));
+    if (cube == nullptr) {
+        host->fail(host->invocation_context, "cubeView was not found");
+        return;
+    }
+    if (QOpenGLContext::currentContext() == nullptr) {
+        host->fail(host->invocation_context,
+                   "no OpenGL context is current; use executor=render");
+        return;
+    }
+
+    const QJsonObject request =
+        QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
+    ensureToggleAction(cube);
+
+    const auto complete = [host](QJsonObject result) {
+        result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
+        host->complete_json(host->invocation_context,
+                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+    };
+
+    // restore always takes it off; toggle flips whichever way it currently is.
+    const bool takeOff = request.value(QStringLiteral("restore")).toBool()
+        || request.value(QStringLiteral("remove")).toBool()
+        || (request.value(QStringLiteral("toggle")).toBool() && orbit != nullptr);
+    if (takeOff) {
+        if (orbit == nullptr) {
+            complete(QJsonObject{
+                {QStringLiteral("removed"), false},
+                {QStringLiteral("note"), QStringLiteral("no sphere was installed")},
+            });
+            return;
+        }
+        QString error;
+        setSphereEnabled(cube, false, error);
+        complete(QJsonObject{{QStringLiteral("removed"), true}});
+        return;
+    }
+
+    if (orbit != nullptr) {
+        complete(QJsonObject{
+            {QStringLiteral("installed"), true},
+            {QStringLiteral("note"), QStringLiteral("the orbiting sphere was already running")},
+        });
+        return;
+    }
+
+    QString error;
+    if (!setSphereEnabled(cube, true, error)) {
+        host->fail(host->invocation_context, error.toLocal8Bit().constData());
+        return;
+    }
+
+    complete(QJsonObject{
         {QStringLiteral("installed"), true},
         {QStringLiteral("connectionValid"), static_cast<bool>(drawConnection)},
-        {QStringLiteral("vertices"), static_cast<qint64>(vertices.size() / 6)},
-        {QStringLiteral("indices"), state->indexCount},
+        {QStringLiteral("vertices"), lastVertexCount},
+        {QStringLiteral("indices"), orbit->indexCount},
         {QStringLiteral("orbitRadius"), orbitRadius},
         {QStringLiteral("sphereRadius"), sphereRadius},
         {QStringLiteral("orbitDegreesPerSecond"), orbitDegreesPerSecond},
-    };
-    host->complete_json(host->invocation_context,
-                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+    });
 }
 
 const RuntimeAgentSnippetV1 descriptor{

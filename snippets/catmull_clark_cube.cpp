@@ -8,14 +8,20 @@
 // zeros so that draw rasterizes only degenerate triangles, and draws the
 // subdivided mesh from its own buffers in a frameRendered() hook.
 //
-// Request: {"level": 0..5} to (re)build, {"restore": true} to put the original
-// cube back.
+// Loading the snippet also adds a checkable "Catmull-Clark" entry to the Cube
+// menu. It excludes the pillow, which replaces the same mesh: see
+// scene_toggle::turnOff for why the two cannot be installed at once.
+//
+// Request: {"level": 0..5} to (re)build, {"toggle": true} to flip it,
+// {"restore": true} to put the original cube back.
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "scene_toggle.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSignalBlocker>
 #include <QMatrix4x4>
 #include <QMetaObject>
 #include <QOpenGLBuffer>
@@ -93,6 +99,9 @@ struct Mesh {
 };
 
 struct SubdivisionState {
+    // The context the GL objects below belong to. They exist in no other, so a
+    // frame drawn by a different context must be left alone.
+    QOpenGLContext* owner = nullptr;
     QOpenGLShaderProgram program;
     QOpenGLBuffer vertexBuffer{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer indexBuffer{QOpenGLBuffer::IndexBuffer};
@@ -107,6 +116,11 @@ struct SubdivisionState {
 
 SubdivisionState* subdivision = nullptr;
 QMetaObject::Connection drawConnection;
+QAction* toggleAction = nullptr;
+
+// Survives an off/on cycle, so switching the surface back on from the menu
+// returns the level it was last built at.
+int rememberedLevel = defaultLevel;
 
 // The six face colors of the widget's own cube, in the same order as the
 // control cage below.
@@ -335,7 +349,7 @@ void uploadLevel(SubdivisionState* state, const int level)
 void drawSubdividedCube(const CubeWidget* cube)
 {
     if (subdivision == nullptr || subdivision->gl == nullptr
-        || QOpenGLContext::currentContext() == nullptr) {
+        || QOpenGLContext::currentContext() != subdivision->owner) {
         return;
     }
 
@@ -367,18 +381,76 @@ void drawSubdividedCube(const CubeWidget* cube)
     }
 }
 
-void restoreOriginalCube(CubeWidget* cube, const RuntimeAgentHostV1* host)
+// Needs the widget's OpenGL context to be current.
+bool installSubdivision(CubeWidget* cube, QString& error)
 {
-    if (subdivision == nullptr) {
-        const QJsonObject result{
-            {QStringLiteral("restored"), false},
-            {QStringLiteral("note"), QStringLiteral("no subdivision was installed")},
-        };
-        host->complete_json(host->invocation_context,
-                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
-        return;
+    // The pillow replaces the same mesh and saves the same 36 vertices, so it
+    // has to be off before this one reads them.
+    scene_toggle::turnOff(cube, QStringLiteral("actionPillowMode"));
+
+    auto* state = new SubdivisionState();
+    state->owner = QOpenGLContext::currentContext();
+    state->gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(state->owner);
+    if (state->gl == nullptr) {
+        delete state;
+        error = QStringLiteral("no OpenGL 3.3 core function table for this context");
+        return false;
+    }
+    state->gl->initializeOpenGLFunctions();
+
+    if (!state->program.addShaderFromSourceCode(QOpenGLShader::Vertex, subdivisionVertexShader)
+        || !state->program.addShaderFromSourceCode(QOpenGLShader::Fragment,
+                                                   subdivisionFragmentShader)
+        || !state->program.link()) {
+        error = state->program.log();
+        delete state;
+        return false;
     }
 
+    state->vertexArray.create();
+    state->vertexBuffer.create();
+    state->indexBuffer.create();
+    uploadLevel(state, rememberedLevel);
+
+    // Keep the widget's own vertices so the original cube can come back, then
+    // collapse them to a point: paintGL()'s 36-vertex draw then rasterizes
+    // nothing and the subdivision surface is the only thing in the frame.
+    state->savedCubeVertices.resize(originalCubeFloats);
+    cube->m_vertexBuffer.bind();
+    const bool readBack = cube->m_vertexBuffer.read(
+        0, state->savedCubeVertices.data(), originalCubeFloats * static_cast<int>(sizeof(float)));
+    const bool alreadySuppressed = readBack
+        && std::all_of(state->savedCubeVertices.begin(), state->savedCubeVertices.end(),
+                       [](const float value) { return value == 0.0F; });
+    if (!readBack || alreadySuppressed) {
+        cube->m_vertexBuffer.release();
+        state->vertexArray.destroy();
+        state->vertexBuffer.destroy();
+        state->indexBuffer.destroy();
+        delete state;
+        error = readBack
+            ? QStringLiteral("the widget's vertices are already collapsed, so another mesh "
+                             "replacement owns them; saving these zeros would lose the cube")
+            : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
+        return false;
+    }
+    const std::vector<float> collapsed(originalCubeFloats, 0.0F);
+    cube->m_vertexBuffer.write(
+        0, collapsed.data(), originalCubeFloats * static_cast<int>(sizeof(float)));
+    cube->m_vertexBuffer.release();
+
+    subdivision = state;
+    drawConnection = QObject::connect(
+        cube, &CubeWidget::frameRendered, cube,
+        [cube](qulonglong, float) { drawSubdividedCube(cube); },
+        Qt::DirectConnection);
+    cube->update();
+    return true;
+}
+
+// Needs the widget's OpenGL context to be current.
+void removeSubdivision(CubeWidget* cube)
+{
     QObject::disconnect(drawConnection);
     cube->m_vertexBuffer.bind();
     cube->m_vertexBuffer.write(0,
@@ -392,13 +464,58 @@ void restoreOriginalCube(CubeWidget* cube, const RuntimeAgentHostV1* host)
     delete subdivision;
     subdivision = nullptr;
     cube->update();
+}
 
-    const QJsonObject result{
-        {QStringLiteral("restored"), true},
-        {QStringLiteral("note"), QStringLiteral("the widget's original 36 vertices are back")},
-    };
-    host->complete_json(host->invocation_context,
-                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+void syncToggleAction()
+{
+    if (toggleAction != nullptr) {
+        const QSignalBlocker blocker(toggleAction);
+        toggleAction->setChecked(subdivision != nullptr);
+    }
+}
+
+// Returns false only when an install was asked for and failed.
+bool setSubdivisionEnabled(CubeWidget* cube, const bool enabled, QString& error)
+{
+    if (enabled == (subdivision != nullptr)) {
+        return true;
+    }
+    bool installed = true;
+    if (enabled) {
+        installed = installSubdivision(cube, error);
+    } else {
+        removeSubdivision(cube);
+    }
+    syncToggleAction();
+    return installed;
+}
+
+void ensureToggleAction(CubeWidget* cube)
+{
+    if (toggleAction != nullptr) {
+        return;
+    }
+    toggleAction = scene_toggle::install(
+        cube,
+        QStringLiteral("actionCatmullClark"),
+        QStringLiteral("&Catmull-Clark"),
+        QStringLiteral("Ctrl+Shift+C"),
+        [cube](const bool enabled) {
+            QString ignored;
+            // A menu click arrives on the GUI thread with no current context and
+            // has to wait for a frame. Being switched off by the pillow arrives
+            // from inside its render callback, where the context is current and
+            // the removal has to finish before that install reads the vertices.
+            if (scene_toggle::ownContextIsCurrent(cube)) {
+                setSubdivisionEnabled(cube, enabled, ignored);
+                return;
+            }
+            cube->enqueueRenderCallback([cube, enabled] {
+                QString deferred;
+                setSubdivisionEnabled(cube, enabled, deferred);
+            });
+        });
+    syncToggleAction();
 }
 
 void run(const RuntimeAgentHostV1* host)
@@ -422,93 +539,68 @@ void run(const RuntimeAgentHostV1* host)
 
     const QJsonObject request =
         QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
-    if (request.value(QStringLiteral("restore")).toBool()) {
-        restoreOriginalCube(cube, host);
+    ensureToggleAction(cube);
+
+    const auto complete = [host](QJsonObject result) {
+        result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
+        host->complete_json(host->invocation_context,
+                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+    };
+
+    // restore always takes it off; toggle flips whichever way it currently is.
+    const bool takeOff = request.value(QStringLiteral("restore")).toBool()
+        || (request.value(QStringLiteral("toggle")).toBool() && subdivision != nullptr);
+    if (takeOff) {
+        if (subdivision == nullptr) {
+            complete(QJsonObject{
+                {QStringLiteral("restored"), false},
+                {QStringLiteral("note"), QStringLiteral("no subdivision was installed")},
+            });
+            return;
+        }
+        QString error;
+        setSubdivisionEnabled(cube, false, error);
+        complete(QJsonObject{
+            {QStringLiteral("restored"), true},
+            {QStringLiteral("note"), QStringLiteral("the widget's original 36 vertices are back")},
+        });
         return;
     }
-    const int level = std::clamp(
-        request.value(QStringLiteral("level")).toInt(defaultLevel), 0, maxLevel);
+
+    // A level the request leaves out keeps the value it last had, on a rebuild
+    // and across an off/on cycle alike.
+    rememberedLevel = std::clamp(
+        request.value(QStringLiteral("level")).toInt(rememberedLevel), 0, maxLevel);
 
     // Already running: rebuild at the requested level and keep the hook.
     if (subdivision != nullptr) {
-        uploadLevel(subdivision, level);
+        uploadLevel(subdivision, rememberedLevel);
         cube->update();
-        const QJsonObject result{
+        complete(QJsonObject{
             {QStringLiteral("rebuilt"), true},
             {QStringLiteral("level"), subdivision->level},
             {QStringLiteral("quads"), subdivision->quadCount},
             {QStringLiteral("points"), subdivision->pointCount},
             {QStringLiteral("indices"), subdivision->indexCount},
-        };
-        host->complete_json(host->invocation_context,
-                            QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+        });
         return;
     }
 
-    auto* state = new SubdivisionState();
-    state->gl = QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(context);
-    if (state->gl == nullptr) {
-        delete state;
-        host->fail(host->invocation_context, "no OpenGL 3.3 core function table for this context");
-        return;
-    }
-    state->gl->initializeOpenGLFunctions();
-
-    if (!state->program.addShaderFromSourceCode(QOpenGLShader::Vertex, subdivisionVertexShader)
-        || !state->program.addShaderFromSourceCode(QOpenGLShader::Fragment,
-                                                   subdivisionFragmentShader)
-        || !state->program.link()) {
-        const QByteArray log = state->program.log().toLocal8Bit();
-        delete state;
-        host->fail(host->invocation_context, log.constData());
+    QString error;
+    if (!setSubdivisionEnabled(cube, true, error)) {
+        host->fail(host->invocation_context, error.toLocal8Bit().constData());
         return;
     }
 
-    state->vertexArray.create();
-    state->vertexBuffer.create();
-    state->indexBuffer.create();
-    uploadLevel(state, level);
-
-    // Keep the widget's own vertices so the original cube can come back, then
-    // collapse them to a point: paintGL()'s 36-vertex draw then rasterizes
-    // nothing and the subdivision surface is the only thing in the frame.
-    state->savedCubeVertices.resize(originalCubeFloats);
-    cube->m_vertexBuffer.bind();
-    const bool readBack = cube->m_vertexBuffer.read(
-        0, state->savedCubeVertices.data(), originalCubeFloats * static_cast<int>(sizeof(float)));
-    if (!readBack) {
-        cube->m_vertexBuffer.release();
-        state->vertexArray.destroy();
-        state->vertexBuffer.destroy();
-        state->indexBuffer.destroy();
-        delete state;
-        host->fail(host->invocation_context,
-                   "could not read the widget's vertex buffer; refusing to overwrite it");
-        return;
-    }
-    const std::vector<float> collapsed(originalCubeFloats, 0.0F);
-    cube->m_vertexBuffer.write(
-        0, collapsed.data(), originalCubeFloats * static_cast<int>(sizeof(float)));
-    cube->m_vertexBuffer.release();
-
-    subdivision = state;
-    drawConnection = QObject::connect(
-        cube, &CubeWidget::frameRendered, cube,
-        [cube](qulonglong, float) { drawSubdividedCube(cube); },
-        Qt::DirectConnection);
-    cube->update();
-
-    const QJsonObject result{
+    complete(QJsonObject{
         {QStringLiteral("installed"), true},
         {QStringLiteral("connectionValid"), static_cast<bool>(drawConnection)},
-        {QStringLiteral("level"), state->level},
-        {QStringLiteral("quads"), state->quadCount},
-        {QStringLiteral("points"), state->pointCount},
-        {QStringLiteral("indices"), state->indexCount},
+        {QStringLiteral("level"), subdivision->level},
+        {QStringLiteral("quads"), subdivision->quadCount},
+        {QStringLiteral("points"), subdivision->pointCount},
+        {QStringLiteral("indices"), subdivision->indexCount},
         {QStringLiteral("originalCubeSuppressed"), true},
-    };
-    host->complete_json(host->invocation_context,
-                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+    });
 }
 
 const RuntimeAgentSnippetV1 descriptor{
