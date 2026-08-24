@@ -279,7 +279,7 @@ bool ModuleManager::resetActivePatch(QString& error)
 
 QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
 {
-    return QJsonObject{
+    QJsonObject json{
         {QStringLiteral("id"), QString::number(module.id)},
         {QStringLiteral("name"), module.name},
         {QStringLiteral("path"), module.path},
@@ -287,4 +287,22 @@ QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
             ? QStringLiteral("snippet") : QStringLiteral("cubePatch")},
         {QStringLiteral("handle"), pointerString(module.handle)},
     };
+    if (module.kind != Kind::Snippet) {
+        return json;
+    }
+
+    // How the module was last driven, so a caller can see what its release
+    // would run under without having to remember what it asked for earlier.
+    json.insert(QStringLiteral("declaresRelease"), module.declaresRelease());
+    json.insert(QStringLiteral("hadSuccessfulRun"), module.hadSuccessfulRun);
+    if (module.hadSuccessfulRun) {
+        json.insert(QStringLiteral("lastExecutor"), module.lastExecutor);
+        if (module.lastExecutor == QStringLiteral("object")) {
+            json.insert(QStringLiteral("lastTargetAlive"), !module.lastTarget.isNull());
+            json.insert(QStringLiteral("lastTarget"), module.lastTarget.isNull()
+                ? QString()
+                : module.lastTarget->objectName());
+        }
+    }
+    return json;
 }

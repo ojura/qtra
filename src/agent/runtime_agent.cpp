@@ -732,6 +732,119 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
                    parameters.value(QStringLiteral("request")));
         return;
     }
+    if (command == QStringLiteral("snippet.release")) {
+        quint64 moduleId = 0;
+        const bool ok = parseUnsignedInteger(
+            parameters.value(QStringLiteral("moduleId")), moduleId);
+        ModuleManager::LoadedModule* module = m_modules.module(ok ? moduleId : 0);
+        if (module == nullptr || module->kind != ModuleManager::Kind::Snippet) {
+            sendError(socket, requestId, QStringLiteral("module_not_found"),
+                      QStringLiteral("snippet module was not found"));
+            return;
+        }
+        // A module that declares no release is answering, not failing. The
+        // caller needs to tell that apart from a release that ran and broke,
+        // which is the whole reason this is a declaration and not a convention.
+        if (!module->declaresRelease()) {
+            sendError(socket, requestId, QStringLiteral("no_release_declared"),
+                      QStringLiteral("this module declares no release entry point"));
+            return;
+        }
+
+        // The executor the module was last run under, unless the caller
+        // overrides it. Release has to run where install ran: an event filter
+        // on a worker-thread object comes off under that object's thread, and
+        // GL teardown needs the context current.
+        const bool executorGiven = parameters.contains(QStringLiteral("executor"));
+        const QString executor = executorGiven
+            ? parameters.value(QStringLiteral("executor")).toString()
+            : module->lastExecutor;
+        if (!executorGiven && !module->hadSuccessfulRun) {
+            sendError(socket, requestId, QStringLiteral("no_recorded_executor"),
+                      QStringLiteral("this module has never run successfully, so there is no "
+                                     "recorded executor; pass one explicitly"));
+            return;
+        }
+        if (executor != QStringLiteral("gui")
+            && executor != QStringLiteral("object")
+            && executor != QStringLiteral("render")) {
+            sendError(socket, requestId, QStringLiteral("invalid_executor"),
+                      QStringLiteral("executor must be gui, object, or render"));
+            return;
+        }
+
+        QObject* target = nullptr;
+        if (executor == QStringLiteral("object")) {
+            if (parameters.contains(QStringLiteral("target"))) {
+                QString error;
+                target = resolveObject(parameters.value(QStringLiteral("target")).toObject(),
+                                       error);
+                if (target == nullptr) {
+                    sendError(socket, requestId, QStringLiteral("object_not_found"), error);
+                    return;
+                }
+            } else {
+                // A recorded target can be gone by now. Say so rather than
+                // quietly running the release somewhere else; where it runs is
+                // the caller's decision to make.
+                target = module->lastTarget.data();
+                if (target == nullptr) {
+                    sendError(socket, requestId, QStringLiteral("recorded_target_gone"),
+                              QStringLiteral("the object this module last ran on no longer "
+                                             "exists; pass a target explicitly"));
+                    return;
+                }
+            }
+        }
+
+        const quint64 operationId = m_nextOperationId++;
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("operationId"), QString::number(operationId)},
+            {QStringLiteral("moduleId"), QString::number(module->id)},
+            {QStringLiteral("executor"), executor},
+            {QStringLiteral("executorSource"), executorGiven
+                ? QStringLiteral("request") : QStringLiteral("recorded")},
+        });
+
+        runSnippet(module, operationId, executor, target,
+                   parameters.value(QStringLiteral("request")), SnippetEntry::Release);
+        return;
+    }
+    if (command == QStringLiteral("stash.list")) {
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("entries"), stashEntries()},
+        });
+        return;
+    }
+    if (command == QStringLiteral("stash.get")) {
+        const QString key = parameters.value(QStringLiteral("key")).toString();
+        QMutexLocker lock(&m_stashMutex);
+        const auto found = m_stash.constFind(key);
+        if (found == m_stash.constEnd()) {
+            lock.unlock();
+            sendError(socket, requestId, QStringLiteral("stash_key_not_found"),
+                      QStringLiteral("no stash entry under that key"));
+            return;
+        }
+        const QJsonObject result{
+            {QStringLiteral("key"), key},
+            {QStringLiteral("size"), static_cast<qint64>(found->bytes.size())},
+            {QStringLiteral("monotonicNs"), QString::number(found->monotonicNs)},
+            {QStringLiteral("moduleId"), QString::number(found->moduleId)},
+            {QStringLiteral("base64"), QString::fromLatin1(found->bytes.toBase64())},
+        };
+        lock.unlock();
+        sendSuccess(socket, requestId, result);
+        return;
+    }
+    if (command == QStringLiteral("stash.drop")) {
+        const QString key = parameters.value(QStringLiteral("key")).toString();
+        sendSuccess(socket, requestId, QJsonObject{
+            {QStringLiteral("key"), key},
+            {QStringLiteral("dropped"), stashDrop(key)},
+        });
+        return;
+    }
     if (command == QStringLiteral("patch.load")) {
         QString error;
         ModuleManager::LoadedModule* module = m_modules.loadCubePatch(
@@ -1020,6 +1133,9 @@ QJsonArray RuntimeAgent::commandList() const
         QStringLiteral("event.subscribe"), QStringLiteral("event.history"),
         QStringLiteral("module.list"),
         QStringLiteral("snippet.load"), QStringLiteral("snippet.run"),
+        QStringLiteral("snippet.release"),
+        QStringLiteral("stash.list"), QStringLiteral("stash.get"),
+        QStringLiteral("stash.drop"),
         QStringLiteral("patch.load"), QStringLiteral("patch.activate"),
         QStringLiteral("patch.rollback"), QStringLiteral("patch.status"),
         QStringLiteral("symbol.resolve"), QStringLiteral("unsafe.status"),
@@ -1029,15 +1145,36 @@ QJsonArray RuntimeAgent::commandList() const
     return QJsonArray::fromStringList(commands);
 }
 
+RuntimeAgent::ModuleContext* RuntimeAgent::contextForModule(const quint64 moduleId)
+{
+    auto found = m_moduleContexts.find(moduleId);
+    if (found == m_moduleContexts.end()) {
+        auto context = std::make_unique<ModuleContext>();
+        context->agent = this;
+        context->moduleId = moduleId;
+        found = m_moduleContexts.emplace(moduleId, std::move(context)).first;
+    }
+    return found->second.get();
+}
+
+RuntimeAgent* RuntimeAgent::agentOf(void* agentContext)
+{
+    return static_cast<ModuleContext*>(agentContext)->agent;
+}
+
 void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
                               const quint64 operationId,
                               const QString& executor,
                               QObject* target,
-                              const QJsonValue& request)
+                              const QJsonValue& request,
+                              const SnippetEntry entry)
 {
     auto invocation = std::make_shared<SnippetInvocation>();
     invocation->agent = this;
     invocation->operationId = operationId;
+    invocation->entry = entry;
+    invocation->executor = executor;
+    invocation->target = target;
     if (request.isObject()) {
         invocation->requestJson = QJsonDocument(request.toObject()).toJson(QJsonDocument::Compact);
     } else if (request.isArray()) {
@@ -1049,7 +1186,10 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
     invocation->host = RuntimeAgentHostV1{
         RUNTIME_AGENT_ABI_V1,
         sizeof(RuntimeAgentHostV1),
-        this,
+        // Not the agent itself: the module's own context, so that a callback
+        // made later from a draw hook or a menu handler still identifies the
+        // module it came from.
+        contextForModule(module->id),
         invocation.get(),
         &RuntimeAgent::hostLog,
         &RuntimeAgent::hostEmitEvent,
@@ -1059,11 +1199,16 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
         &RuntimeAgent::hostCompleteJson,
         &RuntimeAgent::hostFail,
         &RuntimeAgent::hostMonotonicTimeNs,
+        &RuntimeAgent::hostStashPut,
+        &RuntimeAgent::hostStashGet,
+        &RuntimeAgent::hostStashDrop,
+        &RuntimeAgent::hostStashList,
     };
 
     publishEvent(QStringLiteral("operation.started"), QJsonObject{
         {QStringLiteral("operationId"), QString::number(invocation->operationId)},
-        {QStringLiteral("kind"), QStringLiteral("snippet")},
+        {QStringLiteral("kind"), entry == SnippetEntry::Release
+            ? QStringLiteral("snippetRelease") : QStringLiteral("snippet")},
         {QStringLiteral("moduleId"), QString::number(module->id)},
         {QStringLiteral("name"), module->name},
         {QStringLiteral("executor"), executor},
@@ -1093,7 +1238,11 @@ void RuntimeAgent::executeSnippet(ModuleManager::LoadedModule* module,
                                   const std::shared_ptr<SnippetInvocation>& invocation)
 {
     try {
-        module->snippet->run(&invocation->host);
+        if (invocation->entry == SnippetEntry::Release) {
+            module->snippet->release(&invocation->host);
+        } else {
+            module->snippet->run(&invocation->host);
+        }
     } catch (const std::exception& exception) {
         invocation->error = QString::fromUtf8(exception.what());
     } catch (...) {
@@ -1113,11 +1262,20 @@ void RuntimeAgent::finishSnippet(
 {
     QJsonObject event{
         {QStringLiteral("operationId"), QString::number(invocation->operationId)},
-        {QStringLiteral("kind"), QStringLiteral("snippet")},
+        {QStringLiteral("kind"), invocation->entry == SnippetEntry::Release
+            ? QStringLiteral("snippetRelease") : QStringLiteral("snippet")},
         {QStringLiteral("moduleId"), QString::number(module->id)},
         {QStringLiteral("name"), module->name},
     };
     if (invocation->error.isEmpty()) {
+        // Only a run that got this far is worth remembering as the way to reach
+        // this module. Recording a failed attempt would send its release to the
+        // executor that already turned it away.
+        if (invocation->entry == SnippetEntry::Run) {
+            module->lastExecutor = invocation->executor;
+            module->lastTarget = invocation->target;
+            module->hadSuccessfulRun = true;
+        }
         event.insert(QStringLiteral("outcome"), QStringLiteral("completed"));
         event.insert(QStringLiteral("result"), parseSnippetResult(invocation->resultJson));
     } else {
@@ -1160,7 +1318,7 @@ void RuntimeAgent::hostLog(void* agentContext,
                            const std::int32_t level,
                            const char* message)
 {
-    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    auto* agent = agentOf(agentContext);
     const QString text = QString::fromUtf8(message != nullptr ? message : "");
     switch (level) {
     case RUNTIME_AGENT_LOG_ERROR: qCritical().noquote() << "[snippet]" << text; break;
@@ -1178,7 +1336,7 @@ void RuntimeAgent::hostEmitEvent(void* agentContext,
                                  const char* name,
                                  const char* objectJson)
 {
-    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    auto* agent = agentOf(agentContext);
     const QString eventName = QString::fromUtf8(name != nullptr ? name : "snippet.event");
     agent->publishEvent(eventName,
                         parseObjectOrRaw(QByteArray(objectJson != nullptr ? objectJson : "{}")));
@@ -1186,7 +1344,7 @@ void RuntimeAgent::hostEmitEvent(void* agentContext,
 
 void* RuntimeAgent::hostFindQObject(void* agentContext, const char* objectName)
 {
-    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    auto* agent = agentOf(agentContext);
     return agent->findObject(QString::fromUtf8(objectName != nullptr ? objectName : ""));
 }
 
@@ -1226,6 +1384,101 @@ void RuntimeAgent::hostFail(void* invocationContext, const char* error)
 
 std::uint64_t RuntimeAgent::hostMonotonicTimeNs(void* agentContext)
 {
-    auto* agent = static_cast<RuntimeAgent*>(agentContext);
+    auto* agent = agentOf(agentContext);
     return static_cast<std::uint64_t>(agent->m_monotonicClock.nsecsElapsed());
+}
+
+std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
+                                        const char* key,
+                                        const void* bytes,
+                                        const std::int64_t size,
+                                        const std::int32_t overwrite)
+{
+    if (key == nullptr || *key == '\0' || size < 0 || (bytes == nullptr && size > 0)) {
+        return -2;
+    }
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    auto* agent = context->agent;
+    const QString name = QString::fromUtf8(key);
+
+    QMutexLocker lock(&agent->m_stashMutex);
+    const bool existed = agent->m_stash.contains(name);
+    if (existed && overwrite == 0) {
+        return -1;
+    }
+    StashEntry entry;
+    entry.bytes = QByteArray(static_cast<const char*>(bytes), static_cast<qsizetype>(size));
+    entry.monotonicNs = static_cast<quint64>(agent->m_monotonicClock.nsecsElapsed());
+    entry.moduleId = context->moduleId;
+    agent->m_stash.insert(name, entry);
+    return existed ? 1 : 0;
+}
+
+std::int64_t RuntimeAgent::hostStashGet(void* agentContext,
+                                        const char* key,
+                                        void* buffer,
+                                        const std::int64_t capacity)
+{
+    if (key == nullptr || capacity < 0 || (buffer == nullptr && capacity > 0)) {
+        return -1;
+    }
+    auto* agent = agentOf(agentContext);
+
+    QMutexLocker lock(&agent->m_stashMutex);
+    const auto found = agent->m_stash.constFind(QString::fromUtf8(key));
+    if (found == agent->m_stash.constEnd()) {
+        return -1;
+    }
+    const QByteArray& bytes = found->bytes;
+    const std::int64_t total = bytes.size();
+    if (capacity > 0) {
+        std::memcpy(buffer, bytes.constData(), static_cast<std::size_t>(std::min(total, capacity)));
+    }
+    return total;
+}
+
+std::int32_t RuntimeAgent::hostStashDrop(void* agentContext, const char* key)
+{
+    if (key == nullptr) {
+        return 0;
+    }
+    return agentOf(agentContext)->stashDrop(QString::fromUtf8(key)) ? 1 : 0;
+}
+
+std::int64_t RuntimeAgent::hostStashList(void* agentContext,
+                                         char* buffer,
+                                         const std::int64_t capacity)
+{
+    if (capacity < 0 || (buffer == nullptr && capacity > 0)) {
+        return -1;
+    }
+    auto* agent = agentOf(agentContext);
+    const QByteArray json =
+        QJsonDocument(agent->stashEntries()).toJson(QJsonDocument::Compact);
+    const std::int64_t total = json.size();
+    if (capacity > 0) {
+        std::memcpy(buffer, json.constData(), static_cast<std::size_t>(std::min(total, capacity)));
+    }
+    return total;
+}
+
+QJsonArray RuntimeAgent::stashEntries() const
+{
+    QMutexLocker lock(&m_stashMutex);
+    QJsonArray entries;
+    for (auto it = m_stash.constBegin(); it != m_stash.constEnd(); ++it) {
+        entries.append(QJsonObject{
+            {QStringLiteral("key"), it.key()},
+            {QStringLiteral("size"), static_cast<qint64>(it->bytes.size())},
+            {QStringLiteral("monotonicNs"), QString::number(it->monotonicNs)},
+            {QStringLiteral("moduleId"), QString::number(it->moduleId)},
+        });
+    }
+    return entries;
+}
+
+bool RuntimeAgent::stashDrop(const QString& key)
+{
+    QMutexLocker lock(&m_stashMutex);
+    return m_stash.remove(key) > 0;
 }

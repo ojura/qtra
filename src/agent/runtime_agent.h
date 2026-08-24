@@ -8,12 +8,15 @@
 #include <QHash>
 #include <QJsonObject>
 #include <QLocalServer>
+#include <QMap>
+#include <QMutex>
 #include <QObject>
 #include <QPointer>
 #include <QQueue>
 #include <QStringList>
 
 #include <memory>
+#include <unordered_map>
 
 class CubeWidget;
 class MainWindow;
@@ -43,6 +46,11 @@ private:
         QStringList eventPrefixes;
     };
 
+    // Which of a module's two entry points an invocation calls. Both take the
+    // same host and report the same way, so they share all the machinery below;
+    // only the pointer called and the event kind differ.
+    enum class SnippetEntry { Run, Release };
+
     struct SnippetInvocation {
         RuntimeAgent* agent = nullptr;
         quint64 operationId = 0;
@@ -50,7 +58,27 @@ private:
         QByteArray resultJson;
         QString error;
         bool completed = false;
+        SnippetEntry entry = SnippetEntry::Run;
+        QString executor;
+        QPointer<QObject> target;
         RuntimeAgentHostV1 host{};
+    };
+
+    // What a module's host callbacks carry as agent_context, instead of the
+    // agent itself. A callback made from outside an invocation — a draw hook, a
+    // menu handler — has no other way to say which module it came from, so
+    // stash entries and log lines from those places would otherwise be
+    // unattributable. Modules are never unloaded, so these satisfy the ABI's
+    // promise that agent_context stays valid for the life of the process.
+    struct ModuleContext {
+        RuntimeAgent* agent = nullptr;
+        quint64 moduleId = 0;
+    };
+
+    struct StashEntry {
+        QByteArray bytes;
+        quint64 monotonicNs = 0;
+        quint64 moduleId = 0;
     };
 
     void acceptConnections();
@@ -81,7 +109,8 @@ private:
                     quint64 operationId,
                     const QString& executor,
                     QObject* target,
-                    const QJsonValue& request);
+                    const QJsonValue& request,
+                    SnippetEntry entry = SnippetEntry::Run);
     void executeSnippet(ModuleManager::LoadedModule* module,
                         const std::shared_ptr<SnippetInvocation>& invocation);
     void finishSnippet(ModuleManager::LoadedModule* module,
@@ -100,6 +129,22 @@ private:
     static void hostCompleteJson(void* invocationContext, const char* resultJson);
     static void hostFail(void* invocationContext, const char* error);
     static std::uint64_t hostMonotonicTimeNs(void* agentContext);
+    static std::int32_t hostStashPut(void* agentContext,
+                                     const char* key,
+                                     const void* bytes,
+                                     std::int64_t size,
+                                     std::int32_t overwrite);
+    static std::int64_t hostStashGet(void* agentContext,
+                                     const char* key,
+                                     void* buffer,
+                                     std::int64_t capacity);
+    static std::int32_t hostStashDrop(void* agentContext, const char* key);
+    static std::int64_t hostStashList(void* agentContext, char* buffer, std::int64_t capacity);
+
+    [[nodiscard]] ModuleContext* contextForModule(quint64 moduleId);
+    [[nodiscard]] static RuntimeAgent* agentOf(void* agentContext);
+    [[nodiscard]] QJsonArray stashEntries() const;
+    [[nodiscard]] bool stashDrop(const QString& key);
 
     QPointer<MainWindow> m_window;
     QPointer<CubeWidget> m_cube;
@@ -114,6 +159,13 @@ private:
     // job IDs while retaining a plain uint64 wire representation.
     quint64 m_nextOperationId = (quint64{1} << 63);
     bool m_unsafeEnabled = false;
+
+    std::unordered_map<quint64, std::unique_ptr<ModuleContext>> m_moduleContexts;
+
+    // Reachable from any thread, since a module may stash from a worker-thread
+    // callback as easily as from the GUI thread.
+    mutable QMutex m_stashMutex;
+    QMap<QString, StashEntry> m_stash;
 
     // Declared last so it is destroyed first. ~ModuleManager rolls the active
     // patch back, which makes CubeWidget emit stateChanged, and the handler for
