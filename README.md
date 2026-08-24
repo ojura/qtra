@@ -480,23 +480,26 @@ has asked for yet. `agentctl.py reload` does both:
 cmake --build --preset release --target agent_snippet_jack_in_the_box
 
 python3 tools/agentctl.py reload build/release/agent_snippet_jack_in_the_box.so \
-  --executor render \
-  --handover-request '{"restore": true}' \
   --request '{}'
 ```
 
 That copies the object to `runtime-snippets/<name>-<hash>.so`, loads it, finds
-the generation it supersedes, runs the handover request on that one, and then
-runs the new one. The same edit through this path reported 3360 triangles for
-`springRingSegments = 14`, in a process that was never restarted.
+the generation it supersedes, asks that one to release what it installed, and
+then runs the new one. The same edit through this path reported 3360 triangles
+for `springRingSegments = 14`, in a process that was never restarted.
 
-Nothing about a module's release is defined by the ABI or the protocol, so
-`--handover-request` has no default and the tool sends nothing unless asked.
-`{"restore": true}` is the convention these scene snippets happen to use.
-Without a handover the new generation installs alongside the old one, which for
-two `frameRendered` hooks means two copies rather than a replacement; the
-snippets that overwrite the widget's vertices refuse that outright rather than
-save the zeros.
+The handover needs no payload and no executor, because the outgoing module
+declares a release entry point and the agent knows the executor it last ran
+successfully under. `handover.outcome` is one of `released`, `declared-none`,
+`payload-sent` or `failed`, and a failed release stops the new generation being
+run unless `--force` is given — nothing can be unloaded, so the new module stays
+resident and inert instead. Without a handover the new generation would install
+alongside the old one, which for two `frameRendered` hooks means two copies
+rather than a replacement.
+
+`--handover-request` is still there for a module that declares no release. It
+sends a request payload and cannot report whether anything acted on it, which is
+the difference the declaration removes.
 
 Generations are matched by the descriptor's `name_utf8`, which is the same
 string in every build of one source, rather than by filename — reloads and
@@ -528,6 +531,100 @@ caller sees only its own request timing out. `CubeWidget` therefore starts a
 unserved when it fires is drained through `grabFramebuffer()`, which renders
 whatever the compositor is doing. A visible window never reaches it. This lives
 in the widget rather than in the client tools, so every caller gets it.
+
+### Declaring how a module lets go
+
+A snippet that installs something lasting can declare how to undo it, as a
+fifth field in its descriptor:
+
+```cpp
+const RuntimeAgentSnippetV1 descriptor{
+    RUNTIME_AGENT_ABI_V1, sizeof(RuntimeAgentSnippetV1), "...", &run, &release,
+};
+```
+
+`release` receives a host and reports through `complete_json`/`fail` exactly as
+`run` does, so a release that fails is an error a program can act on rather than
+a payload nobody checked. Descriptors built against the older four-field struct
+are still valid; the host checks `struct_size` before reading the field.
+
+A null `release` means the module declares it has nothing to undo. That is a
+real answer and not a placeholder — of the nine snippets here, `inspect_cube`,
+`install_observer` and `render_probe` genuinely install nothing that outlives
+the call, and `install_observer` already said as much in its own result.
+
+```bash
+python3 tools/agentctl.py call snippet.release --params '{"moduleId":1}'
+python3 tools/agentctl.py call module.list
+```
+
+No executor is needed. The agent records how each module was last run
+*successfully* — the last success rather than the first attempt, since a snippet
+needing a GL context fails under `gui` with "use executor=render" and is retried
+— and runs the release there. `module.list` reports that record alongside
+`declaresRelease`. Passing `executor` or `target` overrides it; a recorded
+target that no longer exists is reported as `recorded_target_gone` rather than
+quietly replaced.
+
+Release must not report completion before its effects are applied, because a
+handover is sequenced on that completion. The scene snippets refuse rather than
+defer for this reason: releasing one under `gui` returns an error telling you to
+use `render`, instead of queueing the teardown for the next frame and reporting
+success while the cube is still collapsed.
+
+What this does not do is verify the effects are gone. It raises "nobody can tell
+whether the handover did anything" to "the handover ran and reported"; a buggy
+release that leaves half its state behind passes exactly as before. The
+declaration is also one bit per module, so a snippet that installed three things
+cannot say it can undo two. The install-time defences — the scene snippets
+refusing to save an already-collapsed vertex buffer — still matter for that
+reason, because nothing distinguishes "nothing to release" from "the author
+forgot".
+
+### The byte stash
+
+A module that overwrites host state can put the original where the host owns it:
+
+```cpp
+host->stash_put(host->agent_context, "jack_in_the_box/face-front",
+                vertices.data(), byteCount, /*overwrite=*/0);
+```
+
+The reason is narrower than "plan your cleanup". Undo *code* can be written
+later: Qt keeps connection, filter and action state, so a module written
+afterwards can disconnect a hook it never installed. Undo *data* cannot be
+reconstructed once it is gone. The jack's six original vertices otherwise live
+only in its own `static` behind an anonymous-namespace pointer, so a later
+repair module could remove the draw hook and never put the face back.
+
+```bash
+python3 tools/agentctl.py call stash.list
+python3 tools/agentctl.py call stash.get --params '{"key":"jack_in_the_box/face-front"}'
+python3 tools/agentctl.py call stash.drop --params '{"key":"jack_in_the_box/face-front"}'
+```
+
+The host never interprets the bytes. It stamps each entry with size, a monotonic
+time, and the id of the module that wrote it, so provenance does not depend on
+the depositor reporting it honestly. The namespace is flat on purpose: scoping
+keys per module would shut out exactly the later repair module the stash exists
+to serve. The convention is `<module-name>/<what>`.
+
+Entries are not dropped when a module releases. Deciding that a restore actually
+worked takes an observation no module can make about itself, so that call
+belongs to whoever is driving; and a restore that corrupts rather than restores
+must not delete the only good copy as its final act.
+
+This is not an undo log. The host stores bytes and has no idea what they mean,
+which is the point — a host that had to replay effects would need a vocabulary
+covering everything a snippet might do, and that contradicts snippets being able
+to do almost anything.
+
+Not everything needs saving. `cubeVertices` is `constexpr` in an anonymous
+namespace, so it is absent from `.dynsym` and `symbol.resolve` misses it, but it
+is still in `.symtab` and readable from the live process with
+`unsafe.memory.read` at a load base derived from any resolvable symbol — and it
+is in the repository as source besides. The rule is to save what you overwrite
+*unless it is reconstructible from the binary or the source*.
 
 ## Function hot-swapping
 

@@ -89,6 +89,7 @@ python3 tools/agentctl.py history --after 200 --limit 128 --prefix operation.
 - `module.list`
 - `snippet.load {path}`
 - `snippet.run {moduleId, executor, target?, request}`
+- `snippet.release {moduleId, executor?, target?, request?}`
 
 Executors:
 
@@ -98,6 +99,51 @@ Executors:
 
 `snippet.run` immediately returns an operation ID. Completion is reported through
 `operation.finished` with kind `snippet`.
+
+`snippet.release` calls the module's `release` entry point instead of `run`, and
+reports through `operation.finished` with kind `snippetRelease`. A module that
+does not declare one is answering rather than failing, and says so with
+`no_release_declared`; that is a different thing from a release that ran and
+failed, and the two are meant to be told apart.
+
+Executor and target are optional because the agent records how each module was
+last run successfully, and a release belongs where its install ran. Passing them
+overrides the record. Errors worth handling separately:
+
+| code | meaning |
+|---|---|
+| `no_release_declared` | the module has no release entry point |
+| `no_recorded_executor` | it has never run successfully, so pass an executor |
+| `recorded_target_gone` | the object it last ran on no longer exists |
+
+`module.list` reports `declaresRelease`, `hadSuccessfulRun`, and the recorded
+`lastExecutor`/`lastTarget` for each snippet module.
+
+### Byte stash
+
+- `stash.list`
+- `stash.get {key}` — returns `base64`, `size`, `monotonicNs`, `moduleId`
+- `stash.drop {key}`
+
+The host keeps opaque byte strings under caller-chosen keys and never interprets
+them. A module that overwrites host state puts the original here so that code
+written afterwards can restore it: a copy kept in the module's own memory dies
+with that module's private state and is reachable to nothing else, which is what
+makes an undo written later impossible rather than merely unwritten.
+
+The namespace is flat on purpose. Scoping keys to a module would shut out
+exactly the later repair module the stash exists to serve. The convention is
+`<module-name>/<what>`.
+
+Entries outlive the module that wrote them and go away only on an explicit
+`stash.drop`. Deciding that a restore actually worked takes an observation no
+module can make about itself, so dropping is the driver's call, not the
+module's — and a buggy restore that corrupts instead of restoring must not
+delete the only good copy as its last act.
+
+Each entry is stamped by the host with its size, a monotonic timestamp, and the
+id of the module that wrote it, so provenance does not depend on the depositor
+reporting it honestly.
 
 ### Function patches
 
