@@ -264,6 +264,43 @@ void ensureToggleAction(CubeWidget* cube)
     syncToggleAction();
 }
 
+// Undo whatever run() installed. Declared in the descriptor so a caller can ask
+// whether this module can be released and get an answer, rather than sending a
+// payload and hoping something acted on it.
+//
+// Tearing the GL objects down needs this widget's context current, which holds
+// only inside its paint callbacks. Deferring to the next frame would report
+// completion before the scene is actually back, and a handover sequenced on
+// that completion would hand the next generation state this one still owns. So
+// this refuses rather than defers.
+void release(const RuntimeAgentHostV1* host)
+{
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+        return;
+    }
+    auto* cube = static_cast<CubeWidget*>(
+        host->find_qobject(host->agent_context, "cubeView"));
+    if (cube == nullptr) {
+        host->fail(host->invocation_context, "cubeView was not found");
+        return;
+    }
+    if (orbit == nullptr) {
+        host->complete_json(host->invocation_context,
+                            "{\"removed\":false,\"note\":\"nothing was installed\"}");
+        return;
+    }
+    if (!scene_toggle::ownContextIsCurrent(cube)) {
+        host->fail(host->invocation_context,
+                   "the widget's OpenGL context is not current; release this module with "
+                   "executor=render so the scene is back before this reports completion");
+        return;
+    }
+
+    QString error;
+    setSphereEnabled(cube, false, error);
+    host->complete_json(host->invocation_context, "{\"removed\":true}");
+}
+
 void run(const RuntimeAgentHostV1* host)
 {
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
@@ -340,6 +377,7 @@ const RuntimeAgentSnippetV1 descriptor{
     sizeof(RuntimeAgentSnippetV1),
     "draw a sphere orbiting the cube",
     &run,
+    &release,
 };
 
 } // namespace

@@ -61,6 +61,40 @@ private:
 
 AboutFilter* filter = nullptr;
 
+// Take the filter back off. Unlike the scene snippets this needs no particular
+// executor: installing and removing an application-wide event filter both
+// happen on the thread that owns the application object, which is where any of
+// the three executors ends up for this module.
+void release(const RuntimeAgentHostV1* host)
+{
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+        return;
+    }
+    auto* application = qobject_cast<QApplication*>(QCoreApplication::instance());
+    if (application == nullptr) {
+        host->fail(host->invocation_context, "no QApplication in this process");
+        return;
+    }
+    if (filter == nullptr) {
+        host->complete_json(host->invocation_context,
+                            "{\"removed\":false,\"note\":\"nothing was installed\"}");
+        return;
+    }
+
+    application->removeEventFilter(filter);
+    const int applied = filter->applied();
+    delete filter;
+    filter = nullptr;
+
+    const QJsonObject result{
+        {QStringLiteral("removed"), true},
+        {QStringLiteral("timesApplied"), applied},
+        {QStringLiteral("note"), QStringLiteral("the About box shows its original text again")},
+    };
+    host->complete_json(host->invocation_context,
+                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+}
+
 void run(const RuntimeAgentHostV1* host)
 {
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
@@ -130,6 +164,7 @@ const RuntimeAgentSnippetV1 descriptor{
     sizeof(RuntimeAgentSnippetV1),
     "sign the About box without rebuilding the application",
     &run,
+    &release,
 };
 
 } // namespace

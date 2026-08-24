@@ -171,6 +171,7 @@ struct JackState {
     int openFace = 0;
     QQuaternion faceOrientation;
     std::vector<float> savedFaceVertices;
+    QByteArray stashKey;
 
     // Copied from the host, which documents agent_context as valid for the
     // lifetime of the process. The draw hook outlives the invocation.
@@ -625,6 +626,28 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
             : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
         return false;
     }
+    // Put the originals somewhere outside this module as well as inside it.
+    // savedFaceVertices dies with this generation's private state and is
+    // reachable to nothing else, so an undo written later — by a repair module
+    // after this one misbehaved, say — could disconnect the draw hook but could
+    // never find the face to put back. The stashed copy is what makes that
+    // undo writable at all.
+    //
+    // Deliberately not overwriting: if a key is already there it belongs to an
+    // earlier generation and holds the real vertices, whereas this one may be
+    // about to save the zeros a previous install left behind.
+    if (host->stash_put != nullptr) {
+        const QByteArray key = QStringLiteral("jack_in_the_box/face-%1")
+            .arg(QString::fromLatin1(cubeFaces[static_cast<std::size_t>(openFace)].name))
+            .toUtf8();
+        state->stashKey = key;
+        host->stash_put(host->agent_context,
+                        key.constData(),
+                        state->savedFaceVertices.data(),
+                        faceFloats * static_cast<std::int64_t>(sizeof(float)),
+                        0);
+    }
+
     const std::vector<float> collapsed(faceFloats, 0.0F);
     cube->m_vertexBuffer.write(byteOffset, collapsed.data(),
                                faceFloats * static_cast<int>(sizeof(float)));
@@ -695,22 +718,21 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
     if (toggleAction != nullptr) {
         return;
     }
-    // The host struct itself is only valid for this invocation; agent_context
-    // inside it is not, and that is all the handler keeps.
-    void* agentContext = host->agent_context;
-    auto* emitEvent = host->emit_event_json;
+    // Keep the whole host by value rather than picking fields out of it. The
+    // callbacks are the host's own functions and agent_context is documented as
+    // valid for the life of the process; only invocation_context belongs to the
+    // call that is ending, so that is the one field cleared. Rebuilding a
+    // partial struct here instead would leave the newer callbacks null while
+    // struct_size claimed they were there.
+    RuntimeAgentHostV1 menuHost = *host;
+    menuHost.invocation_context = nullptr;
+
     toggleAction = scene_toggle::install(
         cube,
         QStringLiteral("actionJackInTheBox"),
         QStringLiteral("&Jack in the box"),
         QStringLiteral("Ctrl+Shift+J"),
-        [cube, agentContext, emitEvent](const bool enabled) {
-            RuntimeAgentHostV1 menuHost{};
-            menuHost.abi_version = RUNTIME_AGENT_ABI_V1;
-            menuHost.struct_size = sizeof(RuntimeAgentHostV1);
-            menuHost.agent_context = agentContext;
-            menuHost.emit_event_json = emitEvent;
-
+        [cube, menuHost](const bool enabled) {
             // The menu runs on the GUI thread with no current context, and both
             // installing and removing need one, so the work waits for a frame.
             // A caller that already has a context current gets it immediately.
@@ -737,6 +759,45 @@ int faceIndexFromName(const QString& name, bool& recognized)
     }
     recognized = false;
     return 0;
+}
+
+// Takes the opening and everything in it back off, putting the widget's own
+// face vertices back. Declared in the descriptor so a caller can ask whether
+// this module can be released, and get an error rather than silence when it
+// cannot.
+//
+// Destroying the GL objects needs this widget's context current, which is only
+// true inside its paint callbacks. Deferring the work to the next frame would
+// let this report completion before the face is back, and a handover sequenced
+// on that completion would hand the next generation the zeroed vertices. So
+// this refuses instead of deferring.
+void release(const RuntimeAgentHostV1* host)
+{
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+        return;
+    }
+    auto* cube = static_cast<CubeWidget*>(
+        host->find_qobject(host->agent_context, "cubeView"));
+    if (cube == nullptr) {
+        host->fail(host->invocation_context, "cubeView was not found");
+        return;
+    }
+    if (jack == nullptr) {
+        host->complete_json(host->invocation_context,
+                            "{\"removed\":false,\"note\":\"nothing was installed\"}");
+        return;
+    }
+    if (!scene_toggle::ownContextIsCurrent(cube)) {
+        host->fail(host->invocation_context,
+                   "the widget's OpenGL context is not current; release this module with "
+                   "executor=render so the face is back before this reports completion");
+        return;
+    }
+
+    QString error;
+    setJackEnabled(cube, false, host, error);
+    host->complete_json(host->invocation_context,
+                        "{\"removed\":true,\"note\":\"the sixth face is back\"}");
 }
 
 void run(const RuntimeAgentHostV1* host)
@@ -842,6 +903,7 @@ const RuntimeAgentSnippetV1 descriptor{
     sizeof(RuntimeAgentSnippetV1),
     "hollow one side of the cube and hide a jack in the box in it",
     &run,
+    &release,
 };
 
 } // namespace
