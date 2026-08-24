@@ -158,6 +158,14 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_pillow_cube PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_pillow_cube PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_pillow_cube")
+
+    add_library(agent_snippet_jack_in_the_box MODULE snippets/jack_in_the_box.cpp)
+    target_include_directories(agent_snippet_jack_in_the_box PRIVATE include src)
+    target_link_libraries(agent_snippet_jack_in_the_box PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+    target_compile_options(agent_snippet_jack_in_the_box PRIVATE -fno-access-control)
+    set_target_properties(agent_snippet_jack_in_the_box PROPERTIES
+        PREFIX "" OUTPUT_NAME "agent_snippet_jack_in_the_box")
 endif()
 
 if(BUILD_TESTING)

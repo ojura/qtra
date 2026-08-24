@@ -385,8 +385,11 @@ void drawSubdividedCube(const CubeWidget* cube)
 bool installSubdivision(CubeWidget* cube, QString& error)
 {
     // The pillow replaces the same mesh and saves the same 36 vertices, so it
-    // has to be off before this one reads them.
+    // has to be off before this one reads them. The jack in the box saves only
+    // the face it hollows, but those vertices are part of these 36 and reading
+    // its zeros here would restore the hole instead of the face.
     scene_toggle::turnOff(cube, QStringLiteral("actionPillowMode"));
+    scene_toggle::turnOff(cube, QStringLiteral("actionJackInTheBox"));
 
     auto* state = new SubdivisionState();
     state->owner = QOpenGLContext::currentContext();

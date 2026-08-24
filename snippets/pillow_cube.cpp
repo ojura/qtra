@@ -410,8 +410,11 @@ QJsonObject describe(const PillowState* state)
 bool installPillow(CubeWidget* cube, QString& error)
 {
     // The Catmull-Clark snippet replaces the same mesh and saves the same 36
-    // vertices, so it has to be off before this one reads them.
+    // vertices, so it has to be off before this one reads them. The jack in the
+    // box saves only the face it hollows, but those vertices are part of these
+    // 36 and reading its zeros here would restore the hole instead of the face.
     scene_toggle::turnOff(cube, QStringLiteral("actionCatmullClark"));
+    scene_toggle::turnOff(cube, QStringLiteral("actionJackInTheBox"));
 
     auto* state = new PillowState();
     state->owner = QOpenGLContext::currentContext();
