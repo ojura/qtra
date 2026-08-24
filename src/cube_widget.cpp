@@ -103,6 +103,12 @@ CubeWidget::CubeWidget(QWidget* parent)
     m_timer.setInterval(16);
     connect(&m_timer, &QTimer::timeout, this, &CubeWidget::advanceAnimation);
 
+    m_renderQueueWatchdog.setObjectName(QStringLiteral("renderQueueWatchdog"));
+    m_renderQueueWatchdog.setSingleShot(true);
+    m_renderQueueWatchdog.setInterval(100);
+    connect(&m_renderQueueWatchdog, &QTimer::timeout,
+            this, &CubeWidget::drainRenderQueueIfStalled);
+
     m_clock.start();
     m_lastTickNanoseconds = m_clock.nsecsElapsed();
     m_timer.start();
@@ -205,11 +211,37 @@ void CubeWidget::enqueueRenderCallback(std::function<void()> callback)
         m_renderQueue.emplace_back(std::move(callback));
     }
 
-    if (QThread::currentThread() == thread()) {
+    const auto request = [this] {
         update();
+        m_renderQueueWatchdog.start();
+    };
+    if (QThread::currentThread() == thread()) {
+        request();
     } else {
-        QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, request, Qt::QueuedConnection);
     }
+}
+
+// update() only asks for a repaint, and a window the compositor has stopped
+// sending frame callbacks to — covered, unfocused, or on another workspace —
+// may never get one. Queued render work would then sit unfinished for as long
+// as the window stays hidden, which the caller sees as its request timing out
+// even though the snippet loaded correctly.
+//
+// grabFramebuffer() renders through an FBO whatever the compositor is doing, so
+// one forced frame drains the whole queue. It only runs when a repaint has
+// failed to arrive on its own, so a visible window never reaches this.
+void CubeWidget::drainRenderQueueIfStalled()
+{
+    bool pending = false;
+    {
+        QMutexLocker lock(&m_renderQueueMutex);
+        pending = !m_renderQueue.empty();
+    }
+    if (!pending || !isValid()) {
+        return;
+    }
+    (void)grabFramebuffer();
 }
 
 bool CubeWidget::captureFramebuffer(const QString& path, QString* error)

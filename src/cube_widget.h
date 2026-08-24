@@ -94,9 +94,11 @@ private slots:
 private:
     void initializeGeometry();
     void initializeShaders();
+    void drainRenderQueueIfStalled();
     static float normalizeAngle(float angle) noexcept;
 
     QTimer m_timer;
+    QTimer m_renderQueueWatchdog;
     QElapsedTimer m_clock;
     qint64 m_lastTickNanoseconds = 0;
     float m_elapsedSeconds = 0.0F;
