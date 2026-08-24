@@ -254,12 +254,12 @@ python3 tools/agentctl.py snippet SOME_SNIPPET.so \
 
 ### Ready-made scene modifications
 
-Three prebuilt snippets change what the widget draws. Each installs a direct
+Four prebuilt snippets change what the widget draws. Each installs a direct
 connection to `CubeWidget::frameRendered`, which is emitted at the end of
 `paintGL()` while the context is still current and the depth buffer still holds
 the cube, so a hook there gets correct occlusion without touching `paintGL()`.
-All three read private `CubeWidget` state for the frame's angle, scale, tint,
-elapsed time, and projection, and all three are compiled with
+All four read private `CubeWidget` state for the frame's angle, scale, tint,
+elapsed time, and projection, and all four are compiled with
 `-fno-access-control`.
 
 ```bash
@@ -269,20 +269,100 @@ python3 tools/agentctl.py snippet \
   build/release/agent_snippet_catmull_clark.so --executor render --request '{}'
 python3 tools/agentctl.py snippet \
   build/release/agent_snippet_mobius_ring.so --executor render --request '{}'
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_pillow_cube.so --executor render --request '{}'
 ```
 
 | module | what it does | parameters |
 | --- | --- | --- |
 | `agent_snippet_orbit_sphere` | shaded sphere on a tilted orbit | none |
 | `agent_snippet_catmull_clark` | replaces the cube with its Catmull-Clark subdivision surface, keeping the six face colors | `level` 0–5, default 2 |
+| `agent_snippet_pillow_cube` | turns each side into a stuffed pillow panel with sewn edges and stitching | `puff`, `roundness`, `tuck`, `resolution`, `seam`, `stitches`, `fabric` |
 | `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
 
-Each accepts `{"restore": true}` to take itself back off. The Catmull-Clark one
-has to suppress the widget's own draw, because `paintGL()` calls
+### Switching them on and off
+
+All four add a checkable entry to the application's Cube menu when the snippet
+is loaded, under a separator that marks off everything added at runtime:
+
+| entry | shortcut | object name |
+| --- | --- | --- |
+| Orbiting sphere | `Ctrl+Shift+O` | `actionOrbitSphere` |
+| Catmull-Clark | `Ctrl+Shift+C` | `actionCatmullClark` |
+| Mobius ring | `Ctrl+Shift+M` | `actionMobiusRing` |
+| Pillow mode | `Ctrl+Shift+P` | `actionPillowMode` |
+
+The application has no knowledge of these snippets and must not acquire any:
+they are separate shared objects that may never be loaded at all. Each entry is
+therefore created by the snippet once it is in the process, and its handler is
+code inside that module — one more reason a loaded snippet is never unloaded.
+
+Because the entry is an ordinary `QAction` in the application's object tree, the
+semantic API drives it like any other:
+
+```bash
+python3 tools/agentctl.py call action.trigger --params '{"objectName":"actionPillowMode"}'
+python3 tools/agentctl.py call object.get \
+  --params '{"objectName":"actionMobiusRing","property":"checked"}'
+```
+
+The same flip is available over the socket as `{"toggle": true}`, and the
+checkbox follows the effect whichever way it was switched:
+
+```bash
+python3 tools/agentctl.py call snippet.run \
+  --params '{"moduleId":1,"executor":"render","request":{"toggle":true}}'
+```
+
+A menu click arrives on the GUI thread with no current OpenGL context, and both
+installing and removing need one, so the handler defers the work to the next
+`paintGL()` through `CubeWidget::enqueueRenderCallback()` rather than touching
+GL state where it stands. Parameters survive being switched off: a snippet keeps
+the values it was last given and reuses them when it comes back on.
+
+A second copy of the same snippet loaded from a different path does not add a
+second entry. It would carry the same name while driving different state, so the
+module that got there first keeps the menu, and the later one is reachable only
+through its own `moduleId`.
+
+**Catmull-Clark and the pillow exclude each other.** Both replace the cube's own
+mesh, and both do it by saving the widget's 36 original vertices and then
+overwriting them with zeros. Installed one on top of the other, the second would
+save the first one's zeros as if they were the cube, and restoring later would
+put those zeros back and lose the cube for the life of the process. Switching
+either one on therefore switches the other off first, through the menu entry
+rather than a shared symbol: the two are separate shared objects with no way to
+call each other, so the exclusion runs by unchecking the other's `QAction` and
+letting the module that owns it do its own removal.
+
+That handles the case where both entries exist. As a backstop for when they do
+not — a second copy from a JIT path never gets one, since the name is taken —
+each of the two also reads the widget's vertices before saving them and refuses
+to install if they are already all zeros:
+
+```text
+the widget's vertices are already collapsed, so another mesh replacement owns
+them; saving these zeros would lose the cube
+```
+
+The overlays are a different matter: the sphere and the ring only add draw
+passes, so they compose with each other and with either mesh replacement.
+
+Each also accepts `{"restore": true}` to take itself back off. The Catmull-Clark and
+pillow ones have to suppress the widget's own draw, because `paintGL()` calls
 `glDrawArrays(GL_TRIANGLES, 0, 36)` with the count baked into compiled code and
-a subdivided mesh cannot go through that buffer. It keeps the widget's 36
-original vertices, overwrites them with zeros so that draw rasterizes only
-degenerate triangles, and puts them back on restore.
+a denser mesh cannot go through that buffer. They keep the widget's 36 original
+vertices, overwrite them with zeros so that draw rasterizes only degenerate
+triangles, and put them back on restore.
+
+The pillow's six panels are separate grids that share their border curves, so
+the surface stays closed while each panel keeps its own normals along the seam
+and shades as a crease. Its parameters trade off against each other: pushing
+`puff` much past the corner radius set by `roundness` and `tuck` puts the panel
+centers as far from the middle as the corners are, and the silhouette becomes a
+ball rather than a cube. `fabric` fades the six saturated face colors toward a
+linen tone; it defaults to 0, which keeps them exactly as the widget draws them.
+Re-running the loaded module keeps any parameter the new request omits.
 
 Re-run a loaded module rather than loading it again, so that the module's static
 state is the one that gets updated:
@@ -305,6 +385,37 @@ load, but `dlopen()` returns the same handle, so both ids address one copy of
 the module's static state and the second run reports that the modification is
 already installed instead of installing another one. Either id works as
 `moduleId`.
+
+### Changing the application's own dialogs
+
+`agent_snippet_about_signature` adds a line to the About box of a process that
+is already running, with no edit to `src/main_window.cpp` and no restart:
+
+```bash
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_about_signature.so \
+  --executor gui --request '{"line":"claude was here"}'
+```
+
+Replacing the About action's handler would have been the obvious approach, and
+it is the wrong one: the wording lives in a lambda in `main_window.cpp`, a
+snippet cannot read a string out of compiled code, and a replacement handler
+would have to restate the application's own text and then go stale when the
+application changes it.
+
+The snippet installs an application-wide event filter instead. `QMessageBox`
+sees `QEvent::Show` before it reaches the screen, so the application builds its
+dialog exactly as it always does and the line is appended to whatever text that
+box turned out to carry. Reading it back while the dialog was open gave:
+
+```text
+An optimized Qt 6/OpenGL process with semantic RPC, runtime-compiled C++
+snippets, and two hotpatch modes.
+
+claude was here
+```
+
+`{"restore": true}` removes the filter and reports how many dialogs it changed.
 
 ### Project-aware on-demand compilation
 
@@ -349,6 +460,74 @@ optimization, LTO, profile, and PIE settings; then adds a chosen optimization,
 Successful snippet modules are deliberately never unloaded. A snippet may have
 installed a Qt callback whose machine code or static state lives in the module.
 A real system would add generations and epoch/reference tracking before unload.
+
+### Editing a loaded snippet without restarting
+
+`dlopen()` keys loaded objects by pathname, so asking for a path that is
+already loaded returns the resident handle and its code, whatever the file on
+disk now says. Rebuilding a snippet target and loading it again therefore runs
+the *old* module, and reports success while doing it: a new module id comes
+back, `snippet.run` completes, and nothing anywhere says the edit was ignored.
+Measured on this repository, rebuilding with `springRingSegments` changed from
+8 to 12 and loading the same path still reported the old `springTriangles` of
+1920.
+
+Getting the new code in takes two steps: tell the installed generation to
+release whatever it installed, and present the object under a pathname nothing
+has asked for yet. `agentctl.py reload` does both:
+
+```bash
+cmake --build --preset release --target agent_snippet_jack_in_the_box
+
+python3 tools/agentctl.py reload build/release/agent_snippet_jack_in_the_box.so \
+  --executor render \
+  --handover-request '{"restore": true}' \
+  --request '{}'
+```
+
+That copies the object to `runtime-snippets/<name>-<hash>.so`, loads it, finds
+the generation it supersedes, runs the handover request on that one, and then
+runs the new one. The same edit through this path reported 3360 triangles for
+`springRingSegments = 14`, in a process that was never restarted.
+
+Nothing about a module's release is defined by the ABI or the protocol, so
+`--handover-request` has no default and the tool sends nothing unless asked.
+`{"restore": true}` is the convention these scene snippets happen to use.
+Without a handover the new generation installs alongside the old one, which for
+two `frameRendered` hooks means two copies rather than a replacement; the
+snippets that overwrite the widget's vertices refuse that outright rather than
+save the zeros.
+
+Generations are matched by the descriptor's `name_utf8`, which is the same
+string in every build of one source, rather than by filename — reloads and
+`jit_snippet.py` output do not share a filename stem. `--replace ID` picks the
+outgoing module explicitly.
+
+`jit_snippet.py` remains the tool for a source file with no CMake target. For
+one that has a target, building it is not the slower option — an incremental
+build measured 4.4 s against 4.1 s for the oracle's own compile — and the built
+object is the artifact the project actually produces, compiled with the
+project's command line rather than the oracle's reconstruction of it.
+
+Two properties still hold across a reload:
+
+- Nothing is unloaded, so every iteration leaves its predecessor resident.
+- A menu entry created by `scene_toggle` is handed to the newest generation.
+  The entry is rebound rather than duplicated, so the checkbox drives the code
+  that is installed. This assumes the handover ran first.
+
+Plain `agentctl.py snippet` on a path that is already loaded now says so on
+stderr, rather than letting a stale load look like a rebuild that did not take.
+
+Work queued for the `render` executor runs inside `paintGL()`, and `update()`
+only asks for a repaint. A window the compositor has stopped sending frame
+callbacks to — covered, unfocused, or minimised — may never provide one, and
+queued work would then wait for as long as the window stays hidden while the
+caller sees only its own request timing out. `CubeWidget` therefore starts a
+100 ms single-shot watchdog whenever it queues render work, and a queue still
+unserved when it fires is drained through `grabFramebuffer()`, which renders
+whatever the compositor is doing. A visible window never reaches it. This lives
+in the widget rather than in the client tools, so every caller gets it.
 
 ## Function hot-swapping
 
@@ -467,7 +646,8 @@ when a failure occurs.
   agent can use DWARF and assembly where possible, or hot-install a rebuilt probe
   that explicitly materializes the value on the next execution.
 - A kernel module is unnecessary for this prototype. It would not solve C++ ABI,
-  Qt affinity, or application invariants, and would increase the blast radius.
+  Qt affinity, or application invariants, and a bug in one takes down the whole
+  machine instead of a single process.
 
 ## Repository map
 
@@ -480,8 +660,9 @@ src/agent/module_manager.*      dlopen, snippet, dispatch, entry patch state
 src/agent/entry_hotpatch.*      Linux/x86-64 entry rewriter
 src/cube_widget.*               OpenGL cube and execution seams
 snippets/                       native runtime code examples and scene modifications
+snippets/scene_toggle.h         runtime-added Cube menu entry shared by the scene snippets
 patches/                        function replacement examples
-tools/agentctl.py               protocol client
+tools/agentctl.py               protocol client, including snippet reload
 tools/compile_snippet.py        compile-database build oracle
 tools/jit_snippet.py            compile + load + execute pipeline
 tools/jit_patch.py              compile + load + hot-activate pipeline
