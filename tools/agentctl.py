@@ -21,7 +21,17 @@ EventHandler = Callable[[JsonObject], None]
 
 
 class ProtocolError(RuntimeError):
-    """The agent returned an error response or malformed protocol data."""
+    """The agent returned an error response or malformed protocol data.
+
+    The agent's error code is kept as an attribute, not just folded into the
+    message, because callers have to act differently on some of them: a module
+    declaring no release is an answer to work with, while a release that ran and
+    failed is a reason to stop.
+    """
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class AgentClient:
@@ -95,7 +105,7 @@ class AgentClient:
                 error = message.get("error") or {}
                 code = error.get("code", "agent_error")
                 text = error.get("message", "agent command failed")
-                raise ProtocolError(f"{code}: {text}")
+                raise ProtocolError(f"{code}: {text}", code)
             return message.get("result")
 
     def subscribe(
@@ -281,6 +291,88 @@ def run_snippet(
     return {"started": started, "finished": finished}
 
 
+def release_snippet(
+    client: "AgentClient",
+    module_id: str,
+    executor: str | None,
+    target: JsonObject | None,
+    timeout: float,
+    on_event: EventHandler | None = None,
+) -> tuple[str, JsonObject]:
+    """Ask a module to undo what it installed, through its declared entry point.
+
+    Returns the outcome as one of "released", "declared-none" or "failed", so a
+    caller can act on the difference. Sending a payload and reading "completed"
+    off it cannot make that distinction: a module that ignores the payload
+    reports success having done nothing.
+
+    Executor and target are left out unless the caller insists on them, because
+    the agent knows how the module was last run successfully and that is where
+    its release belongs.
+    """
+    params: JsonObject = {"moduleId": module_id}
+    if executor:
+        params["executor"] = executor
+    if target:
+        params["target"] = target
+    try:
+        started = client.request("snippet.release", params, on_event=on_event)
+    except ProtocolError as exc:
+        outcome = "declared-none" if exc.code == "no_release_declared" else "failed"
+        return outcome, {"reason": str(exc)}
+
+    finished = client.wait_for_operation(
+        started["operationId"], timeout=timeout, on_event=on_event
+    )
+    data = finished.get("data") or {}
+    detail: JsonObject = {"started": started, "finished": finished}
+    if data.get("outcome") != "completed":
+        return "failed", detail
+    return "released", detail
+
+
+def hand_over(
+    client: "AgentClient",
+    outgoing: JsonObject,
+    executor: str | None,
+    target: JsonObject | None,
+    handover_request: str | None,
+    timeout: float,
+    on_event: EventHandler | None = None,
+) -> JsonObject:
+    """Get the outgoing generation to let go before the new one installs.
+
+    The declared release is tried first because it is the only route that can
+    report whether anything happened. A module declaring none falls back to a
+    request payload if the caller supplied one, which is an application's own
+    convention rather than a property of the mechanism, and is reported under a
+    different outcome so the two are never confused.
+    """
+    outcome, detail = release_snippet(
+        client, outgoing["id"], executor, target, timeout, on_event
+    )
+    if outcome != "declared-none" or handover_request is None:
+        return {"moduleId": outgoing["id"], "route": "release", "outcome": outcome, **detail}
+
+    ran = run_snippet(
+        client,
+        outgoing["id"],
+        executor or "render",
+        parse_json(handover_request),
+        target,
+        timeout,
+        on_event,
+    )
+    data = (ran.get("finished") or {}).get("data") or {}
+    return {
+        "moduleId": outgoing["id"],
+        "route": "handover-request",
+        "outcome": "payload-sent" if data.get("outcome") == "completed" else "failed",
+        "note": "this module declares no release; the payload's effect is unverifiable",
+        **ran,
+    }
+
+
 def is_finished_operation(message: Mapping[str, Any], operation_id: str | int) -> bool:
     if message.get("event") != "operation.finished":
         return False
@@ -339,7 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "in the running process.",
     )
     reload_cmd.add_argument("path", help="the rebuilt shared object")
-    reload_cmd.add_argument("--executor", choices=("gui", "object", "render"), default="render")
+    # No default, so that leaving it out can mean something. The new generation
+    # runs under render unless told otherwise, but the handover is left to the
+    # executor the agent recorded for the outgoing module, which is where its
+    # install actually ran. Naming one here overrides both.
+    reload_cmd.add_argument("--executor", choices=("gui", "object", "render"), default=None)
     reload_target = reload_cmd.add_mutually_exclusive_group()
     reload_target.add_argument("--target-name")
     reload_target.add_argument("--target-id")
@@ -348,14 +444,19 @@ def build_parser() -> argparse.ArgumentParser:
     reload_cmd.add_argument(
         "--replace", help="module id to hand over from, instead of matching by snippet name"
     )
-    # What a module has to be told in order to release what it installed is the
-    # snippet's own business; nothing in the ABI or the protocol defines it. The
-    # mechanism belongs here, the wording belongs to the caller. The scene
-    # snippets in this repository use {"restore": true}.
+    # Only for modules that declare no release. What such a module has to be
+    # told in order to let go is its own business; nothing in the ABI or the
+    # protocol defines it, and the scene snippets here happen to use
+    # {"restore": true}. A module that declares a release needs none of this.
     reload_cmd.add_argument(
         "--handover-request",
-        help="request to run on the outgoing generation before the new one loads; "
-             "omit to leave it alone",
+        help="fallback request for an outgoing generation that declares no release; "
+             "its effect cannot be verified",
+    )
+    reload_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="run the new generation even if the outgoing one failed to release",
     )
 
     return parser
@@ -518,48 +619,73 @@ def main(argv: list[str] | None = None) -> int:
                         raise ValueError("object executor requires --target-name or --target-id")
 
                 client.subscribe(["operation."], on_event=show_event)
+                run_executor = args.executor or "render"
+                result: JsonObject = {}
+
+                # With an explicit id the outgoing module is known before
+                # anything is loaded, so the handover runs first and a failure
+                # costs nothing at all: no copy, no load, no new module left
+                # resident. Without one, generations are recognised by descriptor
+                # name, and the name only exists once the new object is loaded.
+                outgoing: JsonObject | None = None
+                if args.replace:
+                    outgoing = next(
+                        (m for m in loaded_snippet_modules(client)
+                         if str(m.get("id")) == str(args.replace)),
+                        None,
+                    )
+                    if outgoing is None:
+                        raise ValueError(f"no loaded snippet module with id {args.replace}")
+                    result["handover"] = hand_over(
+                        client, outgoing, args.executor, target,
+                        args.handover_request, args.timeout, show_event,
+                    )
+                    if result["handover"]["outcome"] == "failed" and not args.force:
+                        result["installed"] = False
+                        result["note"] = ("the outgoing generation did not release, so nothing "
+                                          "was loaded; pass --force to install anyway")
+                        print_json(result, args.compact)
+                        return 1
 
                 fresh = fresh_object_path(source)
                 shutil.copy2(source, fresh)
                 loaded = client.request(
                     "snippet.load", {"path": str(fresh)}, on_event=show_event
                 )
+                result["copiedTo"] = str(fresh)
+                result["loaded"] = loaded
 
-                modules = loaded_snippet_modules(client)
-                if args.replace:
-                    outgoing = next(
-                        (m for m in modules if str(m.get("id")) == str(args.replace)), None
-                    )
-                    if outgoing is None:
-                        raise ValueError(f"no loaded snippet module with id {args.replace}")
-                else:
+                if outgoing is None:
                     outgoing = previous_generation(
-                        modules, loaded.get("name", ""), loaded["moduleId"]
+                        loaded_snippet_modules(client), loaded.get("name", ""), loaded["moduleId"]
                     )
+                    if outgoing is not None:
+                        result["handover"] = hand_over(
+                            client, outgoing, args.executor, target,
+                            args.handover_request, args.timeout, show_event,
+                        )
+                result["supersedes"] = outgoing["id"] if outgoing else None
 
-                result: JsonObject = {
-                    "copiedTo": str(fresh),
-                    "loaded": loaded,
-                    "supersedes": outgoing["id"] if outgoing else None,
-                }
-                if outgoing is not None and args.handover_request:
-                    result["handover"] = {
-                        "moduleId": outgoing["id"],
-                        **run_snippet(
-                            client,
-                            outgoing["id"],
-                            args.executor,
-                            parse_json(args.handover_request),
-                            target,
-                            args.timeout,
-                            show_event,
-                        ),
-                    }
+                # A module is never unloaded, so a failed release cannot be
+                # undone by dropping the new object. What is still avoidable is
+                # running its install on top of state the old one still holds,
+                # which is the failure this whole path exists to prevent. The
+                # new module stays resident and inert, which costs almost
+                # nothing.
+                handover = result.get("handover") or {}
+                if handover.get("outcome") == "failed" and not args.force:
+                    result["installed"] = False
+                    result["note"] = ("the outgoing generation did not release, so the new one "
+                                      "was loaded but not run; pass --force to run it anyway")
+                    print_json(result, args.compact)
+                    return 1
+
+                result["installed"] = True
                 result.update(
                     run_snippet(
                         client,
                         loaded["moduleId"],
-                        args.executor,
+                        run_executor,
                         request,
                         target,
                         args.timeout,
