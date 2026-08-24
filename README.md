@@ -587,15 +587,39 @@ A module that overwrites host state can put the original where the host owns it:
 
 ```cpp
 host->stash_put(host->agent_context, "jack_in_the_box/face-front",
-                vertices.data(), byteCount, /*overwrite=*/0);
+                vertices.data(), byteCount, /*overwrite=*/1);
 ```
 
 The reason is narrower than "plan your cleanup". Undo *code* can be written
 later: Qt keeps connection, filter and action state, so a module written
 afterwards can disconnect a hook it never installed. Undo *data* cannot be
-reconstructed once it is gone. The jack's six original vertices otherwise live
-only in its own `static` behind an anonymous-namespace pointer, so a later
+reconstructed once it is gone. The jack's six original vertices would otherwise
+live only in its own `static` behind an anonymous-namespace pointer, so a later
 repair module could remove the draw hook and never put the face back.
+
+An entry means *what the displacement currently in effect displaced*, not the
+oldest value ever seen, so installing overwrites it. Keeping the first copy
+forever would replay factory vertices over a later legitimate edit and revert it
+silently.
+
+Two rules follow from that meaning, and both are placement rather than
+exhortation:
+
+- **Deposit behind the guard that makes the install safe.** The jack already
+  refuses to install onto an already-collapsed face, and the deposit sits after
+  that check, so nothing can reach it with bytes the module has not just
+  validated. There is no separate obligation on whoever writes the next snippet.
+- **Replay only onto your own displacement.** Before writing the saved bytes
+  back, the jack checks the face still holds the zeros it wrote. If something
+  else changed it since, the bytes are left alone and the result says so. That
+  check is what makes an entry which outlives its release safe to keep.
+
+The stash holds the *only* copy — the jack keeps no private duplicate and its
+own restore reads it back from there. That is deliberate: a saved copy nobody
+reads is a copy nobody notices going wrong, whereas here the bytes another
+module would rely on are the bytes this module's own restore needs. Drop the
+entry while the face is still open and releasing reports that the face could not
+be restored, rather than writing whatever happened to be in the buffer.
 
 ```bash
 python3 tools/agentctl.py call stash.list

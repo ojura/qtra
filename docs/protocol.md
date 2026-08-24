@@ -135,11 +135,22 @@ The namespace is flat on purpose. Scoping keys to a module would shut out
 exactly the later repair module the stash exists to serve. The convention is
 `<module-name>/<what>`.
 
+An entry means what the displacement currently in effect displaced, not the
+oldest value ever seen, so an install overwrites it; `stash_put` takes an
+explicit overwrite flag and reports whether the key was already there.
+
 Entries outlive the module that wrote them and go away only on an explicit
 `stash.drop`. Deciding that a restore actually worked takes an observation no
 module can make about itself, so dropping is the driver's call, not the
 module's — and a buggy restore that corrupts instead of restoring must not
-delete the only good copy as its last act.
+delete the only good copy as its last act. Dropping an entry whose displacement
+is still in effect is how you lose the original: releasing then reports that it
+could not restore, rather than writing whatever is in the buffer.
+
+Consumers replay an entry only after checking the displacement it describes is
+still in effect. For these snippets that check is that the face is still all
+zeros; if it is not, something else has changed it since and replaying would
+revert that.
 
 Each entry is stamped by the host with its size, a monotonic timestamp, and the
 id of the module that wrote it, so provenance does not depend on the depositor
