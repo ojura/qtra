@@ -29,13 +29,31 @@ struct RuntimeAgentHostV1 {
     std::uint32_t abi_version;
     std::uint32_t struct_size;
 
-    // agent_context remains valid for the lifetime of the application. It may be
-    // copied into callbacks installed by a snippet because loaded modules are not
-    // unloaded by the demo.
+    // The fields of this struct fall into two lifetimes, and the split is the
+    // rule to apply to any field added later rather than a fact about these two
+    // in particular.
+    //
+    // Process lifetime: agent_context and every function pointer below. The
+    // callbacks are the host's own functions, and agent_context identifies the
+    // calling module for as long as it is loaded, which is forever — modules
+    // are deliberately never unloaded.
+    //
+    // Invocation lifetime: invocation_context, and only that. It belongs to the
+    // call in progress and is meaningless once run() or release() returns.
+    //
+    // A snippet that installs a callback outliving the invocation — a draw
+    // hook, a menu handler — should keep a by-value copy of this whole struct
+    // with invocation_context set to nullptr, and use that afterwards. Copying
+    // the struct is sanctioned precisely because everything except that one
+    // field is process-lifetime. Rebuilding a partial struct by hand instead is
+    // a mistake worth naming: it leaves later callbacks null while struct_size
+    // claims they are present, and the module then crashes on a host that is
+    // newer than the code which wrote it.
+    //
+    // Anything invocation-scoped added here in future must be cleared by that
+    // same copy step. Classifying it here is what lets already-resident modules
+    // keep working, since by constraint they can never be rebuilt.
     void* agent_context;
-
-    // invocation_context is only valid while the snippet invocation is active.
-    // Do not retain it unless a future ABI adds retain/release callbacks.
     void* invocation_context;
 
     void (*log)(void* agent_context, std::int32_t level, const char* message_utf8);

@@ -1356,12 +1356,30 @@ void* RuntimeAgent::hostFindSymbol(void*, const char* symbolName)
 
 const char* RuntimeAgent::hostRequestJson(void* invocationContext)
 {
+    // A module that kept a by-value copy of the host for a callback outliving
+    // its invocation has invocation_context cleared, as the ABI tells it to.
+    // Calling this from there is a mistake, but it is a mistake that would
+    // otherwise dereference null inside the host, so it is reported instead.
+    if (invocationContext == nullptr) {
+        qWarning("runtime-agent: %s called outside an invocation; "
+                 "invocation_context is null", __func__);
+        return "{}";
+    }
     auto* invocation = static_cast<SnippetInvocation*>(invocationContext);
     return invocation->requestJson.constData();
 }
 
 void RuntimeAgent::hostCompleteJson(void* invocationContext, const char* resultJson)
 {
+    // A module that kept a by-value copy of the host for a callback outliving
+    // its invocation has invocation_context cleared, as the ABI tells it to.
+    // Calling this from there is a mistake, but it is a mistake that would
+    // otherwise dereference null inside the host, so it is reported instead.
+    if (invocationContext == nullptr) {
+        qWarning("runtime-agent: %s called outside an invocation; "
+                 "invocation_context is null", __func__);
+        return;
+    }
     auto* invocation = static_cast<SnippetInvocation*>(invocationContext);
     if (invocation->completed) {
         invocation->error = QStringLiteral("snippet completed more than once");
@@ -1373,6 +1391,15 @@ void RuntimeAgent::hostCompleteJson(void* invocationContext, const char* resultJ
 
 void RuntimeAgent::hostFail(void* invocationContext, const char* error)
 {
+    // A module that kept a by-value copy of the host for a callback outliving
+    // its invocation has invocation_context cleared, as the ABI tells it to.
+    // Calling this from there is a mistake, but it is a mistake that would
+    // otherwise dereference null inside the host, so it is reported instead.
+    if (invocationContext == nullptr) {
+        qWarning("runtime-agent: %s called outside an invocation; "
+                 "invocation_context is null", __func__);
+        return;
+    }
     auto* invocation = static_cast<SnippetInvocation*>(invocationContext);
     if (invocation->completed) {
         invocation->error = QStringLiteral("snippet completed more than once");
