@@ -170,7 +170,6 @@ struct JackState {
 
     int openFace = 0;
     QQuaternion faceOrientation;
-    std::vector<float> savedFaceVertices;
     QByteArray stashKey;
 
     // Copied from the host, which documents agent_context as valid for the
@@ -606,15 +605,17 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     // them to a point. paintGL()'s 36-vertex draw still runs; those two
     // triangles just cover no pixels.
     const int byteOffset = openFace * faceFloats * static_cast<int>(sizeof(float));
-    state->savedFaceVertices.resize(faceFloats);
+    std::vector<float> savedFace(faceFloats);
     cube->m_vertexBuffer.bind();
     const bool readBack = cube->m_vertexBuffer.read(
-        byteOffset, state->savedFaceVertices.data(), faceFloats * static_cast<int>(sizeof(float)));
+        byteOffset, savedFace.data(), faceFloats * static_cast<int>(sizeof(float)));
     // All zeros means another mesh replacement already collapsed the cube and
     // holds the only copy of the originals. Saving these would lose the face on
-    // restore, so refuse rather than nest.
+    // restore, so refuse rather than nest. This is also the check that makes the
+    // stash deposit below safe, which is why the deposit sits behind it rather
+    // than carrying a verification of its own.
     const bool alreadySuppressed = readBack
-        && std::all_of(state->savedFaceVertices.begin(), state->savedFaceVertices.end(),
+        && std::all_of(savedFace.begin(), savedFace.end(),
                        [](const float value) { return value == 0.0F; });
     if (!readBack || alreadySuppressed) {
         cube->m_vertexBuffer.release();
@@ -626,27 +627,31 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
             : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
         return false;
     }
-    // Put the originals somewhere outside this module as well as inside it.
-    // savedFaceVertices dies with this generation's private state and is
-    // reachable to nothing else, so an undo written later — by a repair module
-    // after this one misbehaved, say — could disconnect the draw hook but could
-    // never find the face to put back. The stashed copy is what makes that
-    // undo writable at all.
+    // The stash holds the only copy, and this module's own restore reads it
+    // back from there. Keeping a private duplicate as well would make the bytes
+    // other code depends on a copy nobody here exercises, and a saved copy
+    // nobody reads is one nobody notices going wrong.
     //
-    // Deliberately not overwriting: if a key is already there it belongs to an
-    // earlier generation and holds the real vertices, whereas this one may be
-    // about to save the zeros a previous install left behind.
-    if (host->stash_put != nullptr) {
-        const QByteArray key = QStringLiteral("jack_in_the_box/face-%1")
-            .arg(QString::fromLatin1(cubeFaces[static_cast<std::size_t>(openFace)].name))
-            .toUtf8();
-        state->stashKey = key;
-        host->stash_put(host->agent_context,
-                        key.constData(),
-                        state->savedFaceVertices.data(),
-                        faceFloats * static_cast<std::int64_t>(sizeof(float)),
-                        0);
+    // The entry means "what the displacement currently in effect displaced",
+    // not "the oldest value ever seen", so an install overwrites it. Replaying
+    // a first-ever copy over a later legitimate edit would revert that edit
+    // silently. Nothing verifies the bytes at this call — the guard above
+    // already did, and there is no path to here that skipped it.
+    if (host->stash_put == nullptr || host->stash_get == nullptr) {
+        cube->m_vertexBuffer.release();
+        destroyBuffers();
+        delete state;
+        error = QStringLiteral("this host has no byte stash, which is where the face is kept");
+        return false;
     }
+    state->stashKey = QStringLiteral("jack_in_the_box/face-%1")
+        .arg(QString::fromLatin1(cubeFaces[static_cast<std::size_t>(openFace)].name))
+        .toUtf8();
+    host->stash_put(host->agent_context,
+                    state->stashKey.constData(),
+                    savedFace.data(),
+                    faceFloats * static_cast<std::int64_t>(sizeof(float)),
+                    1);
 
     const std::vector<float> collapsed(faceFloats, 0.0F);
     cube->m_vertexBuffer.write(byteOffset, collapsed.data(),
@@ -662,15 +667,44 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     return true;
 }
 
-// Needs the widget's OpenGL context to be current.
-void removeJack(CubeWidget* cube)
+// Needs the widget's OpenGL context to be current. The note says what happened
+// to the face, which is not always "put back".
+void removeJack(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& note)
 {
     QObject::disconnect(drawConnection);
 
     const int byteOffset = jack->openFace * faceFloats * static_cast<int>(sizeof(float));
+    const auto faceBytes = faceFloats * static_cast<std::int64_t>(sizeof(float));
+
+    std::vector<float> savedFace(faceFloats);
+    const std::int64_t stashed = host->stash_get(host->agent_context,
+                                                 jack->stashKey.constData(),
+                                                 savedFace.data(),
+                                                 faceBytes);
+
+    // Replay only onto the displacement this entry describes. If the face is no
+    // longer the zeros this module wrote, something else has legitimately
+    // changed it since, and writing the saved bytes over that would revert
+    // someone else's work. This is the install guard again, run at the other
+    // end: it is what makes an entry that persists safe to keep around.
+    std::vector<float> current(faceFloats);
     cube->m_vertexBuffer.bind();
-    cube->m_vertexBuffer.write(byteOffset, jack->savedFaceVertices.data(),
-                               faceFloats * static_cast<int>(sizeof(float)));
+    const bool readBack = cube->m_vertexBuffer.read(byteOffset, current.data(),
+                                                    static_cast<int>(faceBytes));
+    const bool stillCollapsed = readBack
+        && std::all_of(current.begin(), current.end(),
+                       [](const float value) { return value == 0.0F; });
+
+    if (stashed != faceBytes) {
+        note = QStringLiteral("the face was not restored: its stash entry is gone or the "
+                              "wrong size, so the original vertices are no longer anywhere");
+    } else if (!stillCollapsed) {
+        note = QStringLiteral("the face was left alone: it no longer holds the zeros this "
+                              "module wrote, so something else has changed it since");
+    } else {
+        cube->m_vertexBuffer.write(byteOffset, savedFace.data(), static_cast<int>(faceBytes));
+        note = QStringLiteral("the sixth face is back");
+    }
     cube->m_vertexBuffer.release();
 
     jack->shellArray.destroy();
@@ -694,20 +728,21 @@ void syncToggleAction()
     }
 }
 
-// Returns false only when an install was asked for and failed.
+// Returns false only when an install was asked for and failed. On removal the
+// message carries what became of the face rather than an error.
 bool setJackEnabled(CubeWidget* cube,
                     const bool enabled,
                     const RuntimeAgentHostV1* host,
-                    QString& error)
+                    QString& message)
 {
     if (enabled == (jack != nullptr)) {
         return true;
     }
     bool installed = true;
     if (enabled) {
-        installed = installJack(cube, rememberedFace, host, error);
+        installed = installJack(cube, rememberedFace, host, message);
     } else {
-        removeJack(cube);
+        removeJack(cube, host, message);
     }
     syncToggleAction();
     return installed;
@@ -794,10 +829,14 @@ void release(const RuntimeAgentHostV1* host)
         return;
     }
 
-    QString error;
-    setJackEnabled(cube, false, host, error);
+    QString note;
+    setJackEnabled(cube, false, host, note);
+    const QJsonObject result{
+        {QStringLiteral("removed"), true},
+        {QStringLiteral("note"), note},
+    };
     host->complete_json(host->invocation_context,
-                        "{\"removed\":true,\"note\":\"the sixth face is back\"}");
+                        QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
 }
 
 void run(const RuntimeAgentHostV1* host)
@@ -840,11 +879,11 @@ void run(const RuntimeAgentHostV1* host)
             });
             return;
         }
-        QString error;
-        setJackEnabled(cube, false, host, error);
+        QString note;
+        setJackEnabled(cube, false, host, note);
         complete(QJsonObject{
             {QStringLiteral("removed"), true},
-            {QStringLiteral("note"), QStringLiteral("the sixth face is back")},
+            {QStringLiteral("note"), note},
         });
         return;
     }
@@ -864,8 +903,8 @@ void run(const RuntimeAgentHostV1* host)
     // Moving the opening means putting the old face back first, so a re-run with
     // a different side does not leave two holes.
     if (jack != nullptr && requestedFace != jack->openFace) {
-        QString error;
-        setJackEnabled(cube, false, host, error);
+        QString note;
+        setJackEnabled(cube, false, host, note);
     }
     rememberedFace = requestedFace;
 
