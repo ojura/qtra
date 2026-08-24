@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import select
+import shutil
 import socket
 import sys
 import time
@@ -223,6 +225,62 @@ def print_json(value: Any, compact: bool = False, stream: Any | None = None) -> 
         print(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False), file=stream)
 
 
+def fresh_object_path(source: Path) -> Path:
+    """A path for `source`'s bytes that no dlopen() in the process has seen.
+
+    dlopen() keys loaded objects by pathname, so asking for one that is already
+    loaded returns the resident handle and the old code with it, whatever the
+    file on disk now contains. Copying under a name nothing has requested is
+    what makes a rebuilt object actually take effect.
+    """
+    digest = hashlib.sha256(source.read_bytes() + str(time.time_ns()).encode("ascii"))
+    directory = source.parent / "runtime-snippets"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{source.stem}-{digest.hexdigest()[:12]}{source.suffix}"
+
+
+def loaded_snippet_modules(client: "AgentClient") -> list[JsonObject]:
+    modules = client.request("module.list")
+    if not isinstance(modules, list):
+        return []
+    return [m for m in modules if isinstance(m, dict) and m.get("kind") == "snippet"]
+
+
+def previous_generation(modules: list[JsonObject], name: str, exclude_id: str) -> JsonObject | None:
+    """The newest other module reporting the same snippet name.
+
+    Generations of one snippet differ in path — each reload needs a new one —
+    but the descriptor name is the same string in every build of that source,
+    which makes it the reliable way to recognise them as the same thing.
+    """
+    candidates = [
+        m for m in modules
+        if m.get("name") == name and str(m.get("id")) != str(exclude_id)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda m: int(m["id"]))
+
+
+def run_snippet(
+    client: "AgentClient",
+    module_id: str,
+    executor: str,
+    request: Any,
+    target: JsonObject | None,
+    timeout: float,
+    on_event: EventHandler | None = None,
+) -> JsonObject:
+    params: JsonObject = {"moduleId": module_id, "executor": executor, "request": request}
+    if target:
+        params["target"] = target
+    started = client.request("snippet.run", params, on_event=on_event)
+    finished = client.wait_for_operation(
+        started["operationId"], timeout=timeout, on_event=on_event
+    )
+    return {"started": started, "finished": finished}
+
+
 def is_finished_operation(message: Mapping[str, Any], operation_id: str | int) -> bool:
     if message.get("event") != "operation.finished":
         return False
@@ -272,6 +330,33 @@ def build_parser() -> argparse.ArgumentParser:
     snippet.add_argument("--request", help="inline JSON request")
     snippet.add_argument("--request-file", help="path to JSON request")
     snippet.add_argument("--no-wait", action="store_true")
+
+    reload_cmd = subparsers.add_parser(
+        "reload",
+        help="replace a loaded snippet with a rebuilt object of the same name",
+        description="Take the installed generation off, then load the rebuilt object "
+                    "under a path dlopen() has not seen, so the new code takes effect "
+                    "in the running process.",
+    )
+    reload_cmd.add_argument("path", help="the rebuilt shared object")
+    reload_cmd.add_argument("--executor", choices=("gui", "object", "render"), default="render")
+    reload_target = reload_cmd.add_mutually_exclusive_group()
+    reload_target.add_argument("--target-name")
+    reload_target.add_argument("--target-id")
+    reload_cmd.add_argument("--request", help="inline JSON request for the new generation")
+    reload_cmd.add_argument("--request-file", help="path to JSON request")
+    reload_cmd.add_argument(
+        "--replace", help="module id to hand over from, instead of matching by snippet name"
+    )
+    # What a module has to be told in order to release what it installed is the
+    # snippet's own business; nothing in the ABI or the protocol defines it. The
+    # mechanism belongs here, the wording belongs to the caller. The scene
+    # snippets in this repository use {"restore": true}.
+    reload_cmd.add_argument(
+        "--handover-request",
+        help="request to run on the outgoing generation before the new one loads; "
+             "omit to leave it alone",
+    )
 
     return parser
 
@@ -380,8 +465,21 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.subcommand == "snippet":
                 request = parse_json(args.request, args.request_file)
+                resolved = str(Path(args.path).resolve())
+                # Loading a path that is already loaded succeeds and returns a
+                # fresh module id, but dlopen() hands back the resident object,
+                # so a rebuilt file at that path runs its old code with nothing
+                # reporting a problem. Say so rather than let it look like a
+                # rebuild that did not take.
+                if any(m.get("path") == resolved for m in loaded_snippet_modules(client)):
+                    print(
+                        f"agentctl: {resolved} is already loaded; dlopen() will return the "
+                        f"resident copy and any rebuild of this file will not take effect. "
+                        f"Use 'agentctl.py reload' to load it as a new generation.",
+                        file=sys.stderr,
+                    )
                 loaded = client.request(
-                    "snippet.load", {"path": str(Path(args.path).resolve())}, on_event=show_event
+                    "snippet.load", {"path": resolved}, on_event=show_event
                 )
                 params: JsonObject = {
                     "moduleId": loaded["moduleId"],
@@ -402,6 +500,72 @@ def main(argv: list[str] | None = None) -> int:
                     result["finished"] = client.wait_for_operation(
                         started["operationId"], timeout=args.timeout, on_event=show_event
                     )
+                print_json(result, args.compact)
+                return 0
+
+            if args.subcommand == "reload":
+                source = Path(args.path).resolve()
+                if not source.is_file():
+                    raise ValueError(f"not a regular file: {source}")
+                request = parse_json(args.request, args.request_file)
+                target: JsonObject | None = None
+                if args.executor == "object":
+                    if args.target_name:
+                        target = {"objectName": args.target_name}
+                    elif args.target_id:
+                        target = {"id": args.target_id}
+                    else:
+                        raise ValueError("object executor requires --target-name or --target-id")
+
+                client.subscribe(["operation."], on_event=show_event)
+
+                fresh = fresh_object_path(source)
+                shutil.copy2(source, fresh)
+                loaded = client.request(
+                    "snippet.load", {"path": str(fresh)}, on_event=show_event
+                )
+
+                modules = loaded_snippet_modules(client)
+                if args.replace:
+                    outgoing = next(
+                        (m for m in modules if str(m.get("id")) == str(args.replace)), None
+                    )
+                    if outgoing is None:
+                        raise ValueError(f"no loaded snippet module with id {args.replace}")
+                else:
+                    outgoing = previous_generation(
+                        modules, loaded.get("name", ""), loaded["moduleId"]
+                    )
+
+                result: JsonObject = {
+                    "copiedTo": str(fresh),
+                    "loaded": loaded,
+                    "supersedes": outgoing["id"] if outgoing else None,
+                }
+                if outgoing is not None and args.handover_request:
+                    result["handover"] = {
+                        "moduleId": outgoing["id"],
+                        **run_snippet(
+                            client,
+                            outgoing["id"],
+                            args.executor,
+                            parse_json(args.handover_request),
+                            target,
+                            args.timeout,
+                            show_event,
+                        ),
+                    }
+                result.update(
+                    run_snippet(
+                        client,
+                        loaded["moduleId"],
+                        args.executor,
+                        request,
+                        target,
+                        args.timeout,
+                        show_event,
+                    )
+                )
                 print_json(result, args.compact)
                 return 0
 
