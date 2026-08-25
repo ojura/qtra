@@ -230,6 +230,60 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class DeferredEventTests(unittest.TestCase):
+    def test_operation_finished_during_another_request_is_not_lost(self) -> None:
+        """An operation can finish while an unrelated command is in flight.
+
+        The event arrives on the same socket as the response. Discarding it left
+        a later wait_for_operation waiting for something that had already
+        happened, which times out and reads as the application hanging.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+
+            def handler(agent: FakeAgent, connection: socket.socket) -> None:
+                request = agent.receive(connection)
+                # The completion arrives before the reply to the command that
+                # happened to be in flight.
+                agent.send(
+                    connection,
+                    {
+                        "event": "operation.finished",
+                        "data": {"operationId": "77", "outcome": "completed"},
+                    },
+                )
+                agent.send(connection, {"id": request["id"], "ok": True, "result": {}})
+
+            with FakeAgent(path, handler):
+                with AgentClient(os.fspath(path), timeout=2) as client:
+                    client.request("cube.state")
+                    finished = client.wait_for_operation("77", timeout=2)
+            self.assertEqual(finished["data"]["outcome"], "completed")
+
+    def test_unrelated_deferred_events_do_not_satisfy_a_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+
+            def handler(agent: FakeAgent, connection: socket.socket) -> None:
+                request = agent.receive(connection)
+                agent.send(
+                    connection,
+                    {
+                        "event": "operation.finished",
+                        "data": {"operationId": "1", "outcome": "completed"},
+                    },
+                )
+                agent.send(connection, {"id": request["id"], "ok": True, "result": {}})
+                # Hold the connection open so the wait below reaches its
+                # timeout rather than an end of stream.
+                time.sleep(1.0)
+
+            with FakeAgent(path, handler):
+                with AgentClient(os.fspath(path), timeout=1) as client:
+                    client.request("cube.state")
+                    with self.assertRaises(TimeoutError):
+                        client.wait_for_operation("99", timeout=0.3)
+
 class HandoverTests(unittest.TestCase):
     """How reload classifies what the outgoing generation did.
 

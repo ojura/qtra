@@ -41,6 +41,13 @@ class AgentClient:
         self._socket: socket.socket | None = None
         self._buffer = bytearray()
         self._messages: Deque[JsonObject] = deque()
+        # Events seen while waiting for a command response. Without this they
+        # were dropped, so an operation.finished arriving during an unrelated
+        # request left a later wait_for_operation waiting for something that had
+        # already happened — which reads as the application hanging. Bounded to
+        # match the agent's own retained-event count; older events are the ones
+        # a caller is least likely to still be waiting on.
+        self._deferred_events: Deque[JsonObject] = deque(maxlen=1024)
         self._next_id = 1
 
     def __enter__(self) -> "AgentClient":
@@ -96,6 +103,7 @@ class AgentClient:
             if "event" in message:
                 if on_event is not None:
                     on_event(message)
+                self._deferred_events.append(message)
                 continue
             if message.get("id") != request_id:
                 raise ProtocolError(
@@ -130,6 +138,18 @@ class AgentClient:
     ) -> JsonObject:
         wanted = str(operation_id)
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+
+        # Anything already seen while awaiting an earlier response. These are not
+        # passed to on_event: a caller that had a handler in that request has
+        # seen them once already, and one that did not has no handler to miss.
+        while self._deferred_events:
+            message = self._deferred_events.popleft()
+            if message.get("event") != "operation.finished":
+                continue
+            data = message.get("data") or {}
+            if str(data.get("operationId")) == wanted:
+                return message
+
         while True:
             message = self.receive(deadline=deadline)
             if "event" not in message:
