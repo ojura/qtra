@@ -205,9 +205,11 @@ The two keys exist because the two facts have different lifetimes. The bytes
 persist after release, since deciding a restore worked takes an observation no
 module can make about itself. The claim is dropped on release, because its whole
 meaning is "right now"; if the bytes carried both meanings, the first install
-would block every later one forever. A claim left by a module that died without
-releasing blocks its region until a `stash.drop`, which is the conservative
-failure.
+would block every later one forever. A claim whose module never released successfully blocks its
+region until a `stash.drop`. A process crash is not that case: the stash lives
+in the process, so a crash takes the claims, the bytes and the displaced buffer
+together. Where the region still holds the zeros, dropping the claim alone
+leaves it collapsed and unclaimed, so the restore has to come first.
 
 ### Function patches
 

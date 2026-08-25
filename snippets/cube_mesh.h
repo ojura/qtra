@@ -90,10 +90,19 @@ inline bool anyFaceCollapsed(const std::vector<float>& vertices)
 // is dropped on release, because its whole meaning is "right now". If the bytes
 // carried both meanings, the first install would block every later one forever.
 //
-// A claim left behind by a generation that died without releasing blocks its
-// region until someone drops it. That is the conservative failure and the
-// escape is a stash.drop from the driver, which is where that judgement belongs
-// anyway.
+// A claim outlives its module only in one way, and it is not the obvious one.
+// The stash lives in this process, so a crash takes the claims, the bytes and
+// the displaced buffer together and the next process starts clean; that was
+// checked with unsafe.crash rather than assumed. What does persist is a claim
+// whose module never released successfully: a release that could not recover
+// the originals keeps its claim deliberately, and one that is simply never
+// called keeps it by default.
+//
+// Such a claim blocks its region until someone drops it, which is the
+// conservative failure. The escape is a stash.drop from the driver, and for a
+// region still holding the zeros it should be a repair module that restores the
+// bytes first, because dropping alone leaves the region collapsed and unclaimed
+// for the next install to record as its originals.
 
 inline QByteArray regionKey(const int offsetFloats, const int lengthFloats)
 {

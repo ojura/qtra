@@ -13,14 +13,22 @@
 
 extern "C" {
 
-// Bumped whenever either struct below grows or changes shape. The loader
-// rejects any module that does not match exactly, so a module built against an
-// older layout is refused at load rather than reading fields the host never
-// wrote. This is a prototype under active development: there is no
-// compatibility path and none is wanted. The alternative, a module silently
-// reading past the end of the struct it was given, is worse than a
-// refused load and much harder to notice.
-inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0002'0000u;
+// Bumped whenever either struct below grows or changes shape, and also whenever
+// an existing call changes what it can return or what a return value means. The
+// loader rejects any module that does not match exactly.
+//
+// Shape is the obvious half: a module built against an older layout would read
+// fields the host never wrote. The second half is less obvious and was learned
+// here. stash_put gained a refusal for an entry owned by another snippet, and
+// every caller written before that ignored the return, so they carried on as if
+// the deposit had happened. Nothing about the struct changed, and a module
+// compiled against the older header would still link, run, and be wrong. A
+// contract is as much a part of this interface as a layout.
+//
+// This is a prototype under active development: there is no compatibility path
+// and none is wanted. A refused load is worse than nothing only if you have
+// never watched a module quietly act on a promise the host stopped making.
+inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0003'0000u;
 
 enum RuntimeAgentLogLevelV1 : std::int32_t {
     RUNTIME_AGENT_LOG_DEBUG = 0,
