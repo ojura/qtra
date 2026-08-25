@@ -13,7 +13,14 @@
 
 extern "C" {
 
-inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0001'0000u;
+// Bumped whenever either struct below grows or changes shape. The loader
+// rejects any module that does not match exactly, so a module built against an
+// older layout is refused at load rather than reading fields the host never
+// wrote. This is a prototype under active development: there is no
+// compatibility path and none is wanted, because the alternative — a module
+// silently reading past the end of the struct it was given — is worse than a
+// refused load and much harder to notice.
+inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0002'0000u;
 
 enum RuntimeAgentLogLevelV1 : std::int32_t {
     RUNTIME_AGENT_LOG_DEBUG = 0,
@@ -46,13 +53,13 @@ struct RuntimeAgentHostV1 {
     // with invocation_context set to nullptr, and use that afterwards. Copying
     // the struct is sanctioned precisely because everything except that one
     // field is process-lifetime. Rebuilding a partial struct by hand instead is
-    // a mistake worth naming: it leaves later callbacks null while struct_size
-    // claims they are present, and the module then crashes on a host that is
-    // newer than the code which wrote it.
+    // a mistake worth naming: it leaves callbacks null while struct_size claims
+    // they are present, which turns a missing field into a crash inside the
+    // host rather than a refused load.
     //
     // Anything invocation-scoped added here in future must be cleared by that
-    // same copy step. Classifying it here is what lets already-resident modules
-    // keep working, since by constraint they can never be rebuilt.
+    // same copy step, and the classification above is the rule for deciding
+    // which of the two a new field is.
     void* agent_context;
     void* invocation_context;
 
@@ -136,11 +143,14 @@ struct RuntimeAgentSnippetV1 {
     // run() does and reports through complete_json/fail, so a failed release is
     // an error a program can act on rather than a payload nobody checked.
     //
-    // A null release means this module declares it has nothing to undo. That is
-    // a real answer, not a placeholder: a one-shot probe genuinely installs
-    // nothing. It does not mean the module is safe — nothing can distinguish
-    // "nothing to release" from "the author forgot", so the defences at install
-    // time still matter.
+    // A null release means this module declares it has nothing to undo, and is
+    // the only way to declare that: a descriptor built against an older layout
+    // is refused at load rather than read as releaseless. It is a real answer,
+    // not a placeholder — a one-shot probe genuinely installs nothing.
+    //
+    // It does not mean the module is safe. Nothing can distinguish "nothing to
+    // release" from "the author forgot", so the defences at install time still
+    // matter.
     //
     // Release must not report completion before its effects are applied. A
     // caller sequencing a handover — release the old generation, then install
@@ -152,13 +162,6 @@ struct RuntimeAgentSnippetV1 {
     // module resident and runnable again afterwards.
     RuntimeAgentSnippetRunV1 release;
 };
-
-// Descriptors compiled against the older struct end after run(). The host must
-// check struct_size before reading release, and treats anything smaller than
-// this as declaring no release.
-inline constexpr std::uint32_t RUNTIME_AGENT_SNIPPET_V1_WITH_RELEASE =
-    static_cast<std::uint32_t>(offsetof(RuntimeAgentSnippetV1, release)
-                               + sizeof(RuntimeAgentSnippetRunV1));
 
 using RuntimeAgentSnippetInitV1 = const RuntimeAgentSnippetV1* (*)();
 

@@ -43,14 +43,12 @@ public:
         QPointer<QObject> lastTarget;
         bool hadSuccessfulRun = false;
 
-        // Whether the module carries a release entry point. Descriptors built
-        // against the older struct stop after run(), so the size is checked
-        // before the field is read.
+        // Whether the module carries a release entry point. The loader refuses
+        // any descriptor whose layout does not match this host exactly, so the
+        // field is always present and only its value is in question.
         [[nodiscard]] bool declaresRelease() const
         {
-            return snippet != nullptr
-                && snippet->struct_size >= RUNTIME_AGENT_SNIPPET_V1_WITH_RELEASE
-                && snippet->release != nullptr;
+            return snippet != nullptr && snippet->release != nullptr;
         }
     };
 

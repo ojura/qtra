@@ -545,8 +545,14 @@ const RuntimeAgentSnippetV1 descriptor{
 
 `release` receives a host and reports through `complete_json`/`fail` exactly as
 `run` does, so a release that fails is an error a program can act on rather than
-a payload nobody checked. Descriptors built against the older four-field struct
-are still valid; the host checks `struct_size` before reading the field.
+a payload nobody checked.
+
+There is no compatibility path for older descriptors, and none is wanted here.
+`RUNTIME_AGENT_ABI_V1` is bumped whenever either ABI struct changes shape, and
+the loader refuses anything that does not match, so a module built against an
+older layout fails to load instead of reading fields the host never wrote.
+Rebuild the snippets when the header changes; a stale `.so` under
+`runtime-snippets/` will be rejected rather than run.
 
 A null `release` means the module declares it has nothing to undo. That is a
 real answer and not a placeholder — of the nine snippets here, `inspect_cube`,

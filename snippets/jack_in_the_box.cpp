@@ -637,13 +637,11 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     // a first-ever copy over a later legitimate edit would revert that edit
     // silently. Nothing verifies the bytes at this call — the guard above
     // already did, and there is no path to here that skipped it.
-    if (host->stash_put == nullptr || host->stash_get == nullptr) {
-        cube->m_vertexBuffer.release();
-        destroyBuffers();
-        delete state;
-        error = QStringLiteral("this host has no byte stash, which is where the face is kept");
-        return false;
-    }
+    // No null check on the stash callbacks. A host too old to have them presents
+    // a shorter struct, so those fields would be whatever sits after it in
+    // memory — a test that reads past the end of the struct and passes on
+    // garbage. The version check at the top of run() is what rules that host
+    // out, and the loader refuses the module before it ever gets here.
     state->stashKey = QStringLiteral("jack_in_the_box/face-%1")
         .arg(QString::fromLatin1(cubeFaces[static_cast<std::size_t>(openFace)].name))
         .toUtf8();
