@@ -129,7 +129,12 @@ struct RuntimeAgentHostV1 {
                               void* buffer,
                               std::int64_t capacity);
 
-    // Returns 1 if an entry was removed, 0 if the key was absent.
+    // Returns 1 if an entry was removed, 0 if the key was absent, and -2 if it
+    // belongs to a different snippet. The same rule as stash_put, because
+    // without it the rule is avoidable by dropping an entry and putting it
+    // back as a new one. The protocol-level stash.drop is not restricted this
+    // way: deciding a restore worked is the driver's judgement, not a
+    // module's.
     std::int32_t (*stash_drop)(void* agent_context, const char* key_utf8);
 
     // Writes a JSON array of {key, size, monotonicNs, moduleId} as UTF-8 and

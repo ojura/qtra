@@ -120,12 +120,25 @@ inline std::vector<Claim> currentClaims(const RuntimeAgentHostV1* host)
     if (host->stash_list == nullptr) {
         return claims;
     }
-    const std::int64_t size = host->stash_list(host->agent_context, nullptr, 0);
+    std::int64_t size = host->stash_list(host->agent_context, nullptr, 0);
     if (size <= 0) {
         return claims;
     }
     QByteArray json(static_cast<int>(size), '\0');
-    host->stash_list(host->agent_context, json.data(), size);
+    // The stash can be written from another thread between the size query and
+    // the fill. A short read would parse to an empty array and silently turn
+    // the overlap guard off for this install, so it is retried instead.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const std::int64_t written = host->stash_list(host->agent_context, json.data(), size);
+        if (written == size) {
+            break;
+        }
+        if (written <= 0) {
+            return claims;
+        }
+        json.resize(static_cast<int>(written));
+        size = written;
+    }
 
     static const QRegularExpression pattern(
         QStringLiteral("^cube\\.vertexBuffer/(\\d+)\\+(\\d+)/claimed$"));

@@ -481,13 +481,46 @@ bool installPillow(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& er
         return false;
     }
 
+
+    // Backstop behind the claim query, answering a different question. The
+    // claim says who owns the region; the values say whether it is displaced
+    // right now. Install needs both, because a claim can be absent while the
+    // region is still collapsed: a release that could not recover the
+    // originals leaves exactly that state, and saving those zeros as the
+    // originals is how the face is lost for good.
+    if (cube_mesh::anyFaceCollapsed(state->savedCubeVertices)) {
+        cube->m_vertexBuffer.release();
+        state->vertexArray.destroy();
+        state->vertexBuffer.destroy();
+        state->indexBuffer.destroy();
+        delete state;
+        error = QStringLiteral("the region is still collapsed although no module claims it, "
+                               "so its original vertices are already lost; saving these "
+                               "zeros would record the loss as the originals");
+        return false;
+    }
     // Bytes and claim: the originals so code written later could put them back,
     // and a claim that exists only while this displacement does.
     state->stashKey = cube_mesh::regionKey(0, cubeVertexFloats);
     state->claimKey = cube_mesh::claimKey(0, cubeVertexFloats);
-    host->stash_put(host->agent_context, state->stashKey.constData(),
-                    state->savedCubeVertices.data(),
-                    cubeVertexFloats * static_cast<std::int64_t>(sizeof(float)), 1);
+    // A refused deposit is a refused install: see the jack for why carrying on
+    // would leave a record describing a displacement that never happened.
+    if (host->stash_put(host->agent_context, state->stashKey.constData(),
+                        state->savedCubeVertices.data(),
+                        cubeVertexFloats * static_cast<std::int64_t>(sizeof(float)), 1) < 0) {
+        cube->m_vertexBuffer.release();
+        state->vertexArray.destroy();
+        state->vertexBuffer.destroy();
+        state->indexBuffer.destroy();
+        delete state;
+        error = QStringLiteral("the originals for this region could not be recorded: %1 "
+                               "belongs to another snippet. Nothing claims the region, so "
+                               "that entry describes a displacement no longer in effect and "
+                               "is safe for the driver to stash.drop, which is the judgement "
+                               "this refuses to make on its own")
+                    .arg(QString::fromUtf8(state->stashKey));
+        return false;
+    }
     const char marker = 1;
     host->stash_put(host->agent_context, state->claimKey.constData(), &marker, 1, 1);
     const std::vector<float> collapsed(cubeVertexFloats, 0.0F);
@@ -508,14 +541,30 @@ bool installPillow(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& er
 void removePillow(CubeWidget* cube, const RuntimeAgentHostV1* host)
 {
     QObject::disconnect(drawConnection);
+
+    // Replay only onto this module's own displacement. If the buffer no longer
+    // holds the zeros this one wrote, something else has changed it since and
+    // writing the saved copy back would revert that change rather than undo
+    // ours. The jack has always done this; the two mesh replacements wrote
+    // back unconditionally, which the record work claimed they did not.
+    std::vector<float> current(cubeVertexFloats);
     cube->m_vertexBuffer.bind();
-    cube->m_vertexBuffer.write(0,
-                               pillow->savedCubeVertices.data(),
-                               cubeVertexFloats * static_cast<int>(sizeof(float)));
+    const bool readBack = cube->m_vertexBuffer.read(
+        0, current.data(), cubeVertexFloats * static_cast<int>(sizeof(float)));
+    const bool stillOurs = readBack && cube_mesh::anyFaceCollapsed(current);
+    if (stillOurs) {
+        cube->m_vertexBuffer.write(0,
+                                   pillow->savedCubeVertices.data(),
+                                   cubeVertexFloats * static_cast<int>(sizeof(float)));
+    }
     cube->m_vertexBuffer.release();
-    // The claim goes and the bytes stay: the claim only meant that a
-    // displacement was in effect, and one is not any more.
-    host->stash_drop(host->agent_context, pillow->claimKey.constData());
+
+    // The claim goes only when the displacement is actually over: restored, or
+    // the region no longer ours. Keeping it otherwise is what stops the next
+    // module recording a collapsed region's zeros as its originals.
+    if (stillOurs || !readBack) {
+        host->stash_drop(host->agent_context, pillow->claimKey.constData());
+    }
 
     pillow->vertexArray.destroy();
     pillow->vertexBuffer.destroy();
@@ -571,12 +620,20 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
             // is current and the removal has to finish before that install reads
             // the vertices.
             if (scene_toggle::ownContextIsCurrent(cube)) {
-                setPillowEnabled(cube, enabled, &menuHost, ignored);
+                if (!setPillowEnabled(cube, enabled, &menuHost, ignored)) {
+                    // Otherwise a refused install is only a checkbox snapping
+                    // back, with the reason discarded.
+                    menuHost.log(menuHost.agent_context, RUNTIME_AGENT_LOG_WARNING,
+                                 ignored.toLocal8Bit().constData());
+                }
                 return;
             }
             cube->enqueueRenderCallback([cube, enabled, menuHost] {
                 QString deferred;
-                setPillowEnabled(cube, enabled, &menuHost, deferred);
+                if (!setPillowEnabled(cube, enabled, &menuHost, deferred)) {
+                    menuHost.log(menuHost.agent_context, RUNTIME_AGENT_LOG_WARNING,
+                                 deferred.toLocal8Bit().constData());
+                }
             });
         });
     syncToggleAction();

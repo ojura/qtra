@@ -326,25 +326,43 @@ second entry. It would carry the same name while driving different state, so the
 module that got there first keeps the menu, and the later one is reachable only
 through its own `moduleId`.
 
-**Catmull-Clark and the pillow exclude each other.** Both replace the cube's own
-mesh, and both do it by saving the widget's 36 original vertices and then
-overwriting them with zeros. Installed one on top of the other, the second would
-save the first one's zeros as if they were the cube, and restoring later would
-put those zeros back and lose the cube for the life of the process. Switching
-either one on therefore switches the other off first, through the menu entry
-rather than a shared symbol: the two are separate shared objects with no way to
-call each other, so the exclusion runs by unchecking the other's `QAction` and
-letting the module that owns it do its own removal.
+**They exclude each other by record, not by name.** Each of these snippets
+displaces some region of the widget's vertex buffer by overwriting it with
+zeros, and records that in the host's byte stash: the displaced originals under
+`cube.vertexBuffer/<offset>+<length>`, and a claim alongside it saying a
+displacement is in effect. Installing asks whether any claim overlaps the region
+it wants and refuses if one does, naming the region and the snippet that holds
+it.
 
-That handles the case where both entries exist. As a backstop for when they do
-not (a second copy from a JIT path never gets one, since the name is taken),
-each of the two also reads the widget's vertices before saving them and refuses
-to install if they are already all zeros:
+Asking the records rather than the vertex values is what lets a one-face
+displacement and a whole-mesh one see each other: overlap is arithmetic, so
+neither has to guess the other's granularity. It also means a snippet needs no
+list of its siblings. An earlier version had each of them naming the other two
+by menu action, which grew as the square of their number and could never account
+for a snippet written later.
+
+A value check still runs, answering a different question. The claim says who
+owns a region; the values say whether it is displaced right now. Both are needed,
+because a release that could not recover the originals leaves a region collapsed
+with no claim on it, and recording those zeros as the originals is how a face is
+lost for good:
 
 ```text
-the widget's vertices are already collapsed, so another mesh replacement owns
-them; saving these zeros would lose the cube
+floats 0..36 of the widget's mesh are already displaced by "hollow one side of
+the cube and hide a jack in the box in it"; saving what it wrote as the
+originals would lose them
 ```
+
+A byte record outlives its claim, so a region can be free while its record still
+names the snippet that last displaced it. A different snippet taking that region
+is refused, because its own snapshot cannot be recorded and displacing with
+somebody else's record in place would be worse than not displacing at all. The
+refusal names the key, and clearing a record nothing claims is a `stash.drop`
+the driver makes.
+
+Also worth knowing from the menu: a refused install shows only as the checkbox
+snapping back. The reason is in the module's log line and in the result of the
+same install driven over the socket.
 
 The overlays are a different matter: the sphere and the ring only add draw
 passes, so they compose with each other and with either mesh replacement.

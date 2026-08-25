@@ -1689,7 +1689,30 @@ std::int32_t RuntimeAgent::hostStashDrop(void* agentContext, const char* key)
     if (key == nullptr) {
         return 0;
     }
-    return agentOf(agentContext)->stashDrop(QString::fromUtf8(key)) ? 1 : 0;
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    auto* agent = context->agent;
+    const QString name = QString::fromUtf8(key);
+
+    // The same rule the overwrite check applies, for the same reason. Without
+    // it the rule is trivially avoidable: drop the entry, then put it back as
+    // a new one under your own name. It would also let any module drop another
+    // one's only good copy, or its claim, which is what protects a region from
+    // being taken while it is still displaced.
+    //
+    // The protocol-level stash.drop stays unrestricted. Deciding that a
+    // restore worked, or that a dead module's claim should be released, is the
+    // driver's judgement, and it is not a module.
+    {
+        QMutexLocker lock(&agent->m_stashMutex);
+        const auto found = agent->m_stash.constFind(name);
+        if (found == agent->m_stash.constEnd()) {
+            return 0;
+        }
+        if (!found->moduleName.isEmpty() && found->moduleName != context->moduleName) {
+            return -2;
+        }
+    }
+    return agent->stashDrop(name) ? 1 : 0;
 }
 
 std::int64_t RuntimeAgent::hostStashList(void* agentContext,

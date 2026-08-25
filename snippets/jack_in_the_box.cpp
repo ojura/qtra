@@ -638,6 +638,22 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
         return false;
     }
 
+
+    // Backstop behind the claim query, answering a different question. The
+    // claim says who owns the region; the values say whether it is displaced
+    // right now. Install needs both, because a claim can be absent while the
+    // region is still collapsed: a release that could not recover the
+    // originals leaves exactly that state, and saving those zeros as the
+    // originals is how the face is lost for good.
+    if (cube_mesh::anyFaceCollapsed(savedFace)) {
+        cube->m_vertexBuffer.release();
+        destroyBuffers();
+        delete state;
+        error = QStringLiteral("the region is still collapsed although no module claims it, "
+                               "so its original vertices are already lost; saving these "
+                               "zeros would record the loss as the originals");
+        return false;
+    }
     // The stash holds the only copy, and this module's own restore reads it
     // back from there. Keeping a private duplicate as well would make the bytes
     // other code depends on a copy nobody here exercises, and a saved copy
@@ -656,11 +672,27 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     // host out, and the loader refuses the module before it ever gets here.
     state->stashKey = cube_mesh::regionKey(offsetFloats, cubeFloatsPerFace);
     state->claimKey = cube_mesh::claimKey(offsetFloats, cubeFloatsPerFace);
-    host->stash_put(host->agent_context,
-                    state->stashKey.constData(),
-                    savedFace.data(),
-                    cubeFloatsPerFace * static_cast<std::int64_t>(sizeof(float)),
-                    1);
+    // A refused deposit is a refused install. The host rejects an overwrite of
+    // an entry another snippet owns, and carrying on would displace the region
+    // while the recorded originals belonged to somebody else: the record would
+    // then describe a displacement that never happened and miss the one that
+    // did.
+    if (host->stash_put(host->agent_context,
+                        state->stashKey.constData(),
+                        savedFace.data(),
+                        cubeFloatsPerFace * static_cast<std::int64_t>(sizeof(float)),
+                        1) < 0) {
+        cube->m_vertexBuffer.release();
+        destroyBuffers();
+        delete state;
+        error = QStringLiteral("the originals for this region could not be recorded: %1 "
+                               "belongs to another snippet. Nothing claims the region, so "
+                               "that entry describes a displacement no longer in effect and "
+                               "is safe for the driver to stash.drop, which is the judgement "
+                               "this refuses to make on its own")
+                    .arg(QString::fromUtf8(state->stashKey));
+        return false;
+    }
     // The claim exists only while the displacement does, which is what stops
     // the persisting byte record from blocking every later install.
     const char marker = 1;
@@ -718,12 +750,25 @@ void removeJack(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& note)
     }
     cube->m_vertexBuffer.release();
 
-    // The claim goes, the bytes stay. The claim only ever meant "a displacement
-    // is in effect", and one is not any more; the bytes outlive it because
-    // deciding this restore actually worked takes an observation this module
-    // cannot make about itself, and dropping them here would destroy the only
-    // good copy at exactly the moment a bad restore made it matter.
-    host->stash_drop(host->agent_context, jack->claimKey.constData());
+    // The claim goes only when the displacement is actually over, which is not
+    // the same as this function having run. Restored, or the region no longer
+    // holding the zeros this module wrote: either way nothing of ours is in
+    // effect. But when the originals could not be recovered and the region is
+    // still collapsed, the displacement is very much still in effect, and
+    // dropping the claim would announce a free region that is not free. The
+    // next module to take it would then save those zeros as the originals.
+    //
+    // The bytes are never dropped here. Deciding this restore worked takes an
+    // observation this module cannot make about itself, and dropping them would
+    // destroy the only good copy at exactly the moment a bad restore made it
+    // matter.
+    const bool displacementOver = !stillCollapsed || stashed == faceBytes;
+    if (displacementOver) {
+        host->stash_drop(host->agent_context, jack->claimKey.constData());
+    } else {
+        note += QStringLiteral("; the claim is kept, because the region is still "
+                               "displaced and nothing else should take it");
+    }
 
     jack->shellArray.destroy();
     jack->shellBuffer.destroy();
@@ -790,13 +835,21 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
             // installing and removing need one, so the work waits for a frame.
             // A caller that already has a context current gets it immediately.
             if (scene_toggle::ownContextIsCurrent(cube)) {
-                QString ignored;
-                setJackEnabled(cube, enabled, &menuHost, ignored);
+                QString reason;
+                if (!setJackEnabled(cube, enabled, &menuHost, reason)) {
+                    // Otherwise a refused install is only a checkbox snapping
+                    // back, with the reason discarded.
+                    menuHost.log(menuHost.agent_context, RUNTIME_AGENT_LOG_WARNING,
+                                 reason.toLocal8Bit().constData());
+                }
                 return;
             }
             cube->enqueueRenderCallback([cube, enabled, menuHost] {
                 QString deferred;
-                setJackEnabled(cube, enabled, &menuHost, deferred);
+                if (!setJackEnabled(cube, enabled, &menuHost, deferred)) {
+                    menuHost.log(menuHost.agent_context, RUNTIME_AGENT_LOG_WARNING,
+                                 deferred.toLocal8Bit().constData());
+                }
             });
         });
     syncToggleAction();

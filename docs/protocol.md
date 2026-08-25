@@ -193,6 +193,14 @@ which is arithmetic over records rather than a pattern read out of the vertex
 values. A six-vertex displacement and a thirty-six-vertex one therefore see each
 other, and a module can be excluded by another it has never heard of.
 
+A byte record outlives its claim, so a region can be free while its record still
+names the snippet that last displaced it. A different snippet taking that region
+is then refused: its own snapshot cannot be recorded, and displacing the region
+while the record describes somebody else's displacement would be worse than not
+displacing it. The remedy is a `stash.drop` of the stale byte record, which is
+safe precisely because nothing claims the region, and which is left to the
+driver because deciding a record is stale is an observation no module can make.
+
 The two keys exist because the two facts have different lifetimes. The bytes
 persist after release, since deciding a restore worked takes an observation no
 module can make about itself. The claim is dropped on release, because its whole
