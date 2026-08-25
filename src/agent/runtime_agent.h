@@ -17,6 +17,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 class CubeWidget;
 class MainWindow;
@@ -98,6 +99,123 @@ private:
                    const QString& code,
                    const QString& message);
     static void sendObject(QLocalSocket* socket, const QJsonObject& object);
+
+    // One command handler each, named for the command. dispatchRequest looks
+    // the name up in commands() and calls through; nothing else selects on it.
+    struct CommandEntry {
+        const char* name;
+        void (RuntimeAgent::*handler)(QLocalSocket*, const QJsonValue&, const QJsonObject&);
+    };
+    [[nodiscard]] static const std::vector<CommandEntry>& commands();
+
+    void handleHello(QLocalSocket* socket,
+                    const QJsonValue& requestId,
+                    const QJsonObject& parameters);
+    void handleHelp(QLocalSocket* socket,
+                   const QJsonValue& requestId,
+                   const QJsonObject& parameters);
+    void handleCubeState(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handleCubePause(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handleCubeResume(QLocalSocket* socket,
+                         const QJsonValue& requestId,
+                         const QJsonObject& parameters);
+    void handleCubeReset(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handleCubeSpeed(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handleCubeWireframe(QLocalSocket* socket,
+                            const QJsonValue& requestId,
+                            const QJsonObject& parameters);
+    void handleCubeCapture(QLocalSocket* socket,
+                          const QJsonValue& requestId,
+                          const QJsonObject& parameters);
+    void handleObjectTree(QLocalSocket* socket,
+                         const QJsonValue& requestId,
+                         const QJsonObject& parameters);
+    void handleObjectList(QLocalSocket* socket,
+                         const QJsonValue& requestId,
+                         const QJsonObject& parameters);
+    void handleObjectDescribe(QLocalSocket* socket,
+                             const QJsonValue& requestId,
+                             const QJsonObject& parameters);
+    void handleObjectGet(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handleObjectSet(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handleObjectInvoke(QLocalSocket* socket,
+                           const QJsonValue& requestId,
+                           const QJsonObject& parameters);
+    void handleActionTrigger(QLocalSocket* socket,
+                            const QJsonValue& requestId,
+                            const QJsonObject& parameters);
+    void handleWidgetClick(QLocalSocket* socket,
+                          const QJsonValue& requestId,
+                          const QJsonObject& parameters);
+    void handleEventSubscribe(QLocalSocket* socket,
+                             const QJsonValue& requestId,
+                             const QJsonObject& parameters);
+    void handleEventHistory(QLocalSocket* socket,
+                           const QJsonValue& requestId,
+                           const QJsonObject& parameters);
+    void handleModuleList(QLocalSocket* socket,
+                         const QJsonValue& requestId,
+                         const QJsonObject& parameters);
+    void handleSnippetLoad(QLocalSocket* socket,
+                          const QJsonValue& requestId,
+                          const QJsonObject& parameters);
+    void handleSnippetRun(QLocalSocket* socket,
+                         const QJsonValue& requestId,
+                         const QJsonObject& parameters);
+    void handleSnippetRelease(QLocalSocket* socket,
+                             const QJsonValue& requestId,
+                             const QJsonObject& parameters);
+    void handleStashList(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handleStashGet(QLocalSocket* socket,
+                       const QJsonValue& requestId,
+                       const QJsonObject& parameters);
+    void handleStashDrop(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handlePatchLoad(QLocalSocket* socket,
+                        const QJsonValue& requestId,
+                        const QJsonObject& parameters);
+    void handlePatchActivate(QLocalSocket* socket,
+                            const QJsonValue& requestId,
+                            const QJsonObject& parameters);
+    void handlePatchRollback(QLocalSocket* socket,
+                            const QJsonValue& requestId,
+                            const QJsonObject& parameters);
+    void handlePatchStatus(QLocalSocket* socket,
+                          const QJsonValue& requestId,
+                          const QJsonObject& parameters);
+    void handleSymbolResolve(QLocalSocket* socket,
+                            const QJsonValue& requestId,
+                            const QJsonObject& parameters);
+    void handleUnsafeStatus(QLocalSocket* socket,
+                           const QJsonValue& requestId,
+                           const QJsonObject& parameters);
+    void handleUnsafeMemoryRead(QLocalSocket* socket,
+                               const QJsonValue& requestId,
+                               const QJsonObject& parameters);
+    void handleUnsafeMemoryWrite(QLocalSocket* socket,
+                                const QJsonValue& requestId,
+                                const QJsonObject& parameters);
+    void handleUnsafeCrash(QLocalSocket* socket,
+                          const QJsonValue& requestId,
+                          const QJsonObject& parameters);
+    void handleProcessQuit(QLocalSocket* socket,
+                          const QJsonValue& requestId,
+                          const QJsonObject& parameters);
 
     [[nodiscard]] QObject* resolveObject(const QJsonObject& parameters,
                                          QString& error) const;
