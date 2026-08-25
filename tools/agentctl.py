@@ -142,12 +142,12 @@ class AgentClient:
         # Anything already seen while awaiting an earlier response. These are not
         # passed to on_event: a caller that had a handler in that request has
         # seen them once already, and one that did not has no handler to miss.
-        while self._deferred_events:
-            message = self._deferred_events.popleft()
+        for index, message in enumerate(self._deferred_events):
             if message.get("event") != "operation.finished":
                 continue
             data = message.get("data") or {}
             if str(data.get("operationId")) == wanted:
+                del self._deferred_events[index]
                 return message
 
         while True:

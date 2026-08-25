@@ -260,6 +260,37 @@ class DeferredEventTests(unittest.TestCase):
                     finished = client.wait_for_operation("77", timeout=2)
             self.assertEqual(finished["data"]["outcome"], "completed")
 
+    def test_waiting_for_one_operation_keeps_the_others(self) -> None:
+        """Draining must not consume what it passes over.
+
+        Two operations can finish while one command is in flight. Waiting for
+        the second must leave the first's completion available, or the fix for
+        the dropped-event bug simply moves the drop somewhere else.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+
+            def handler(agent: FakeAgent, connection: socket.socket) -> None:
+                request = agent.receive(connection)
+                for operation in ("10", "11"):
+                    agent.send(
+                        connection,
+                        {
+                            "event": "operation.finished",
+                            "data": {"operationId": operation, "outcome": "completed"},
+                        },
+                    )
+                agent.send(connection, {"id": request["id"], "ok": True, "result": {}})
+                time.sleep(1.0)
+
+            with FakeAgent(path, handler):
+                with AgentClient(os.fspath(path), timeout=2) as client:
+                    client.request("cube.state")
+                    second = client.wait_for_operation("11", timeout=1)
+                    first = client.wait_for_operation("10", timeout=1)
+            self.assertEqual(second["data"]["operationId"], "11")
+            self.assertEqual(first["data"]["operationId"], "10")
+
     def test_unrelated_deferred_events_do_not_satisfy_a_wait(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "agent.sock"
