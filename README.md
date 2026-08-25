@@ -489,11 +489,22 @@ then runs the new one. The same edit through this path reported 3360 triangles
 for `springRingSegments = 14`, in a process that was never restarted.
 
 The handover needs no payload and no executor, because the outgoing module
-declares a release entry point and the agent knows the executor it last ran
-successfully under. `handover.outcome` is one of `released`, `declared-none`,
-`payload-sent` or `failed`, and a failed release stops the new generation being
-run unless `--force` is given — nothing can be unloaded, so the new module stays
-resident and inert instead. Without a handover the new generation would install
+declares a release entry point and the agent knows where it ran. `--executor`
+here names where the *new* generation runs; the handover follows the agent's
+own record instead, so the two never have to agree.
+
+`handover.outcome` is one of:
+
+| outcome | meaning |
+|---|---|
+| `released` | the module's release ran and completed |
+| `declared-none` | it declares no release; nothing was undone |
+| `never-ran` | it has never been run, so it installed nothing to undo |
+| `payload-sent` | `--handover-request` was sent instead; effect unverifiable |
+| `failed` | a release ran and did not complete |
+
+Only `failed` stops the new generation being run, and `--force` overrides that.
+Nothing can be unloaded, so the new module stays resident and inert instead. Without a handover the new generation would install
 alongside the old one, which for two `frameRendered` hooks means two copies
 rather than a replacement.
 

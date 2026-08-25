@@ -30,6 +30,7 @@
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "cube_mesh.h"
 #include "scene_toggle.h"
 
 #include <QJsonDocument>
@@ -54,7 +55,6 @@ namespace {
 
 // Must match the values paintGL() uses, since the mesh shares the frame.
 constexpr float viewDistance = 5.4F;
-constexpr int originalCubeFloats = 36 * 6;
 
 constexpr float halfPi = 1.57079632679489662F;
 constexpr int floatsPerVertex = 11; // position, normal, colour, panel (u, v)
@@ -406,26 +406,6 @@ QJsonObject describe(const PillowState* state)
     };
 }
 
-// A collapsed face is six vertices of zeros in a row. Testing the whole buffer
-// for zeros only catches a replacement that took all six faces at once, and
-// misses one that took a single face — after which this would save that face's
-// zeros as the originals and lose it on restore. Per-face catches both, and
-// cannot be done by testing individual floats: the widget's own face colours
-// contain zeros.
-bool anyFaceCollapsed(const std::vector<float>& vertices)
-{
-    constexpr int floatsPerFace = 6 * 6;
-    const auto total = static_cast<int>(vertices.size());
-    for (int start = 0; start + floatsPerFace <= total; start += floatsPerFace) {
-        const auto begin = vertices.begin() + start;
-        if (std::all_of(begin, begin + floatsPerFace,
-                        [](const float value) { return value == 0.0F; })) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Needs the widget's OpenGL context to be current.
 bool installPillow(CubeWidget* cube, QString& error)
 {
@@ -462,14 +442,14 @@ bool installPillow(CubeWidget* cube, QString& error)
     // Keep the widget's own vertices so the original cube can come back, then
     // collapse them to a point: paintGL()'s 36-vertex draw then rasterizes
     // nothing and the pillow is the only thing in the frame.
-    state->savedCubeVertices.resize(originalCubeFloats);
+    state->savedCubeVertices.resize(cubeVertexFloats);
     cube->m_vertexBuffer.bind();
     const bool readBack = cube->m_vertexBuffer.read(
-        0, state->savedCubeVertices.data(), originalCubeFloats * static_cast<int>(sizeof(float)));
+        0, state->savedCubeVertices.data(), cubeVertexFloats * static_cast<int>(sizeof(float)));
     // All zeros means some other mesh replacement already collapsed them and
     // holds the only copy of the originals. Saving these would lose the cube on
     // restore, so refuse rather than nest.
-    const bool alreadySuppressed = readBack && anyFaceCollapsed(state->savedCubeVertices);
+    const bool alreadySuppressed = readBack && cube_mesh::anyFaceCollapsed(state->savedCubeVertices);
     if (!readBack || alreadySuppressed) {
         cube->m_vertexBuffer.release();
         state->vertexArray.destroy();
@@ -483,9 +463,9 @@ bool installPillow(CubeWidget* cube, QString& error)
             : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
         return false;
     }
-    const std::vector<float> collapsed(originalCubeFloats, 0.0F);
+    const std::vector<float> collapsed(cubeVertexFloats, 0.0F);
     cube->m_vertexBuffer.write(
-        0, collapsed.data(), originalCubeFloats * static_cast<int>(sizeof(float)));
+        0, collapsed.data(), cubeVertexFloats * static_cast<int>(sizeof(float)));
     cube->m_vertexBuffer.release();
 
     pillow = state;
@@ -504,7 +484,7 @@ void removePillow(CubeWidget* cube)
     cube->m_vertexBuffer.bind();
     cube->m_vertexBuffer.write(0,
                                pillow->savedCubeVertices.data(),
-                               originalCubeFloats * static_cast<int>(sizeof(float)));
+                               cubeVertexFloats * static_cast<int>(sizeof(float)));
     cube->m_vertexBuffer.release();
 
     pillow->vertexArray.destroy();

@@ -21,6 +21,7 @@
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "cube_mesh.h"
 #include "scene_toggle.h"
 
 #include <QJsonDocument>
@@ -102,8 +103,6 @@ const std::array<CubeFace, 6> cubeFaces{{
     {{0.0F, 1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}, "top"},
     {{0.0F, -1.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, "bottom"},
 }};
-
-constexpr int faceFloats = 6 * 6;
 
 constexpr auto jackVertexShader = R"glsl(
 #version 330 core
@@ -604,19 +603,17 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     // Keep the chosen face's own six vertices so it can come back, then collapse
     // them to a point. paintGL()'s 36-vertex draw still runs; those two
     // triangles just cover no pixels.
-    const int byteOffset = openFace * faceFloats * static_cast<int>(sizeof(float));
-    std::vector<float> savedFace(faceFloats);
+    const int byteOffset = openFace * cubeFloatsPerFace * static_cast<int>(sizeof(float));
+    std::vector<float> savedFace(cubeFloatsPerFace);
     cube->m_vertexBuffer.bind();
     const bool readBack = cube->m_vertexBuffer.read(
-        byteOffset, savedFace.data(), faceFloats * static_cast<int>(sizeof(float)));
+        byteOffset, savedFace.data(), cubeFloatsPerFace * static_cast<int>(sizeof(float)));
     // All zeros means another mesh replacement already collapsed the cube and
     // holds the only copy of the originals. Saving these would lose the face on
     // restore, so refuse rather than nest. This is also the check that makes the
     // stash deposit below safe, which is why the deposit sits behind it rather
     // than carrying a verification of its own.
-    const bool alreadySuppressed = readBack
-        && std::all_of(savedFace.begin(), savedFace.end(),
-                       [](const float value) { return value == 0.0F; });
+    const bool alreadySuppressed = readBack && cube_mesh::anyFaceCollapsed(savedFace);
     if (!readBack || alreadySuppressed) {
         cube->m_vertexBuffer.release();
         destroyBuffers();
@@ -649,12 +646,12 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     host->stash_put(host->agent_context,
                     state->stashKey.constData(),
                     savedFace.data(),
-                    faceFloats * static_cast<std::int64_t>(sizeof(float)),
+                    cubeFloatsPerFace * static_cast<std::int64_t>(sizeof(float)),
                     1);
 
-    const std::vector<float> collapsed(faceFloats, 0.0F);
+    const std::vector<float> collapsed(cubeFloatsPerFace, 0.0F);
     cube->m_vertexBuffer.write(byteOffset, collapsed.data(),
-                               faceFloats * static_cast<int>(sizeof(float)));
+                               cubeFloatsPerFace * static_cast<int>(sizeof(float)));
     cube->m_vertexBuffer.release();
 
     jack = state;
@@ -672,10 +669,10 @@ void removeJack(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& note)
 {
     QObject::disconnect(drawConnection);
 
-    const int byteOffset = jack->openFace * faceFloats * static_cast<int>(sizeof(float));
-    const auto faceBytes = faceFloats * static_cast<std::int64_t>(sizeof(float));
+    const int byteOffset = jack->openFace * cubeFloatsPerFace * static_cast<int>(sizeof(float));
+    const auto faceBytes = cubeFloatsPerFace * static_cast<std::int64_t>(sizeof(float));
 
-    std::vector<float> savedFace(faceFloats);
+    std::vector<float> savedFace(cubeFloatsPerFace);
     const std::int64_t stashed = host->stash_get(host->agent_context,
                                                  jack->stashKey.constData(),
                                                  savedFace.data(),
@@ -686,13 +683,11 @@ void removeJack(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& note)
     // changed it since, and writing the saved bytes over that would revert
     // someone else's work. This is the install guard again, run at the other
     // end: it is what makes an entry that persists safe to keep around.
-    std::vector<float> current(faceFloats);
+    std::vector<float> current(cubeFloatsPerFace);
     cube->m_vertexBuffer.bind();
     const bool readBack = cube->m_vertexBuffer.read(byteOffset, current.data(),
                                                     static_cast<int>(faceBytes));
-    const bool stillCollapsed = readBack
-        && std::all_of(current.begin(), current.end(),
-                       [](const float value) { return value == 0.0F; });
+    const bool stillCollapsed = readBack && cube_mesh::anyFaceCollapsed(current);
 
     if (stashed != faceBytes) {
         note = QStringLiteral("the face was not restored: its stash entry is gone or the "

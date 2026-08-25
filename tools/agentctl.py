@@ -16,6 +16,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Deque, Mapping
 
+# The executor a reload runs the new generation under when the caller does not
+# say. It was spelled in three places, which is three places to disagree.
+EXECUTORS = ("gui", "object", "render")
+DEFAULT_RELOAD_EXECUTOR = "render"
+
 JsonObject = dict[str, Any]
 EventHandler = Callable[[JsonObject], None]
 
@@ -44,9 +49,10 @@ class AgentClient:
         # Events seen while waiting for a command response. Without this they
         # were dropped, so an operation.finished arriving during an unrelated
         # request left a later wait_for_operation waiting for something that had
-        # already happened — which reads as the application hanging. Bounded to
-        # match the agent's own retained-event count; older events are the ones
-        # a caller is least likely to still be waiting on.
+        # already happened — which reads as the application hanging. The bound is
+        # this client's own choice and is not tied to the agent's retained-event
+        # count; dropping oldest first fails safe, because a wait for a dropped
+        # completion times out rather than matching the wrong one.
         self._deferred_events: Deque[JsonObject] = deque(maxlen=1024)
         self._next_id = 1
 
@@ -394,7 +400,7 @@ def hand_over(
     ran = run_snippet(
         client,
         outgoing["id"],
-        executor or "render",
+        executor or DEFAULT_RELOAD_EXECUTOR,
         parse_json(handover_request),
         target,
         timeout,
@@ -452,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     snippet = subparsers.add_parser("snippet", help="load, run, and optionally await a snippet")
     snippet.add_argument("path")
-    snippet.add_argument("--executor", choices=("gui", "object", "render"), default="gui")
+    snippet.add_argument("--executor", choices=EXECUTORS, default="gui")
     target = snippet.add_mutually_exclusive_group()
     target.add_argument("--target-name")
     target.add_argument("--target-id")
@@ -472,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     # runs under render unless told otherwise, but the handover is left to the
     # executor the agent recorded for the outgoing module, which is where its
     # install actually ran. Naming one here overrides both.
-    reload_cmd.add_argument("--executor", choices=("gui", "object", "render"), default=None)
+    reload_cmd.add_argument("--executor", choices=EXECUTORS, default=None)
     reload_target = reload_cmd.add_mutually_exclusive_group()
     reload_target.add_argument("--target-name")
     reload_target.add_argument("--target-id")
@@ -656,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
                         raise ValueError("object executor requires --target-name or --target-id")
 
                 client.subscribe(["operation."], on_event=show_event)
-                run_executor = args.executor or "render"
+                run_executor = args.executor or DEFAULT_RELOAD_EXECUTOR
                 result: JsonObject = {}
 
                 # With an explicit id the outgoing module is known before

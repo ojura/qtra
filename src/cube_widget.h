@@ -20,6 +20,17 @@
 
 class QOpenGLDebugLogger;
 
+// The layout of the vertex buffer initializeGeometry() fills: six faces, each
+// six vertices, each a position and a colour. Snippets that displace part of
+// that buffer depend on these numbers exactly, and were restating them — five
+// spellings across three files, none of them next to the array they described.
+// The widget owns the buffer, so it states the layout.
+inline constexpr int cubeFaceCount = 6;
+inline constexpr int cubeVerticesPerFace = 6;
+inline constexpr int cubeFloatsPerVertex = 6;
+inline constexpr int cubeFloatsPerFace = cubeVerticesPerFace * cubeFloatsPerVertex;
+inline constexpr int cubeVertexFloats = cubeFaceCount * cubeFloatsPerFace;
+
 class CubeWidget final : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
     Q_PROPERTY(float angleDegrees READ angleDegrees WRITE setAngleDegrees NOTIFY stateChanged)
