@@ -302,17 +302,46 @@ class HandoverTests(unittest.TestCase):
         self.assertEqual(result["route"], "handover-request")
         self.assertEqual(sent, ["snippet.release", "snippet.run"])
 
-    def test_never_ran_sends_no_payload(self) -> None:
-        sent: list[str] = []
+    def test_no_recorded_executor_retries_under_an_assumed_one(self) -> None:
+        """A failed run can still have installed something.
+
+        hadSuccessfulRun is only set when the invocation carried no error, so a
+        snippet that installs a hook and then calls fail() leaves that hook live
+        with no recorded executor. Skipping the release there is what let a new
+        generation install alongside an old one while the tool reported success.
+        """
+        seen: list[Any] = []
 
         class Client:
             def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
-                sent.append(command)
-                raise ProtocolError("no_recorded_executor: never ran", "no_recorded_executor")
+                seen.append((command, (params or {}).get("executor")))
+                if len(seen) == 1:
+                    raise ProtocolError(
+                        "no_recorded_executor: never ran", "no_recorded_executor"
+                    )
+                return {"operationId": "3"}
 
             def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
-                raise AssertionError("nothing to wait for")
+                return {"data": {"operationId": "3", "outcome": "completed"}}
 
-        result = hand_over(Client(), {"id": "1"}, None, None, '{"restore": true}', 1.0)
-        self.assertEqual(result["outcome"], "never-ran")
-        self.assertEqual(sent, ["snippet.release"])
+        result = hand_over(
+            Client(), {"id": "1"}, None, None, None, 1.0, fallback_executor="render"
+        )
+        self.assertEqual(result["outcome"], "released")
+        self.assertEqual(result["assumedExecutor"], "render")
+        self.assertEqual(seen, [("snippet.release", None), ("snippet.release", "render")])
+
+    def test_retried_release_that_fails_is_a_failed_handover(self) -> None:
+        class Client:
+            def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
+                if (params or {}).get("executor") is None:
+                    raise ProtocolError(
+                        "no_recorded_executor: never ran", "no_recorded_executor"
+                    )
+                raise ProtocolError("release_failed: boom", "release_failed")
+
+            def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("no operation should start")
+
+        result = hand_over(Client(), {"id": "1"}, None, None, None, 1.0)
+        self.assertEqual(result["outcome"], "failed")

@@ -346,6 +346,7 @@ def hand_over(
     handover_request: str | None,
     timeout: float,
     on_event: EventHandler | None = None,
+    fallback_executor: str = "render",
 ) -> JsonObject:
     """Get the outgoing generation to let go before the new one installs.
 
@@ -358,6 +359,31 @@ def hand_over(
     outcome, detail = release_snippet(
         client, outgoing["id"], executor, target, timeout, on_event
     )
+
+    # "Never ran successfully" is not "never installed anything". A run that
+    # installs a hook and then fails — or throws, or never completes — leaves
+    # that hook behind while the agent records no executor for it, so the
+    # module has state to release and cannot say where. Skipping the release
+    # there is exactly how a new generation ends up installed alongside an old
+    # one while the tool reports success.
+    #
+    # Retrying under an assumed executor needs no justification and skipping
+    # does: release is required to be safe when nothing is installed, so the
+    # retry costs a no-op in the genuinely-never-ran case and removes the hooks
+    # in the other. The assumption is the same one the new generation's own run
+    # is about to make; a module installed from a worker thread still needs an
+    # explicit --executor or --replace.
+    if outcome == "never-ran":
+        assumed = executor or fallback_executor
+        outcome, detail = release_snippet(
+            client, outgoing["id"], assumed, target, timeout, on_event
+        )
+        detail = {
+            **detail,
+            "assumedExecutor": assumed,
+            "note": "no successful run recorded an executor, so the release was attempted "
+                    "under the one the new generation runs under",
+        }
     if outcome != "declared-none" or handover_request is None:
         return {"moduleId": outgoing["id"], "route": "release", "outcome": outcome, **detail}
 
@@ -646,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
                     result["handover"] = hand_over(
                         client, outgoing, args.executor, target,
                         args.handover_request, args.timeout, show_event,
+                        run_executor,
                     )
                     if result["handover"]["outcome"] == "failed" and not args.force:
                         result["installed"] = False
@@ -670,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
                         result["handover"] = hand_over(
                             client, outgoing, args.executor, target,
                             args.handover_request, args.timeout, show_event,
+                            run_executor,
                         )
                 result["supersedes"] = outgoing["id"] if outgoing else None
 

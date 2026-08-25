@@ -622,8 +622,9 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
         destroyBuffers();
         delete state;
         error = readBack
-            ? QStringLiteral("the widget's vertices are already collapsed, so another mesh "
-                             "replacement owns them; saving these zeros would lose the face")
+            ? QStringLiteral("this face is already collapsed, so another replacement owns "
+                             "its vertices; saving its zeros as the originals would lose the "
+                             "face on restore")
             : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
         return false;
     }
