@@ -29,6 +29,7 @@ inline constexpr int cubeFaceCount = 6;
 inline constexpr int cubeVerticesPerFace = 6;
 inline constexpr int cubeFloatsPerVertex = 6;
 inline constexpr int cubeFloatsPerFace = cubeVerticesPerFace * cubeFloatsPerVertex;
+inline constexpr int cubeVertexCount = cubeFaceCount * cubeVerticesPerFace;
 inline constexpr int cubeVertexFloats = cubeFaceCount * cubeFloatsPerFace;
 
 class CubeWidget final : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {

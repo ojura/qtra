@@ -58,6 +58,14 @@ public:
         // it fails as a race inside the process rather than as an error anyone
         // can see. An attempt, by definition, is somewhere the install code
         // already ran.
+        //
+        // Both records are heuristics under a mixed history, in the same way
+        // and with the same consequence. An old success under one executor
+        // followed by a newer failed install under another resolves to the old
+        // one; an install under one executor followed by a refused attempt
+        // under another resolves to the refused one. Either way a release that
+        // checks its context refuses loudly and the handover aborts, which is
+        // the failure worth having.
         QString lastAttemptedExecutor;
         QPointer<QObject> lastAttemptedTarget;
         bool hadAttemptedRun = false;

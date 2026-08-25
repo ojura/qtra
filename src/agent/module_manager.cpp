@@ -300,6 +300,13 @@ QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
         // The run that installed something and then failed is the interesting
         // case here, so say where it ran even though it did not complete.
         json.insert(QStringLiteral("lastAttemptedExecutor"), module.lastAttemptedExecutor);
+        if (module.lastAttemptedExecutor == QStringLiteral("object")) {
+            // Same diagnosis the successful record offers: a release resolving
+            // through this record fails when the object is gone, and a caller
+            // can see that coming rather than being told after the fact.
+            json.insert(QStringLiteral("lastAttemptedTargetAlive"),
+                        !module.lastAttemptedTarget.isNull());
+        }
     }
     if (module.hadSuccessfulRun) {
         json.insert(QStringLiteral("lastExecutor"), module.lastExecutor);

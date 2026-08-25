@@ -808,8 +808,11 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
                     : module->lastTarget.data();
                 if (target == nullptr) {
                     sendError(socket, requestId, QStringLiteral("recorded_target_gone"),
-                              QStringLiteral("the object this module last ran on no longer "
-                                             "exists; pass a target explicitly"));
+                              QStringLiteral("the object this module last %1 on no longer "
+                                             "exists; pass a target explicitly")
+                                  .arg(executorSource == QStringLiteral("attempted")
+                                           ? QStringLiteral("attempted to run")
+                                           : QStringLiteral("ran")));
                     return;
                 }
             }

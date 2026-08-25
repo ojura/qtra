@@ -16,7 +16,7 @@
 
 namespace {
 
-constexpr std::array<float, 36 * 6> cubeVertices{
+constexpr std::array<float, cubeVertexFloats> cubeVertices{
     // position              // per-face color
     // front
     -1, -1,  1,             1, 0, 0,
@@ -365,7 +365,11 @@ void CubeWidget::paintGL()
     m_program.setUniformValue("mvp", m_projection * view * model);
     m_program.setUniformValue("tint", m_tint);
     m_vertexArray.bind();
-    glDrawArrays(GL_TRIANGLES, 0, 36);
+    // Still a constant baked into this instruction, which is what makes a face
+    // undrawable from outside without rewriting its vertices. It is now the
+    // same constant the snippets read, so changing the mesh cannot leave them
+    // quietly addressing the old layout.
+    glDrawArrays(GL_TRIANGLES, 0, cubeVertexCount);
     m_vertexArray.release();
     m_program.release();
 
