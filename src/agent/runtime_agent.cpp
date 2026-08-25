@@ -1001,6 +1001,7 @@ void RuntimeAgent::handleStashGet(QLocalSocket* socket,
         {QStringLiteral("size"), static_cast<qint64>(found->bytes.size())},
         {QStringLiteral("monotonicNs"), QString::number(found->monotonicNs)},
         {QStringLiteral("moduleId"), QString::number(found->moduleId)},
+        {QStringLiteral("moduleName"), found->moduleName},
         {QStringLiteral("base64"), QString::fromLatin1(found->bytes.toBase64())},
     };
     lock.unlock();
@@ -1344,6 +1345,11 @@ RuntimeAgent::ModuleContext* RuntimeAgent::contextForModule(const quint64 module
         auto context = std::make_unique<ModuleContext>();
         context->agent = this;
         context->moduleId = moduleId;
+        // The descriptor name, taken here rather than accepted from the module
+        // later, so a stash entry's owner is something the host observed.
+        if (const ModuleManager::LoadedModule* loaded = m_modules.module(moduleId)) {
+            context->moduleName = loaded->name;
+        }
         found = m_moduleContexts.emplace(moduleId, std::move(context)).first;
     }
     return found->second.get();
@@ -1633,10 +1639,24 @@ std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
     if (existed && overwrite == 0) {
         return -1;
     }
+    // Overwrite rights are the one thing identity decides. A record belongs to
+    // a snippet rather than to a load of it, so a reloaded generation may
+    // replace its predecessor's entry while an unrelated module may not. Reads
+    // stay open on purpose: a repair module written after the fact has a
+    // different name by construction, and shutting it out would remove the
+    // reason the namespace is flat.
+    if (existed) {
+        const QString owner = agent->m_stash.value(name).moduleName;
+        if (!owner.isEmpty() && owner != context->moduleName) {
+            return -2;
+        }
+    }
+
     StashEntry entry;
     entry.bytes = QByteArray(static_cast<const char*>(bytes), static_cast<qsizetype>(size));
     entry.monotonicNs = static_cast<quint64>(agent->m_monotonicClock.nsecsElapsed());
     entry.moduleId = context->moduleId;
+    entry.moduleName = context->moduleName;
     agent->m_stash.insert(name, entry);
     return existed ? 1 : 0;
 }
@@ -1699,6 +1719,7 @@ QJsonArray RuntimeAgent::stashEntries() const
             {QStringLiteral("size"), static_cast<qint64>(it->bytes.size())},
             {QStringLiteral("monotonicNs"), QString::number(it->monotonicNs)},
             {QStringLiteral("moduleId"), QString::number(it->moduleId)},
+            {QStringLiteral("moduleName"), it->moduleName},
         });
     }
     return entries;

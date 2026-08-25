@@ -3,26 +3,40 @@
 // Shared by the snippets that displace part of the widget's vertex buffer.
 //
 // Each of them zeroes some region of that buffer so the triangles it feeds
-// rasterize nothing, and each has to refuse when another module has already
-// done so. Otherwise it saves that module's zeros as the originals and the
-// face is lost when either one restores.
+// rasterize nothing, and each has to know whether another module is already
+// displacing the region it wants. Otherwise it saves that module's zeros as
+// the originals, and the face is lost when either one restores.
 //
-// That refusal is the safety mechanism rather than a nicety: the menu-based
-// exclusion between these snippets is advisory, since two generations can be
-// installed at once over the socket while a menu entry tracks only one. So the
-// check lives here in one implementation. It was previously three, copied
-// verbatim into two files and written differently in a third, which is the
-// arrangement that produced the original asymmetry, where one snippet had a
-// replay guard and its twin did not.
+// Two different questions live here, and they are answered in two different
+// ways on purpose.
 //
-// Reading ownership out of the vertex values is in-band signalling and this
-// header does not fix that; it only stops the reading being done three ways.
-// The out-of-band answer is a record of the displacement in the host's byte
-// stash, at which point this check becomes unnecessary rather than shared.
+// Who owns a region, answered by the records further down. That used to be
+// read out of the vertex values, which is in-band signalling: zeros are a
+// legal vertex value, so the check had to reason about which legal data
+// happened to look like a message, could only be done a whole face at a time,
+// and made a six-vertex displacement invisible to a thirty-six-vertex one's
+// guard. A claim says it directly and overlap is arithmetic, so the two sizes
+// compare without either having to guess the other's granularity.
+//
+// Whether a displacement is still in effect, answered by looking at the
+// values, which is what the first two functions do. This one belongs in-band:
+// it asks what the buffer holds right now, and a record cannot answer that
+// because a module can be wrong about what it did. It is the guard a restore
+// runs before replaying saved bytes, so that a region something else has since
+// changed is left alone rather than reverted.
 
+#include "agent/agent_abi.h"
 #include "cube_widget.h"
 
+#include <QByteArray>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRegularExpression>
+#include <QString>
+
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 
 namespace cube_mesh {
@@ -49,6 +63,97 @@ inline bool anyFaceCollapsed(const std::vector<float>& vertices)
     const auto total = static_cast<int>(vertices.size());
     for (int start = 0; start + cubeFloatsPerFace <= total; start += cubeFloatsPerFace) {
         if (faceCollapsedAt(vertices, start)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Displacement records
+//
+// The check above reads ownership out of the vertex values, which is in-band
+// signalling: zeros are a legal vertex value, so the guard has to reason about
+// which legal data happens to look like a message. That is why it must be done
+// per face rather than per float, and why a module displacing a sub-face region
+// would reopen the problem.
+//
+// The record below says it out of band instead. Two keys, because the two facts
+// have different lifetimes and conflating them is what makes either one wrong:
+//
+//   cube.vertexBuffer/<offset>+<length>          the displaced originals
+//   cube.vertexBuffer/<offset>+<length>/claimed   a displacement is in effect
+//
+// The bytes persist after release, because deciding a restore actually worked
+// takes an observation no module can make about itself, and a restore that
+// corrupts rather than restores must not delete the only good copy. The claim
+// is dropped on release, because its whole meaning is "right now". If the bytes
+// carried both meanings, the first install would block every later one forever.
+//
+// A claim left behind by a generation that died without releasing blocks its
+// region until someone drops it. That is the conservative failure and the
+// escape is a stash.drop from the driver, which is where that judgement belongs
+// anyway.
+
+inline QByteArray regionKey(const int offsetFloats, const int lengthFloats)
+{
+    return QStringLiteral("cube.vertexBuffer/%1+%2")
+        .arg(offsetFloats).arg(lengthFloats).toUtf8();
+}
+
+inline QByteArray claimKey(const int offsetFloats, const int lengthFloats)
+{
+    return regionKey(offsetFloats, lengthFloats) + "/claimed";
+}
+
+struct Claim {
+    int offsetFloats = 0;
+    int lengthFloats = 0;
+    QString owner;
+};
+
+// Every claim currently in the host's stash, as records rather than as a
+// pattern read out of the buffer.
+inline std::vector<Claim> currentClaims(const RuntimeAgentHostV1* host)
+{
+    std::vector<Claim> claims;
+    if (host->stash_list == nullptr) {
+        return claims;
+    }
+    const std::int64_t size = host->stash_list(host->agent_context, nullptr, 0);
+    if (size <= 0) {
+        return claims;
+    }
+    QByteArray json(static_cast<int>(size), '\0');
+    host->stash_list(host->agent_context, json.data(), size);
+
+    static const QRegularExpression pattern(
+        QStringLiteral("^cube\\.vertexBuffer/(\\d+)\\+(\\d+)/claimed$"));
+    for (const QJsonValue& value : QJsonDocument::fromJson(json).array()) {
+        const QJsonObject entry = value.toObject();
+        const auto match = pattern.match(entry.value(QStringLiteral("key")).toString());
+        if (!match.hasMatch()) {
+            continue;
+        }
+        claims.push_back(Claim{match.captured(1).toInt(),
+                               match.captured(2).toInt(),
+                               entry.value(QStringLiteral("moduleName")).toString()});
+    }
+    return claims;
+}
+
+// The claim overlapping this region, if any. Overlap is arithmetic over
+// records, so a six-vertex displacement and a thirty-six-vertex one compare
+// directly instead of one being invisible to the other's guard.
+inline bool overlappingClaim(const RuntimeAgentHostV1* host,
+                             const int offsetFloats,
+                             const int lengthFloats,
+                             Claim& found)
+{
+    for (const Claim& claim : currentClaims(host)) {
+        if (offsetFloats < claim.offsetFloats + claim.lengthFloats
+            && claim.offsetFloats < offsetFloats + lengthFloats) {
+            found = claim;
             return true;
         }
     }

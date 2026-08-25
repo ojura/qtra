@@ -80,8 +80,7 @@ inline QAction* install(QWidget* widget,
         // yet loses it for good. The caller may then refuse, as the vertex
         // replacements refuse routinely, and its sync leaves the entry
         // unchecked and wired to a module holding nothing. The live generation
-        // is then unreachable from the menu, and turnOff, which acts only on a
-        // checked entry, silently stops excluding it.
+        // is then unreachable from the menu.
         //
         // So the entry is only handed over when nothing holds it. A caller that
         // gets nullptr here reports menuToggle false and is driven over the
@@ -115,27 +114,6 @@ inline QAction* install(QWidget* widget,
     QObject::connect(action, &QAction::toggled, window, std::move(onToggled));
     menu->addAction(action);
     return action;
-}
-
-// Switches another runtime-added entry off, if it is there and on. The two
-// snippets that replace the cube's own mesh use this on each other: both save
-// the widget's 36 original vertices and then overwrite them, so the second one
-// to install would save the first one's zeros and later restore those instead
-// of the cube.
-//
-// Unchecking runs the owning module's handler, which does the removal there and
-// then when a context is already current, which it is when this is called from
-// inside the other snippet's render callback.
-inline void turnOff(QWidget* widget, const QString& objectName)
-{
-    auto* window = qobject_cast<QMainWindow*>(widget->window());
-    if (window == nullptr) {
-        return;
-    }
-    QAction* other = window->findChild<QAction*>(objectName);
-    if (other != nullptr && other->isChecked()) {
-        other->setChecked(false);
-    }
 }
 
 } // namespace scene_toggle

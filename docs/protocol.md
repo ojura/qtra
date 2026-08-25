@@ -166,9 +166,40 @@ still in effect. For these snippets that check is that the face is still all
 zeros; if it is not, something else has changed it since and replaying would
 revert that.
 
-Each entry is stamped by the host with its size, a monotonic timestamp, and the
-id of the module that wrote it, so provenance does not depend on the depositor
-reporting it honestly.
+Each entry is stamped by the host with its size, a monotonic timestamp, and both
+the id and the descriptor name of the module that wrote it, so provenance does
+not depend on the depositor reporting it honestly.
+
+Those stamps decide one thing: overwrite rights. `stash_put` with overwrite set
+succeeds when the existing entry's stamped name matches the caller's and answers
+-2 when it does not, so a reloaded generation may replace its predecessor's
+entry while an unrelated module may not. The name rather than the id, because a
+reload gives the same source a new id. Reads are not restricted, which is what
+keeps a module written later to repair an earlier one able to fetch what it
+saved.
+
+### Displacement records
+
+The snippets that overwrite part of the widget's vertex buffer use the stash to
+say so, under two keys per region:
+
+```text
+cube.vertexBuffer/<offset>+<length>           the displaced originals
+cube.vertexBuffer/<offset>+<length>/claimed   a displacement is in effect
+```
+
+Installing queries the claims and refuses when one overlaps the region it wants,
+which is arithmetic over records rather than a pattern read out of the vertex
+values. A six-vertex displacement and a thirty-six-vertex one therefore see each
+other, and a module can be excluded by another it has never heard of.
+
+The two keys exist because the two facts have different lifetimes. The bytes
+persist after release, since deciding a restore worked takes an observation no
+module can make about itself. The claim is dropped on release, because its whole
+meaning is "right now"; if the bytes carried both meanings, the first install
+would block every later one forever. A claim left by a module that died without
+releasing blocks its region until a `stash.drop`, which is the conservative
+failure.
 
 ### Function patches
 

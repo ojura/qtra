@@ -104,9 +104,17 @@ struct RuntimeAgentHostV1 {
     // including from outside an invocation.
 
     // Returns 1 if the key was already present, 0 if it was new, and a negative
-    // value on failure; -1 specifically means the key exists and overwrite was
-    // 0. Overwriting is opt-in because the dangerous collision is a later
-    // generation saving corrupt data over its predecessor's good copy.
+    // value on failure: -1 means the key exists and overwrite was 0, and -2
+    // means it exists and belongs to a different snippet.
+    //
+    // Overwriting is opt-in because the dangerous collision is a later
+    // generation saving corrupt data over its predecessor's good copy. Whose
+    // entry it is gets decided by the host, which stamps the depositing
+    // module's descriptor name and compares against it; the name rather than
+    // the module id, because a reload gives the same source a new id and a
+    // rule keyed on the id would refuse a generation its own predecessor's
+    // record. Reads are not restricted, so a module written later to repair
+    // this one can still fetch what it saved.
     std::int32_t (*stash_put)(void* agent_context,
                               const char* key_utf8,
                               const void* bytes,

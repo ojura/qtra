@@ -74,12 +74,21 @@ private:
     struct ModuleContext {
         RuntimeAgent* agent = nullptr;
         quint64 moduleId = 0;
+        QString moduleName;
     };
 
     struct StashEntry {
         QByteArray bytes;
         quint64 monotonicNs = 0;
+
+        // Both stamped by the host, never supplied by the depositor, which is
+        // what makes them worth checking. The id is exact provenance: which
+        // load wrote this. The name is identity across generations, because a
+        // reload gives the same source a new id, and a rule keyed on the id
+        // would refuse the successor its predecessor's record, which is the
+        // handover the stash exists to support.
         quint64 moduleId = 0;
+        QString moduleName;
     };
 
     void acceptConnections();

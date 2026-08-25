@@ -204,6 +204,8 @@ struct PillowState {
     int triangleCount = 0;
     int pointCount = 0;
     std::vector<float> savedCubeVertices;
+    QByteArray stashKey;
+    QByteArray claimKey;
 };
 
 PillowState* pillow = nullptr;
@@ -407,14 +409,14 @@ QJsonObject describe(const PillowState* state)
 }
 
 // Needs the widget's OpenGL context to be current.
-bool installPillow(CubeWidget* cube, QString& error)
+bool installPillow(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& error)
 {
-    // The Catmull-Clark snippet replaces the same mesh and saves the same 36
-    // vertices, so it has to be off before this one reads them. The jack in the
-    // box saves only the face it hollows, but those vertices are part of these
-    // 36 and reading its zeros here would restore the hole instead of the face.
-    scene_toggle::turnOff(cube, QStringLiteral("actionCatmullClark"));
-    scene_toggle::turnOff(cube, QStringLiteral("actionJackInTheBox"));
+    // No list of sibling snippets to switch off first. This used to name the
+    // other mesh replacements by their menu action, which meant every snippet
+    // had to know every other one, could never account for a snippet written
+    // later, and grew as the square of their number. Whether this region is
+    // already taken is now a question about records, asked below, and it is
+    // answerable about a module this one has never heard of.
 
     auto* state = new PillowState();
     state->owner = QOpenGLContext::currentContext();
@@ -449,20 +451,45 @@ bool installPillow(CubeWidget* cube, QString& error)
     // All zeros means some other mesh replacement already collapsed them and
     // holds the only copy of the originals. Saving these would lose the cube on
     // restore, so refuse rather than nest.
-    const bool alreadySuppressed = readBack && cube_mesh::anyFaceCollapsed(state->savedCubeVertices);
-    if (!readBack || alreadySuppressed) {
+    if (!readBack) {
         cube->m_vertexBuffer.release();
         state->vertexArray.destroy();
         state->vertexBuffer.destroy();
         state->indexBuffer.destroy();
         delete state;
-        error = readBack
-            ? QStringLiteral("a face of the widget's mesh is already collapsed, so another "
-                             "replacement owns those vertices; saving its zeros as the "
-                             "originals would lose that face on restore")
-            : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
+        error = QStringLiteral("could not read the widget's vertex buffer; refusing to "
+                               "overwrite it");
         return false;
     }
+
+    // Ask the records rather than the vertex values. This replacement covers
+    // the whole mesh, so it overlaps any displacement at all, including a
+    // single-face one that reading the buffer would have to inspect at exactly
+    // the right granularity to notice.
+    cube_mesh::Claim claim;
+    if (cube_mesh::overlappingClaim(host, 0, cubeVertexFloats, claim)) {
+        cube->m_vertexBuffer.release();
+        state->vertexArray.destroy();
+        state->vertexBuffer.destroy();
+        state->indexBuffer.destroy();
+        delete state;
+        error = QStringLiteral("floats %1..%2 of the widget's mesh are already displaced by "
+                               "\"%3\"; saving what it wrote as the originals would lose them")
+                    .arg(claim.offsetFloats)
+                    .arg(claim.offsetFloats + claim.lengthFloats)
+                    .arg(claim.owner);
+        return false;
+    }
+
+    // Bytes and claim: the originals so code written later could put them back,
+    // and a claim that exists only while this displacement does.
+    state->stashKey = cube_mesh::regionKey(0, cubeVertexFloats);
+    state->claimKey = cube_mesh::claimKey(0, cubeVertexFloats);
+    host->stash_put(host->agent_context, state->stashKey.constData(),
+                    state->savedCubeVertices.data(),
+                    cubeVertexFloats * static_cast<std::int64_t>(sizeof(float)), 1);
+    const char marker = 1;
+    host->stash_put(host->agent_context, state->claimKey.constData(), &marker, 1, 1);
     const std::vector<float> collapsed(cubeVertexFloats, 0.0F);
     cube->m_vertexBuffer.write(
         0, collapsed.data(), cubeVertexFloats * static_cast<int>(sizeof(float)));
@@ -478,7 +505,7 @@ bool installPillow(CubeWidget* cube, QString& error)
 }
 
 // Needs the widget's OpenGL context to be current.
-void removePillow(CubeWidget* cube)
+void removePillow(CubeWidget* cube, const RuntimeAgentHostV1* host)
 {
     QObject::disconnect(drawConnection);
     cube->m_vertexBuffer.bind();
@@ -486,6 +513,9 @@ void removePillow(CubeWidget* cube)
                                pillow->savedCubeVertices.data(),
                                cubeVertexFloats * static_cast<int>(sizeof(float)));
     cube->m_vertexBuffer.release();
+    // The claim goes and the bytes stay: the claim only meant that a
+    // displacement was in effect, and one is not any more.
+    host->stash_drop(host->agent_context, pillow->claimKey.constData());
 
     pillow->vertexArray.destroy();
     pillow->vertexBuffer.destroy();
@@ -504,32 +534,36 @@ void syncToggleAction()
 }
 
 // Returns false only when an install was asked for and failed.
-bool setPillowEnabled(CubeWidget* cube, const bool enabled, QString& error)
+bool setPillowEnabled(CubeWidget* cube, const bool enabled,
+                      const RuntimeAgentHostV1* host, QString& error)
 {
     if (enabled == (pillow != nullptr)) {
         return true;
     }
     bool installed = true;
     if (enabled) {
-        installed = installPillow(cube, error);
+        installed = installPillow(cube, host, error);
     } else {
-        removePillow(cube);
+        removePillow(cube, host);
     }
     syncToggleAction();
     return installed;
 }
 
-void ensureToggleAction(CubeWidget* cube)
+void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
 {
     if (toggleAction != nullptr) {
         return;
     }
+    RuntimeAgentHostV1 menuHost = *host;
+    menuHost.invocation_context = nullptr;
+
     toggleAction = scene_toggle::install(
         cube,
         QStringLiteral("actionPillowMode"),
         QStringLiteral("P&illow mode"),
         QStringLiteral("Ctrl+Shift+P"),
-        [cube](const bool enabled) {
+        [cube, menuHost](const bool enabled) {
             QString ignored;
             // A menu click arrives on the GUI thread with no current context and
             // has to wait for a frame. Being switched off by the Catmull-Clark
@@ -537,12 +571,12 @@ void ensureToggleAction(CubeWidget* cube)
             // is current and the removal has to finish before that install reads
             // the vertices.
             if (scene_toggle::ownContextIsCurrent(cube)) {
-                setPillowEnabled(cube, enabled, ignored);
+                setPillowEnabled(cube, enabled, &menuHost, ignored);
                 return;
             }
-            cube->enqueueRenderCallback([cube, enabled] {
+            cube->enqueueRenderCallback([cube, enabled, menuHost] {
                 QString deferred;
-                setPillowEnabled(cube, enabled, deferred);
+                setPillowEnabled(cube, enabled, &menuHost, deferred);
             });
         });
     syncToggleAction();
@@ -581,7 +615,7 @@ void release(const RuntimeAgentHostV1* host)
     }
 
     QString error;
-    setPillowEnabled(cube, false, error);
+    setPillowEnabled(cube, false, host, error);
     host->complete_json(host->invocation_context, "{\"removed\":true}");
 }
 
@@ -606,7 +640,7 @@ void run(const RuntimeAgentHostV1* host)
 
     const QJsonObject request =
         QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
-    ensureToggleAction(cube);
+    ensureToggleAction(cube, host);
 
     const auto complete = [host](QJsonObject result) {
         result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
@@ -626,7 +660,7 @@ void run(const RuntimeAgentHostV1* host)
             return;
         }
         QString error;
-        setPillowEnabled(cube, false, error);
+        setPillowEnabled(cube, false, host, error);
         complete(QJsonObject{
             {QStringLiteral("restored"), true},
             {QStringLiteral("note"), QStringLiteral("the widget's original 36 vertices are back")},
@@ -656,7 +690,7 @@ void run(const RuntimeAgentHostV1* host)
     }
 
     QString error;
-    if (!setPillowEnabled(cube, true, error)) {
+    if (!setPillowEnabled(cube, true, host, error)) {
         host->fail(host->invocation_context, error.toLocal8Bit().constData());
         return;
     }

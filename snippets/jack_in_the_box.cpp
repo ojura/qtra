@@ -170,6 +170,7 @@ struct JackState {
     int openFace = 0;
     QQuaternion faceOrientation;
     QByteArray stashKey;
+    QByteArray claimKey;
 
     // Copied from the host, which documents agent_context as valid for the
     // lifetime of the process. The draw hook outlives the invocation.
@@ -503,10 +504,12 @@ void drawJackInTheBox(CubeWidget* cube)
 // Needs the widget's OpenGL context to be current.
 bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1* host, QString& error)
 {
-    // Both mesh replacements collapse all 36 of the widget's vertices and save
-    // them, so either one holding the buffer has to let go before this reads it.
-    scene_toggle::turnOff(cube, QStringLiteral("actionCatmullClark"));
-    scene_toggle::turnOff(cube, QStringLiteral("actionPillowMode"));
+    // No list of sibling snippets to switch off first. This used to name the
+    // other mesh replacements by their menu action, which meant every snippet
+    // had to know every other one, could never account for a snippet written
+    // later, and grew as the square of their number. Whether this region is
+    // already taken is now a question about records, asked below, and it is
+    // answerable about a module this one has never heard of.
 
     auto* state = new JackState();
     state->owner = QOpenGLContext::currentContext();
@@ -608,46 +611,60 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     cube->m_vertexBuffer.bind();
     const bool readBack = cube->m_vertexBuffer.read(
         byteOffset, savedFace.data(), cubeFloatsPerFace * static_cast<int>(sizeof(float)));
-    // All zeros means another mesh replacement already collapsed the cube and
-    // holds the only copy of the originals. Saving these would lose the face on
-    // restore, so refuse rather than nest. This is also the check that makes the
-    // stash deposit below safe, which is why the deposit sits behind it rather
-    // than carrying a verification of its own.
-    const bool alreadySuppressed = readBack && cube_mesh::anyFaceCollapsed(savedFace);
-    if (!readBack || alreadySuppressed) {
+    if (!readBack) {
         cube->m_vertexBuffer.release();
         destroyBuffers();
         delete state;
-        error = readBack
-            ? QStringLiteral("this face is already collapsed, so another replacement owns "
-                             "its vertices; saving its zeros as the originals would lose the "
-                             "face on restore")
-            : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
+        error = QStringLiteral("could not read the widget's vertex buffer; refusing to "
+                               "overwrite it");
         return false;
     }
+
+    // Ask the records, not the vertex values. A claim overlapping this face
+    // means something is displacing it right now, whether that is a whole-mesh
+    // replacement or another face-sized one; overlap is arithmetic, so the two
+    // sizes compare directly instead of one being invisible to the other.
+    const int offsetFloats = openFace * cubeFloatsPerFace;
+    cube_mesh::Claim claim;
+    if (cube_mesh::overlappingClaim(host, offsetFloats, cubeFloatsPerFace, claim)) {
+        cube->m_vertexBuffer.release();
+        destroyBuffers();
+        delete state;
+        error = QStringLiteral("floats %1..%2 of the widget's mesh are already displaced by "
+                               "\"%3\"; saving what it wrote as the originals would lose them")
+                    .arg(claim.offsetFloats)
+                    .arg(claim.offsetFloats + claim.lengthFloats)
+                    .arg(claim.owner);
+        return false;
+    }
+
     // The stash holds the only copy, and this module's own restore reads it
     // back from there. Keeping a private duplicate as well would make the bytes
     // other code depends on a copy nobody here exercises, and a saved copy
     // nobody reads is one nobody notices going wrong.
     //
-    // The entry means "what the displacement currently in effect displaced",
-    // not "the oldest value ever seen", so an install overwrites it. Replaying
-    // a first-ever copy over a later legitimate edit would revert that edit
-    // silently. Nothing verifies the bytes at this call: the guard above
-    // already did, and there is no path to here that skipped it.
-    // No null check on the stash callbacks. A host too old to have them presents
-    // a shorter struct, so those fields would be whatever sits after it in
-    // memory, so it is a test that reads past the end of the struct and passes on
-    // garbage. The version check at the top of run() is what rules that host
-    // out, and the loader refuses the module before it ever gets here.
-    state->stashKey = QStringLiteral("jack_in_the_box/face-%1")
-        .arg(QString::fromLatin1(cubeFaces[static_cast<std::size_t>(openFace)].name))
-        .toUtf8();
+    // The entry means what the displacement currently in effect displaced, not
+    // the oldest value ever seen, so an install overwrites it. Replaying a
+    // first-ever copy over a later legitimate edit would revert that edit
+    // silently. The host refuses the overwrite if the entry belongs to another
+    // snippet, so this cannot take one that is not its to take.
+    //
+    // No null check on the stash callbacks. A host too old to have them
+    // presents a shorter struct, so those fields would be whatever sits after
+    // it in memory, making the test one that reads past the end of the struct
+    // and passes on garbage. The version check at the top of run() rules that
+    // host out, and the loader refuses the module before it ever gets here.
+    state->stashKey = cube_mesh::regionKey(offsetFloats, cubeFloatsPerFace);
+    state->claimKey = cube_mesh::claimKey(offsetFloats, cubeFloatsPerFace);
     host->stash_put(host->agent_context,
                     state->stashKey.constData(),
                     savedFace.data(),
                     cubeFloatsPerFace * static_cast<std::int64_t>(sizeof(float)),
                     1);
+    // The claim exists only while the displacement does, which is what stops
+    // the persisting byte record from blocking every later install.
+    const char marker = 1;
+    host->stash_put(host->agent_context, state->claimKey.constData(), &marker, 1, 1);
 
     const std::vector<float> collapsed(cubeFloatsPerFace, 0.0F);
     cube->m_vertexBuffer.write(byteOffset, collapsed.data(),
@@ -700,6 +717,13 @@ void removeJack(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& note)
         note = QStringLiteral("the sixth face is back");
     }
     cube->m_vertexBuffer.release();
+
+    // The claim goes, the bytes stay. The claim only ever meant "a displacement
+    // is in effect", and one is not any more; the bytes outlive it because
+    // deciding this restore actually worked takes an observation this module
+    // cannot make about itself, and dropping them here would destroy the only
+    // good copy at exactly the moment a bad restore made it matter.
+    host->stash_drop(host->agent_context, jack->claimKey.constData());
 
     jack->shellArray.destroy();
     jack->shellBuffer.destroy();
