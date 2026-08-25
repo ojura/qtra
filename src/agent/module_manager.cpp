@@ -295,6 +295,12 @@ QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
     // would run under without having to remember what it asked for earlier.
     json.insert(QStringLiteral("declaresRelease"), module.declaresRelease());
     json.insert(QStringLiteral("hadSuccessfulRun"), module.hadSuccessfulRun);
+    json.insert(QStringLiteral("hadAttemptedRun"), module.hadAttemptedRun);
+    if (!module.hadSuccessfulRun && module.hadAttemptedRun) {
+        // The run that installed something and then failed is the interesting
+        // case here, so say where it ran even though it did not complete.
+        json.insert(QStringLiteral("lastAttemptedExecutor"), module.lastAttemptedExecutor);
+    }
     if (module.hadSuccessfulRun) {
         json.insert(QStringLiteral("lastExecutor"), module.lastExecutor);
         if (module.lastExecutor == QStringLiteral("object")) {

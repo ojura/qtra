@@ -751,18 +751,32 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
             return;
         }
 
-        // The executor the module was last run under, unless the caller
-        // overrides it. Release has to run where install ran: an event filter
-        // on a worker-thread object comes off under that object's thread, and
-        // GL teardown needs the context current.
+        // Release has to run where install ran: an event filter on a
+        // worker-thread object comes off under that object's thread, and GL
+        // teardown needs the context current.
+        // Preference order: what the caller said, then where the module last
+        // ran successfully, then where it last ran at all. The third exists
+        // because a run that installs and then fails records no success while
+        // leaving state behind, and its attempt is the only place that state
+        // can safely be torn down from. Reported so a caller can tell which
+        // was used rather than having to assume.
         const bool executorGiven = parameters.contains(QStringLiteral("executor"));
-        const QString executor = executorGiven
-            ? parameters.value(QStringLiteral("executor")).toString()
-            : module->lastExecutor;
-        if (!executorGiven && !module->hadSuccessfulRun) {
+        QString executor;
+        QString executorSource;
+        if (executorGiven) {
+            executor = parameters.value(QStringLiteral("executor")).toString();
+            executorSource = QStringLiteral("request");
+        } else if (module->hadSuccessfulRun) {
+            executor = module->lastExecutor;
+            executorSource = QStringLiteral("recorded");
+        } else if (module->hadAttemptedRun) {
+            executor = module->lastAttemptedExecutor;
+            executorSource = QStringLiteral("attempted");
+        } else {
             sendError(socket, requestId, QStringLiteral("no_recorded_executor"),
-                      QStringLiteral("this module has never run successfully, so there is no "
-                                     "recorded executor; pass one explicitly"));
+                      QStringLiteral("this module has never been run, so it cannot have "
+                                     "installed anything and there is no executor to "
+                                     "release under; pass one explicitly to try anyway"));
             return;
         }
         if (executor != QStringLiteral("gui")
@@ -784,10 +798,14 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
                     return;
                 }
             } else {
-                // A recorded target can be gone by now. Say so rather than
-                // quietly running the release somewhere else; where it runs is
-                // the caller's decision to make.
-                target = module->lastTarget.data();
+                // Follows whichever record supplied the executor, so an
+                // attempted release carries the target that attempt used. A
+                // recorded target can be gone by now: say so rather than
+                // quietly running the release somewhere else, because where it
+                // runs is the caller's decision to make.
+                target = executorSource == QStringLiteral("attempted")
+                    ? module->lastAttemptedTarget.data()
+                    : module->lastTarget.data();
                 if (target == nullptr) {
                     sendError(socket, requestId, QStringLiteral("recorded_target_gone"),
                               QStringLiteral("the object this module last ran on no longer "
@@ -802,8 +820,7 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
             {QStringLiteral("operationId"), QString::number(operationId)},
             {QStringLiteral("moduleId"), QString::number(module->id)},
             {QStringLiteral("executor"), executor},
-            {QStringLiteral("executorSource"), executorGiven
-                ? QStringLiteral("request") : QStringLiteral("recorded")},
+            {QStringLiteral("executorSource"), executorSource},
         });
 
         runSnippet(module, operationId, executor, target,
@@ -1237,6 +1254,14 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
 void RuntimeAgent::executeSnippet(ModuleManager::LoadedModule* module,
                                   const std::shared_ptr<SnippetInvocation>& invocation)
 {
+    // Recorded before the call, and for every attempt: this is the only witness
+    // to where an install ran when the run that made it went on to fail.
+    if (invocation->entry == SnippetEntry::Run) {
+        module->lastAttemptedExecutor = invocation->executor;
+        module->lastAttemptedTarget = invocation->target;
+        module->hadAttemptedRun = true;
+    }
+
     try {
         if (invocation->entry == SnippetEntry::Release) {
             module->snippet->release(&invocation->host);

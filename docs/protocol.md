@@ -106,14 +106,23 @@ does not declare one is answering rather than failing, and says so with
 `no_release_declared`; that is a different thing from a release that ran and
 failed, and the two are meant to be told apart.
 
-Executor and target are optional because the agent records how each module was
-last run successfully, and a release belongs where its install ran. Passing them
-overrides the record. Errors worth handling separately:
+Executor and target are optional because the agent records where each module
+ran, and a release belongs where its install ran. The resolution order is the
+request, then the last successful run, then the last attempt, reported back as
+`executorSource` of `request`, `recorded` or `attempted`.
+
+The third exists because a run that installs something and then fails records no
+success while leaving that state behind, and the attempt is the only witness to
+where it can safely be torn down. Guessing instead is worse than not releasing
+at all: Qt requires `removeEventFilter` to run on the watched object's thread, a
+timer to be killed from its own, and forbids deleting a QObject across threads,
+and nothing checks thread affinity the way the scene snippets check the GL
+context — so a wrong guess is a race inside the process rather than an error. Errors worth handling separately:
 
 | code | meaning |
 |---|---|
 | `no_release_declared` | the module has no release entry point |
-| `no_recorded_executor` | it has never run successfully, so pass an executor |
+| `no_recorded_executor` | it has never been run at all, so it installed nothing |
 | `recorded_target_gone` | the object it last ran on no longer exists |
 
 `module.list` reports `declaresRelease`, `hadSuccessfulRun`, and the recorded

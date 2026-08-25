@@ -43,6 +43,25 @@ public:
         QPointer<QObject> lastTarget;
         bool hadSuccessfulRun = false;
 
+        // Where the module's code actually ran, recorded for every attempt
+        // whether or not it completed. A run that installs something and then
+        // fails leaves that state behind with no successful record, and it is
+        // the only witness to where the install happened.
+        //
+        // Releasing such a module under a guessed executor is worse than not
+        // releasing it at all. Qt is specific about what may not cross threads:
+        // removeEventFilter must run on the watched object's thread, a timer
+        // must be killed from its own, and deleting a QObject from another
+        // thread is forbidden. A release that faithfully undoes a worker-thread
+        // install from the GUI thread breaks those rules, and nothing checks
+        // thread affinity the way the scene snippets check the GL context — so
+        // it fails as a race inside the process rather than as an error anyone
+        // can see. An attempt, by definition, is somewhere the install code
+        // already ran.
+        QString lastAttemptedExecutor;
+        QPointer<QObject> lastAttemptedTarget;
+        bool hadAttemptedRun = false;
+
         // Whether the module carries a release entry point. The loader refuses
         // any descriptor whose layout does not match this host exactly, so the
         // field is always present and only its value is in question.

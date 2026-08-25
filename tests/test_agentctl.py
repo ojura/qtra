@@ -291,6 +291,34 @@ class DeferredEventTests(unittest.TestCase):
             self.assertEqual(second["data"]["operationId"], "11")
             self.assertEqual(first["data"]["operationId"], "10")
 
+    def test_a_wait_does_not_consume_another_operations_completion(self) -> None:
+        """The socket loop must retain what it reads past, not only the drain.
+
+        Both completions arrive after the wait has started, so they come off the
+        socket rather than out of the deferred queue. Waiting for the second
+        must leave the first available.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+
+            def handler(agent: FakeAgent, connection: socket.socket) -> None:
+                for operation in ("20", "21"):
+                    agent.send(
+                        connection,
+                        {
+                            "event": "operation.finished",
+                            "data": {"operationId": operation, "outcome": "completed"},
+                        },
+                    )
+                time.sleep(1.0)
+
+            with FakeAgent(path, handler):
+                with AgentClient(os.fspath(path), timeout=2) as client:
+                    second = client.wait_for_operation("21", timeout=1)
+                    first = client.wait_for_operation("20", timeout=1)
+            self.assertEqual(second["data"]["operationId"], "21")
+            self.assertEqual(first["data"]["operationId"], "20")
+
     def test_unrelated_deferred_events_do_not_satisfy_a_wait(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "agent.sock"
@@ -387,46 +415,26 @@ class HandoverTests(unittest.TestCase):
         self.assertEqual(result["route"], "handover-request")
         self.assertEqual(sent, ["snippet.release", "snippet.run"])
 
-    def test_no_recorded_executor_retries_under_an_assumed_one(self) -> None:
-        """A failed run can still have installed something.
+    def test_never_attempted_is_not_a_failure_and_sends_no_payload(self) -> None:
+        """no_recorded_executor now means the module was never run at all.
 
-        hadSuccessfulRun is only set when the invocation carried no error, so a
-        snippet that installs a hook and then calls fail() leaves that hook live
-        with no recorded executor. Skipping the release there is what let a new
-        generation install alongside an old one while the tool reported success.
+        The agent resolves the executor from the last successful run, then from
+        the last attempt, and only answers this when there was neither. A module
+        that has never run cannot have installed anything, so there is nothing
+        for a handover to undo and nothing to send a payload about. The case
+        that used to hide here — installed, then failed — resolves to the
+        executor that attempt used, and never reaches the client.
         """
-        seen: list[Any] = []
+        sent: list[Any] = []
 
         class Client:
             def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
-                seen.append((command, (params or {}).get("executor")))
-                if len(seen) == 1:
-                    raise ProtocolError(
-                        "no_recorded_executor: never ran", "no_recorded_executor"
-                    )
-                return {"operationId": "3"}
+                sent.append((command, (params or {}).get("executor")))
+                raise ProtocolError("no_recorded_executor: never run", "no_recorded_executor")
 
             def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
-                return {"data": {"operationId": "3", "outcome": "completed"}}
+                raise AssertionError("nothing should be awaited")
 
-        result = hand_over(
-            Client(), {"id": "1"}, None, None, None, 1.0, fallback_executor="render"
-        )
-        self.assertEqual(result["outcome"], "released")
-        self.assertEqual(result["assumedExecutor"], "render")
-        self.assertEqual(seen, [("snippet.release", None), ("snippet.release", "render")])
-
-    def test_retried_release_that_fails_is_a_failed_handover(self) -> None:
-        class Client:
-            def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
-                if (params or {}).get("executor") is None:
-                    raise ProtocolError(
-                        "no_recorded_executor: never ran", "no_recorded_executor"
-                    )
-                raise ProtocolError("release_failed: boom", "release_failed")
-
-            def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
-                raise AssertionError("no operation should start")
-
-        result = hand_over(Client(), {"id": "1"}, None, None, None, 1.0)
-        self.assertEqual(result["outcome"], "failed")
+        result = hand_over(Client(), {"id": "1"}, None, None, '{"restore": true}', 1.0)
+        self.assertEqual(result["outcome"], "never-ran")
+        self.assertEqual(sent, [("snippet.release", None)])
