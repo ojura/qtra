@@ -117,7 +117,9 @@ where it can safely be torn down. Guessing instead is worse than not releasing
 at all: Qt requires `removeEventFilter` to run on the watched object's thread, a
 timer to be killed from its own, and forbids deleting a QObject across threads,
 and nothing checks thread affinity the way the scene snippets check the GL
-context — so a wrong guess is a race inside the process rather than an error. Errors worth handling separately:
+context — so a wrong guess is a race inside the process rather than an error.
+
+Errors worth handling separately:
 
 | code | meaning |
 |---|---|
@@ -125,8 +127,11 @@ context — so a wrong guess is a race inside the process rather than an error. 
 | `no_recorded_executor` | it has never been run at all, so it installed nothing |
 | `recorded_target_gone` | the object it last ran on no longer exists |
 
-`module.list` reports `declaresRelease`, `hadSuccessfulRun`, and the recorded
-`lastExecutor`/`lastTarget` for each snippet module.
+`module.list` reports `declaresRelease`, `hadSuccessfulRun`, `hadAttemptedRun`,
+and the recorded `lastExecutor`/`lastTarget` for each snippet module. A module
+that has attempted a run without completing one also reports
+`lastAttemptedExecutor`, which is the interesting case: it installed something
+and then failed.
 
 ### Byte stash
 
