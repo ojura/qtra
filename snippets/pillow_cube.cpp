@@ -406,6 +406,26 @@ QJsonObject describe(const PillowState* state)
     };
 }
 
+// A collapsed face is six vertices of zeros in a row. Testing the whole buffer
+// for zeros only catches a replacement that took all six faces at once, and
+// misses one that took a single face — after which this would save that face's
+// zeros as the originals and lose it on restore. Per-face catches both, and
+// cannot be done by testing individual floats: the widget's own face colours
+// contain zeros.
+bool anyFaceCollapsed(const std::vector<float>& vertices)
+{
+    constexpr int floatsPerFace = 6 * 6;
+    const auto total = static_cast<int>(vertices.size());
+    for (int start = 0; start + floatsPerFace <= total; start += floatsPerFace) {
+        const auto begin = vertices.begin() + start;
+        if (std::all_of(begin, begin + floatsPerFace,
+                        [](const float value) { return value == 0.0F; })) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Needs the widget's OpenGL context to be current.
 bool installPillow(CubeWidget* cube, QString& error)
 {
@@ -449,9 +469,7 @@ bool installPillow(CubeWidget* cube, QString& error)
     // All zeros means some other mesh replacement already collapsed them and
     // holds the only copy of the originals. Saving these would lose the cube on
     // restore, so refuse rather than nest.
-    const bool alreadySuppressed = readBack
-        && std::all_of(state->savedCubeVertices.begin(), state->savedCubeVertices.end(),
-                       [](const float value) { return value == 0.0F; });
+    const bool alreadySuppressed = readBack && anyFaceCollapsed(state->savedCubeVertices);
     if (!readBack || alreadySuppressed) {
         cube->m_vertexBuffer.release();
         state->vertexArray.destroy();
@@ -459,8 +477,9 @@ bool installPillow(CubeWidget* cube, QString& error)
         state->indexBuffer.destroy();
         delete state;
         error = readBack
-            ? QStringLiteral("the widget's vertices are already collapsed, so another mesh "
-                             "replacement owns them; saving these zeros would lose the cube")
+            ? QStringLiteral("a face of the widget's mesh is already collapsed, so another "
+                             "replacement owns those vertices; saving its zeros as the "
+                             "originals would lose that face on restore")
             : QStringLiteral("could not read the widget's vertex buffer; refusing to overwrite it");
         return false;
     }
