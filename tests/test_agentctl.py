@@ -422,7 +422,7 @@ class HandoverTests(unittest.TestCase):
         the last attempt, and only answers this when there was neither. A module
         that has never run cannot have installed anything, so there is nothing
         for a handover to undo and nothing to send a payload about. The case
-        that used to hide here — installed, then failed — resolves to the
+        that used to hide here, installed and then failed, resolves to the
         executor that attempt used, and never reaches the client.
         """
         sent: list[Any] = []

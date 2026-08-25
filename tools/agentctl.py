@@ -49,7 +49,7 @@ class AgentClient:
         # Events seen while waiting for a command response. Without this they
         # were dropped, so an operation.finished arriving during an unrelated
         # request left a later wait_for_operation waiting for something that had
-        # already happened — which reads as the application hanging. The bound is
+        # already happened, which reads as the application hanging. The bound is
         # this client's own choice and is not tied to the agent's retained-event
         # count; dropping oldest first fails safe, because a wait for a dropped
         # completion times out rather than matching the wrong one.
@@ -290,7 +290,7 @@ def loaded_snippet_modules(client: "AgentClient") -> list[JsonObject]:
 def previous_generation(modules: list[JsonObject], name: str, exclude_id: str) -> JsonObject | None:
     """The newest other module reporting the same snippet name.
 
-    Generations of one snippet differ in path — each reload needs a new one —
+    Generations of one snippet differ in path, since each reload needs a new one,
     but the descriptor name is the same string in every build of that source,
     which makes it the reliable way to recognise them as the same thing.
     """
@@ -348,7 +348,7 @@ def release_snippet(
         params["target"] = target
     # Only a release that ran and went wrong is a failure. A module that
     # declares none, or that has never run and so cannot have installed
-    # anything, is answering the question — and treating either as a failure
+    # anything, is answering the question, and treating either as a failure
     # would stop a handover that had nothing to do in the first place.
     not_a_failure = {
         "no_release_declared": "declared-none",

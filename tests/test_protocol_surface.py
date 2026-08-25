@@ -1,7 +1,7 @@
 """The command set is written down once, in commands().
 
-It used to exist twice — an if-chain in dispatchRequest and a hand-written list
-in commandList() — kept in sync by remembering to, with an asymmetric cost when
+It used to exist twice, an if-chain in dispatchRequest and a hand-written list
+in commandList(), kept in sync by remembering to, with an asymmetric cost when
 that failed: a command missing from the list still worked but could not be
 discovered by a client that browses, and a name left behind after its handler
 went answered unknown_command.
@@ -37,7 +37,7 @@ class ProtocolSurfaceTests(unittest.TestCase):
     def test_nothing_dispatches_on_a_command_name_outside_the_table(self) -> None:
         """A special case added beside the table is the duplication returning.
 
-        It would work, and help would not mention it — the exact asymmetry the
+        It would work, and help would not mention it, which is the exact asymmetry the
         table removed.
         """
         stray = COMMAND_COMPARISON.findall(self.source)

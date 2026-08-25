@@ -276,7 +276,7 @@ python3 tools/agentctl.py snippet \
 | module | what it does | parameters |
 | --- | --- | --- |
 | `agent_snippet_orbit_sphere` | shaded sphere on a tilted orbit | none |
-| `agent_snippet_catmull_clark` | replaces the cube with its Catmull-Clark subdivision surface, keeping the six face colors | `level` 0–5, default 2 |
+| `agent_snippet_catmull_clark` | replaces the cube with its Catmull-Clark subdivision surface, keeping the six face colors | `level` 0 to 5, default 2 |
 | `agent_snippet_pillow_cube` | turns each side into a stuffed pillow panel with sewn edges and stitching | `puff`, `roundness`, `tuck`, `resolution`, `seam`, `stitches`, `fabric` |
 | `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
 
@@ -295,7 +295,8 @@ is loaded, under a separator that marks off everything added at runtime:
 The application has no knowledge of these snippets and must not acquire any:
 they are separate shared objects that may never be loaded at all. Each entry is
 therefore created by the snippet once it is in the process, and its handler is
-code inside that module — one more reason a loaded snippet is never unloaded.
+code inside that module, which is one more reason a loaded snippet is
+never unloaded.
 
 Because the entry is an ordinary `QAction` in the application's object tree, the
 semantic API drives it like any other:
@@ -336,7 +337,7 @@ call each other, so the exclusion runs by unchecking the other's `QAction` and
 letting the module that owns it do its own removal.
 
 That handles the case where both entries exist. As a backstop for when they do
-not — a second copy from a JIT path never gets one, since the name is taken —
+not (a second copy from a JIT path never gets one, since the name is taken),
 each of the two also reads the widget's vertices before saving them and refuses
 to install if they are already all zeros:
 
@@ -513,13 +514,13 @@ sends a request payload and cannot report whether anything acted on it, which is
 the difference the declaration removes.
 
 Generations are matched by the descriptor's `name_utf8`, which is the same
-string in every build of one source, rather than by filename — reloads and
+string in every build of one source, rather than by filename. Reloads and
 `jit_snippet.py` output do not share a filename stem. `--replace ID` picks the
 outgoing module explicitly.
 
 `jit_snippet.py` remains the tool for a source file with no CMake target. For
-one that has a target, building it is not the slower option — an incremental
-build measured 4.4 s against 4.1 s for the oracle's own compile — and the built
+one that has a target, building it is not the slower option. An incremental
+build measured 4.4 s against 4.1 s for the oracle's own compile, and the built
 object is the artifact the project actually produces, compiled with the
 project's command line rather than the oracle's reconstruction of it.
 
@@ -535,7 +536,8 @@ stderr, rather than letting a stale load look like a rebuild that did not take.
 
 Work queued for the `render` executor runs inside `paintGL()`, and `update()`
 only asks for a repaint. A window the compositor has stopped sending frame
-callbacks to — covered, unfocused, or minimised — may never provide one, and
+callbacks to, whether covered, unfocused or minimised, may never provide one,
+and
 queued work would then wait for as long as the window stays hidden while the
 caller sees only its own request timing out. `CubeWidget` therefore starts a
 100 ms single-shot watchdog whenever it queues render work, and a queue still
@@ -566,7 +568,7 @@ Rebuild the snippets when the header changes; a stale `.so` under
 `runtime-snippets/` will be rejected rather than run.
 
 A null `release` means the module declares it has nothing to undo. That is a
-real answer and not a placeholder — of the nine snippets here, `inspect_cube`,
+real answer and not a placeholder. Of the nine snippets here, `inspect_cube`,
 `install_observer` and `render_probe` genuinely install nothing that outlives
 the call, and `install_observer` already said as much in its own result.
 
@@ -576,9 +578,9 @@ python3 tools/agentctl.py call module.list
 ```
 
 No executor is needed. The agent records how each module was last run
-*successfully* — the last success rather than the first attempt, since a snippet
-needing a GL context fails under `gui` with "use executor=render" and is retried
-— and runs the release there. `module.list` reports that record alongside
+*successfully*, and runs the release there. The last success rather than the
+first attempt, since a snippet needing a GL context fails under `gui` with "use
+executor=render" and is retried. `module.list` reports that record alongside
 `declaresRelease`. Passing `executor` or `target` overrides it; a recorded
 target that no longer exists is reported as `recorded_target_gone` rather than
 quietly replaced.
@@ -593,8 +595,8 @@ What this does not do is verify the effects are gone. It raises "nobody can tell
 whether the handover did anything" to "the handover ran and reported"; a buggy
 release that leaves half its state behind passes exactly as before. The
 declaration is also one bit per module, so a snippet that installed three things
-cannot say it can undo two. The install-time defences — the scene snippets
-refusing to save an already-collapsed vertex buffer — still matter for that
+cannot say it can undo two. The install-time defences, such as the scene
+snippets refusing to save an already-collapsed vertex buffer, still matter for that
 reason, because nothing distinguishes "nothing to release" from "the author
 forgot".
 
@@ -631,7 +633,7 @@ exhortation:
   else changed it since, the bytes are left alone and the result says so. That
   check is what makes an entry which outlives its release safe to keep.
 
-The stash holds the *only* copy — the jack keeps no private duplicate and its
+The stash holds the *only* copy. The jack keeps no private duplicate and its
 own restore reads it back from there. That is deliberate: a saved copy nobody
 reads is a copy nobody notices going wrong, whereas here the bytes another
 module would rely on are the bytes this module's own restore needs. Drop the
@@ -656,14 +658,14 @@ belongs to whoever is driving; and a restore that corrupts rather than restores
 must not delete the only good copy as its final act.
 
 This is not an undo log. The host stores bytes and has no idea what they mean,
-which is the point — a host that had to replay effects would need a vocabulary
+which is the point: a host that had to replay effects would need a vocabulary
 covering everything a snippet might do, and that contradicts snippets being able
 to do almost anything.
 
 Not everything needs saving. `cubeVertices` is `constexpr` in an anonymous
 namespace, so it is absent from `.dynsym` and `symbol.resolve` misses it, but it
 is still in `.symtab` and readable from the live process with
-`unsafe.memory.read` at a load base derived from any resolvable symbol — and it
+`unsafe.memory.read` at a load base derived from any resolvable symbol, and it
 is in the repository as source besides. The rule is to save what you overwrite
 *unless it is reconstructible from the binary or the source*.
 

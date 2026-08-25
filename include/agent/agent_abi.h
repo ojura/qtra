@@ -17,8 +17,8 @@ extern "C" {
 // rejects any module that does not match exactly, so a module built against an
 // older layout is refused at load rather than reading fields the host never
 // wrote. This is a prototype under active development: there is no
-// compatibility path and none is wanted, because the alternative — a module
-// silently reading past the end of the struct it was given — is worse than a
+// compatibility path and none is wanted. The alternative, a module silently
+// reading past the end of the struct it was given, is worse than a
 // refused load and much harder to notice.
 inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0002'0000u;
 
@@ -42,14 +42,14 @@ struct RuntimeAgentHostV1 {
     //
     // Process lifetime: agent_context and every function pointer below. The
     // callbacks are the host's own functions, and agent_context identifies the
-    // calling module for as long as it is loaded, which is forever — modules
-    // are deliberately never unloaded.
+    // calling module for as long as it is loaded, which is forever, since
+    // modules are deliberately never unloaded.
     //
     // Invocation lifetime: invocation_context, and only that. It belongs to the
     // call in progress and is meaningless once run() or release() returns.
     //
-    // A snippet that installs a callback outliving the invocation — a draw
-    // hook, a menu handler — should keep a by-value copy of this whole struct
+    // A snippet that installs a callback outliving the invocation, such as a
+    // draw hook or a menu handler, should keep a by-value copy of this struct
     // with invocation_context set to nullptr, and use that afterwards. Copying
     // the struct is sanctioned precisely because everything except that one
     // field is process-lifetime. Rebuilding a partial struct by hand instead is
@@ -91,8 +91,8 @@ struct RuntimeAgentHostV1 {
     // The host keeps opaque byte strings under caller-chosen keys and never
     // interprets them. Its purpose is that a module which overwrites host state
     // can put the original somewhere outside its own memory, so that code
-    // written later — including a module written after this one misbehaved —
-    // can restore it. A module's own private copy is unreachable to everything
+    // written later, including a module written after this one misbehaved, can
+    // restore it. A module's own private copy is unreachable to everything
     // else, which is what makes an undo written after the fact impossible.
     //
     // The namespace is flat and deliberately so: scoping keys to a module would
@@ -146,15 +146,15 @@ struct RuntimeAgentSnippetV1 {
     // A null release means this module declares it has nothing to undo, and is
     // the only way to declare that: a descriptor built against an older layout
     // is refused at load rather than read as releaseless. It is a real answer,
-    // not a placeholder — a one-shot probe genuinely installs nothing.
+    // not a placeholder: a one-shot probe genuinely installs nothing.
     //
     // It does not mean the module is safe. Nothing can distinguish "nothing to
     // release" from "the author forgot", so the defences at install time still
     // matter.
     //
     // Release must not report completion before its effects are applied. A
-    // caller sequencing a handover — release the old generation, then install
-    // the new one — relies on completion meaning done; a release that defers
+    // caller sequencing a handover, releasing the old generation and then
+    // installing the new one, relies on completion meaning done; a release that defers
     // its real work and completes early hands the next install the state it was
     // supposed to have cleaned up.
     //

@@ -77,8 +77,8 @@ inline QAction* install(QWidget* widget,
     if (QAction* existing = window->findChild<QAction*>(objectName)) {
         // A checked entry belongs to a generation that currently holds an
         // install, and handing it to a caller which has not installed anything
-        // yet loses it for good: the caller may then refuse — the vertex
-        // replacements refuse routinely — and its sync leaves the entry
+        // yet loses it for good. The caller may then refuse, as the vertex
+        // replacements refuse routinely, and its sync leaves the entry
         // unchecked and wired to a module holding nothing. The live generation
         // is then unreachable from the menu, and turnOff, which acts only on a
         // checked entry, silently stops excluding it.
@@ -124,7 +124,7 @@ inline QAction* install(QWidget* widget,
 // of the cube.
 //
 // Unchecking runs the owning module's handler, which does the removal there and
-// then when a context is already current — which it is when this is called from
+// then when a context is already current, which it is when this is called from
 // inside the other snippet's render callback.
 inline void turnOff(QWidget* widget, const QString& objectName)
 {

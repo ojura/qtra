@@ -66,8 +66,8 @@ private:
     };
 
     // What a module's host callbacks carry as agent_context, instead of the
-    // agent itself. A callback made from outside an invocation — a draw hook, a
-    // menu handler — has no other way to say which module it came from, so
+    // agent itself. A callback made from outside an invocation, such as a draw
+    // hook or a menu handler, has no other way to say which module it came from, so
     // stash entries and log lines from those places would otherwise be
     // unattributable. Modules are never unloaded, so these satisfy the ABI's
     // promise that agent_context stays valid for the life of the process.

@@ -65,7 +65,7 @@ Object selectors use either `{objectName:"..."}` or `{id:"..."}`.
 - `object.describe {selector, includeValues?}`
 - `object.get {selector, property}`
 - `object.set {selector, property, value}`
-- `object.invoke {selector, method}` — zero-argument methods only
+- `object.invoke {selector, method}`: zero-argument methods only
 - `action.trigger {selector}`
 - `widget.click {selector}`
 
@@ -117,7 +117,7 @@ where it can safely be torn down. Guessing instead is worse than not releasing
 at all: Qt requires `removeEventFilter` to run on the watched object's thread, a
 timer to be killed from its own, and forbids deleting a QObject across threads,
 and nothing checks thread affinity the way the scene snippets check the GL
-context — so a wrong guess is a race inside the process rather than an error.
+context, so a wrong guess is a race inside the process rather than an error.
 
 Errors worth handling separately:
 
@@ -136,7 +136,7 @@ and then failed.
 ### Byte stash
 
 - `stash.list`
-- `stash.get {key}` — returns `base64`, `size`, `monotonicNs`, `moduleId`
+- `stash.get {key}`: returns `base64`, `size`, `monotonicNs`, `moduleId`
 - `stash.drop {key}`
 
 The host keeps opaque byte strings under caller-chosen keys and never interprets
@@ -156,7 +156,7 @@ explicit overwrite flag and reports whether the key was already there.
 Entries outlive the module that wrote them and go away only on an explicit
 `stash.drop`. Deciding that a restore actually worked takes an observation no
 module can make about itself, so dropping is the driver's call, not the
-module's — and a buggy restore that corrupts instead of restoring must not
+module's. A buggy restore that corrupts instead of restoring must not
 delete the only good copy as its last act. Dropping an entry whose displacement
 is still in effect is how you lose the original: releasing then reports that it
 could not restore, rather than writing whatever is in the buffer.

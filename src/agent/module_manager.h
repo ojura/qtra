@@ -37,8 +37,8 @@ public:
         // context fails under gui with "use executor=render" and is retried,
         // and a release under the executor that already failed fails the same
         // way. The target is held weakly because it can be gone by release
-        // time — a worker that finished, an object already destroyed — and a
-        // caller is better told that than silently given a different one.
+        // time, whether a worker that finished or an object already destroyed,
+        // and a caller is better told that than silently given a different one.
         QString lastExecutor;
         QPointer<QObject> lastTarget;
         bool hadSuccessfulRun = false;
@@ -54,7 +54,7 @@ public:
         // must be killed from its own, and deleting a QObject from another
         // thread is forbidden. A release that faithfully undoes a worker-thread
         // install from the GUI thread breaks those rules, and nothing checks
-        // thread affinity the way the scene snippets check the GL context — so
+        // thread affinity the way the scene snippets check the GL context, so
         // it fails as a race inside the process rather than as an error anyone
         // can see. An attempt, by definition, is somewhere the install code
         // already ran.

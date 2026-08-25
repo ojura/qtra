@@ -633,11 +633,11 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     // The entry means "what the displacement currently in effect displaced",
     // not "the oldest value ever seen", so an install overwrites it. Replaying
     // a first-ever copy over a later legitimate edit would revert that edit
-    // silently. Nothing verifies the bytes at this call — the guard above
+    // silently. Nothing verifies the bytes at this call: the guard above
     // already did, and there is no path to here that skipped it.
     // No null check on the stash callbacks. A host too old to have them presents
     // a shorter struct, so those fields would be whatever sits after it in
-    // memory — a test that reads past the end of the struct and passes on
+    // memory, so it is a test that reads past the end of the struct and passes on
     // garbage. The version check at the top of run() is what rules that host
     // out, and the loader refuses the module before it ever gets here.
     state->stashKey = QStringLiteral("jack_in_the_box/face-%1")

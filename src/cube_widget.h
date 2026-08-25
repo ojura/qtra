@@ -22,7 +22,7 @@ class QOpenGLDebugLogger;
 
 // The layout of the vertex buffer initializeGeometry() fills: six faces, each
 // six vertices, each a position and a colour. Snippets that displace part of
-// that buffer depend on these numbers exactly, and were restating them — five
+// that buffer depend on these numbers exactly, and were restating them: five
 // spellings across three files, none of them next to the array they described.
 // The widget owns the buffer, so it states the layout.
 inline constexpr int cubeFaceCount = 6;

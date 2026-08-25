@@ -4,14 +4,14 @@
 //
 // Each of them zeroes some region of that buffer so the triangles it feeds
 // rasterize nothing, and each has to refuse when another module has already
-// done so — otherwise it saves that module's zeros as the originals and the
+// done so. Otherwise it saves that module's zeros as the originals and the
 // face is lost when either one restores.
 //
 // That refusal is the safety mechanism rather than a nicety: the menu-based
 // exclusion between these snippets is advisory, since two generations can be
 // installed at once over the socket while a menu entry tracks only one. So the
-// check lives here in one implementation. It was previously three — copied
-// verbatim into two files and written differently in a third — which is the
+// check lives here in one implementation. It was previously three, copied
+// verbatim into two files and written differently in a third, which is the
 // arrangement that produced the original asymmetry, where one snippet had a
 // replay guard and its twin did not.
 //
@@ -43,7 +43,7 @@ inline bool faceCollapsedAt(const std::vector<float>& vertices, const int start)
 
 // Whether any face in the given span is collapsed. Testing the whole buffer for
 // zeros instead only catches a replacement that took every face, and misses one
-// that took a single face — which is the case that loses a face on restore.
+// that took a single face, which is the case that loses a face on restore.
 inline bool anyFaceCollapsed(const std::vector<float>& vertices)
 {
     const auto total = static_cast<int>(vertices.size());

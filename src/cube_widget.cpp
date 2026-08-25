@@ -223,8 +223,8 @@ void CubeWidget::enqueueRenderCallback(std::function<void()> callback)
 }
 
 // update() only asks for a repaint, and a window the compositor has stopped
-// sending frame callbacks to — covered, unfocused, or on another workspace —
-// may never get one. Queued render work would then sit unfinished for as long
+// sending frame callbacks to, whether covered, unfocused or on another
+// workspace, may never get one. Queued render work would then sit unfinished for as long
 // as the window stays hidden, which the caller sees as its request timing out
 // even though the snippet loaded correctly.
 //
