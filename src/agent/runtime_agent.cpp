@@ -1138,6 +1138,10 @@ QJsonObject RuntimeAgent::hello() const
     };
 }
 
+// Mirrors the if-chain in dispatchRequest, by hand. tests/test_protocol_surface.py
+// fails when the two disagree; the fix that would remove the mirror entirely is
+// a single dispatch table of name to handler, which this list would then derive
+// from rather than restate.
 QJsonArray RuntimeAgent::commandList() const
 {
     const QStringList commands{
