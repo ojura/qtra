@@ -315,11 +315,18 @@ def release_snippet(
         params["executor"] = executor
     if target:
         params["target"] = target
+    # Only a release that ran and went wrong is a failure. A module that
+    # declares none, or that has never run and so cannot have installed
+    # anything, is answering the question — and treating either as a failure
+    # would stop a handover that had nothing to do in the first place.
+    not_a_failure = {
+        "no_release_declared": "declared-none",
+        "no_recorded_executor": "never-ran",
+    }
     try:
         started = client.request("snippet.release", params, on_event=on_event)
     except ProtocolError as exc:
-        outcome = "declared-none" if exc.code == "no_release_declared" else "failed"
-        return outcome, {"reason": str(exc)}
+        return not_a_failure.get(exc.code or "", "failed"), {"reason": str(exc)}
 
     finished = client.wait_for_operation(
         started["operationId"], timeout=timeout, on_event=on_event
@@ -680,18 +687,28 @@ def main(argv: list[str] | None = None) -> int:
                     print_json(result, args.compact)
                     return 1
 
-                result["installed"] = True
-                result.update(
-                    run_snippet(
-                        client,
-                        loaded["moduleId"],
-                        run_executor,
-                        request,
-                        target,
-                        args.timeout,
-                        show_event,
-                    )
+                ran = run_snippet(
+                    client,
+                    loaded["moduleId"],
+                    run_executor,
+                    request,
+                    target,
+                    args.timeout,
+                    show_event,
                 )
+                result.update(ran)
+
+                # The handover path exits non-zero when it goes wrong, and the
+                # install has to do the same. Otherwise a caller chaining on
+                # success carries on from a generation that refused to install,
+                # having been told the reload worked.
+                outcome = ((ran.get("finished") or {}).get("data") or {}).get("outcome")
+                result["installed"] = outcome == "completed"
+                if not result["installed"]:
+                    result["note"] = ("the new generation was loaded but its run did not "
+                                      "complete, so it may have installed nothing")
+                    print_json(result, args.compact)
+                    return 1
                 print_json(result, args.compact)
                 return 0
 

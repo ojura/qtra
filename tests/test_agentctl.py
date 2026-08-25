@@ -16,7 +16,7 @@ from typing import Any
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
-from agentctl import AgentClient, ProtocolError, main
+from agentctl import AgentClient, ProtocolError, hand_over, main, release_snippet
 
 
 class FakeAgent:
@@ -228,3 +228,91 @@ class AgentClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HandoverTests(unittest.TestCase):
+    """How reload classifies what the outgoing generation did.
+
+    The distinction these cover is the whole reason reload asks a module to
+    release rather than sending it a payload and hoping: a module that cannot
+    have installed anything must not read as a failure, because a handover with
+    nothing to do would then stop the reload and leave a module resident on
+    every retry.
+    """
+
+    def _client_raising(self, code: str) -> Any:
+        class Client:
+            def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
+                raise ProtocolError(f"{code}: refused", code)
+
+            def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("should not wait after a refused release")
+
+        return Client()
+
+    def test_declared_none_is_not_a_failure(self) -> None:
+        outcome, _ = release_snippet(
+            self._client_raising("no_release_declared"), "1", None, None, 1.0
+        )
+        self.assertEqual(outcome, "declared-none")
+
+    def test_module_that_never_ran_is_not_a_failure(self) -> None:
+        # A module loaded but never run cannot hold an install, so there is
+        # nothing for a handover to undo. Reporting this as a failure wedged
+        # every later reload, because the generation matched by name stayed the
+        # newest one forever.
+        outcome, _ = release_snippet(
+            self._client_raising("no_recorded_executor"), "1", None, None, 1.0
+        )
+        self.assertEqual(outcome, "never-ran")
+
+    def test_other_agent_errors_are_failures(self) -> None:
+        outcome, _ = release_snippet(
+            self._client_raising("recorded_target_gone"), "1", None, None, 1.0
+        )
+        self.assertEqual(outcome, "failed")
+
+    def test_release_that_ran_and_failed_is_a_failure(self) -> None:
+        class Client:
+            def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
+                return {"operationId": "7"}
+
+            def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
+                return {"data": {"operationId": "7", "outcome": "failed"}}
+
+        outcome, detail = release_snippet(Client(), "1", None, None, 1.0)
+        self.assertEqual(outcome, "failed")
+        self.assertIn("finished", detail)
+
+    def test_declared_none_falls_back_to_the_payload(self) -> None:
+        sent: list[str] = []
+
+        class Client:
+            def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
+                sent.append(command)
+                if command == "snippet.release":
+                    raise ProtocolError("no_release_declared: none", "no_release_declared")
+                return {"operationId": "9"}
+
+            def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
+                return {"data": {"operationId": "9", "outcome": "completed"}}
+
+        result = hand_over(Client(), {"id": "1"}, None, None, '{"restore": true}', 1.0)
+        self.assertEqual(result["outcome"], "payload-sent")
+        self.assertEqual(result["route"], "handover-request")
+        self.assertEqual(sent, ["snippet.release", "snippet.run"])
+
+    def test_never_ran_sends_no_payload(self) -> None:
+        sent: list[str] = []
+
+        class Client:
+            def request(self, command: str, params: Any = None, on_event: Any = None) -> Any:
+                sent.append(command)
+                raise ProtocolError("no_recorded_executor: never ran", "no_recorded_executor")
+
+            def wait_for_operation(self, *args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("nothing to wait for")
+
+        result = hand_over(Client(), {"id": "1"}, None, None, '{"restore": true}', 1.0)
+        self.assertEqual(result["outcome"], "never-ran")
+        self.assertEqual(sent, ["snippet.release"])
