@@ -75,6 +75,21 @@ inline QAction* install(QWidget* widget,
         return nullptr;
     }
     if (QAction* existing = window->findChild<QAction*>(objectName)) {
+        // A checked entry belongs to a generation that currently holds an
+        // install, and handing it to a caller which has not installed anything
+        // yet loses it for good: the caller may then refuse — the vertex
+        // replacements refuse routinely — and its sync leaves the entry
+        // unchecked and wired to a module holding nothing. The live generation
+        // is then unreachable from the menu, and turnOff, which acts only on a
+        // checked entry, silently stops excluding it.
+        //
+        // So the entry is only handed over when nothing holds it. A caller that
+        // gets nullptr here reports menuToggle false and is driven over the
+        // socket; once the previous generation releases and unchecks, the next
+        // call takes the entry over.
+        if (existing->isChecked()) {
+            return nullptr;
+        }
         QObject::disconnect(existing, &QAction::toggled, nullptr, nullptr);
         QObject::connect(existing, &QAction::toggled, window, std::move(onToggled));
         return existing;
