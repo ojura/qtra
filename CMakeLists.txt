@@ -159,6 +159,27 @@ if(BUILD_QT_APP)
     set_target_properties(agent_snippet_pillow_cube PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_pillow_cube")
 
+    # Reads the system output mix through PulseAudio, so it is built only where
+    # that library is present. Everything else here needs no audio stack, and a
+    # missing one should cost this one target rather than the configure step.
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(PULSE_SIMPLE QUIET libpulse-simple)
+    endif()
+    if(PULSE_SIMPLE_FOUND)
+        add_library(agent_snippet_audio_pulse MODULE snippets/audio_pulse.cpp)
+        target_include_directories(agent_snippet_audio_pulse PRIVATE
+            include src ${PULSE_SIMPLE_INCLUDE_DIRS})
+        target_link_libraries(agent_snippet_audio_pulse PRIVATE
+            Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets
+            ${PULSE_SIMPLE_LIBRARIES})
+        target_compile_options(agent_snippet_audio_pulse PRIVATE -fno-access-control)
+        set_target_properties(agent_snippet_audio_pulse PROPERTIES
+            PREFIX "" OUTPUT_NAME "agent_snippet_audio_pulse")
+    else()
+        message(STATUS "libpulse-simple not found; skipping agent_snippet_audio_pulse")
+    endif()
+
     add_library(agent_snippet_about_signature MODULE snippets/about_signature.cpp)
     target_include_directories(agent_snippet_about_signature PRIVATE include src)
     target_link_libraries(agent_snippet_about_signature PRIVATE
