@@ -39,9 +39,6 @@ constexpr float orbitRadius = 2.85F;
 constexpr float orbitDegreesPerSecond = 95.0F;
 constexpr float orbitTiltDegrees = 22.0F;
 
-// Must match the values paintGL() uses, since the sphere shares the frame.
-constexpr float viewDistance = 5.4F;
-
 constexpr auto sphereVertexShader = R"glsl(
 #version 330 core
 layout(location = 0) in vec3 inPosition;
@@ -135,7 +132,7 @@ void drawOrbitingSphere(const CubeWidget* cube)
     model.scale(sphereRadius);
 
     QMatrix4x4 view;
-    view.translate(0.0F, 0.0F, -viewDistance);
+    view.translate(0.0F, 0.0F, -cubeViewDistance);
 
     orbit->program.bind();
     orbit->program.setUniformValue("mvp", cube->m_projection * view * model);

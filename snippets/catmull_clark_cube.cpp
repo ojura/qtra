@@ -41,9 +41,6 @@
 
 namespace {
 
-// Must match the values paintGL() uses, since the mesh shares the frame.
-constexpr float viewDistance = 5.4F;
-
 constexpr int maxLevel = 5;
 constexpr int defaultLevel = 2;
 
@@ -356,11 +353,11 @@ void drawSubdividedCube(const CubeWidget* cube)
     }
 
     QMatrix4x4 model;
-    model.rotate(cube->m_angleDegrees, QVector3D(0.72F, 1.0F, 0.31F));
+    model.rotate(cube->m_angleDegrees, QVector3D(cubeSpinAxis[0], cubeSpinAxis[1], cubeSpinAxis[2]));
     model.scale(cube->m_scale);
 
     QMatrix4x4 view;
-    view.translate(0.0F, 0.0F, -viewDistance);
+    view.translate(0.0F, 0.0F, -cubeViewDistance);
 
     // paintGL() has already restored GL_FILL by the time frameRendered() is
     // emitted, so the wireframe state has to be reapplied here.

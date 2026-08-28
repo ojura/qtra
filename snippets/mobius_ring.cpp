@@ -44,9 +44,6 @@ namespace {
 
 constexpr float pi = 3.14159265358979323846F;
 
-// Must match the value paintGL() uses, since the strip shares the frame.
-constexpr float viewDistance = 5.4F;
-
 constexpr int longitudeSteps = 256;
 constexpr int widthSteps = 4;
 
@@ -254,7 +251,7 @@ void drawRing(const CubeWidget* cube)
                  QVector3D(0.0F, 0.0F, 1.0F));
 
     QMatrix4x4 view;
-    view.translate(0.0F, 0.0F, -viewDistance);
+    view.translate(0.0F, 0.0F, -cubeViewDistance);
 
     ring->program.bind();
     ring->program.setUniformValue("mvp", cube->m_projection * view * model);

@@ -46,9 +46,6 @@ namespace {
 
 constexpr float pi = 3.14159265358979323846F;
 
-// Must match the values paintGL() uses, since this shares the frame.
-constexpr float viewDistance = 5.4F;
-
 constexpr float outerHalf = 1.0F;
 constexpr float innerHalf = 0.93F;
 constexpr float interiorDim = 0.42F;
@@ -376,19 +373,19 @@ void drawJackInTheBox(CubeWidget* cube)
     // The same model and view paintGL() just used, read from the widget's own
     // private state so the interior tracks the cube exactly.
     QMatrix4x4 rotation;
-    rotation.rotate(cube->m_angleDegrees, QVector3D(0.72F, 1.0F, 0.31F));
+    rotation.rotate(cube->m_angleDegrees, QVector3D(cubeSpinAxis[0], cubeSpinAxis[1], cubeSpinAxis[2]));
 
     QMatrix4x4 model = rotation;
     model.scale(cube->m_scale);
 
     QMatrix4x4 view;
-    view.translate(0.0F, 0.0F, -viewDistance);
+    view.translate(0.0F, 0.0F, -cubeViewDistance);
     const QMatrix4x4 viewProjection = cube->m_projection * view;
 
     // How squarely the open side faces the camera, which is what drives the pop.
     const QVector3D openNormal = cubeFaces[static_cast<std::size_t>(jack->openFace)].normal;
     const QVector3D faceNormal = rotation.mapVector(openNormal).normalized();
-    const QVector3D faceCenter = QVector3D(0.0F, 0.0F, -viewDistance)
+    const QVector3D faceCenter = QVector3D(0.0F, 0.0F, -cubeViewDistance)
         + rotation.mapVector(openNormal * outerHalf) * cube->m_scale;
     const float facing = QVector3D::dotProduct(faceNormal, (-faceCenter).normalized());
     const float pop = smoothstep(0.12F, 0.62F, facing);

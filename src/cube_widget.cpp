@@ -355,10 +355,10 @@ void CubeWidget::paintGL()
     glPolygonMode(GL_FRONT_AND_BACK, m_wireframe ? GL_LINE : GL_FILL);
 
     QMatrix4x4 view;
-    view.translate(0.0F, 0.0F, -5.4F);
+    view.translate(0.0F, 0.0F, -cubeViewDistance);
 
     QMatrix4x4 model;
-    model.rotate(m_angleDegrees, QVector3D(0.72F, 1.0F, 0.31F));
+    model.rotate(m_angleDegrees, QVector3D(cubeSpinAxis[0], cubeSpinAxis[1], cubeSpinAxis[2]));
     model.scale(m_scale);
 
     m_program.bind();

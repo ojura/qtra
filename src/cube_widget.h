@@ -13,6 +13,7 @@
 #include <QTimer>
 #include <QVector3D>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -31,6 +32,21 @@ inline constexpr int cubeFloatsPerVertex = 6;
 inline constexpr int cubeFloatsPerFace = cubeVerticesPerFace * cubeFloatsPerVertex;
 inline constexpr int cubeVertexCount = cubeFaceCount * cubeVerticesPerFace;
 inline constexpr int cubeVertexFloats = cubeFaceCount * cubeFloatsPerFace;
+
+// The camera distance and the axis the cube turns about, which paintGL() builds
+// its view and model matrices from. Anything drawing into the same frame has to
+// reproduce both exactly or it lands somewhere else, and the scene snippets were
+// copying them: the distance written out in six files and the axis in five,
+// none of them next to the matrices they had to match. The widget owns the
+// frame, so it states the frame.
+//
+// Plain numbers rather than a QVector3D, matching the layout constants above.
+// What is being stated is the data, and each caller builds whatever vector type
+// it wants at the point it needs one. The axis is not normalized here because
+// QMatrix4x4::rotate normalizes it; a caller building a basis of its own does
+// that where the reason for wanting a unit vector is visible.
+inline constexpr float cubeViewDistance = 5.4F;
+inline constexpr std::array<float, 3> cubeSpinAxis{0.72F, 1.0F, 0.31F};
 
 class CubeWidget final : public QOpenGLWidget, protected QOpenGLFunctions_3_3_Core {
     Q_OBJECT
