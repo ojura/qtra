@@ -356,7 +356,7 @@ alongside it saying a displacement is in effect. Installing asks whether any
 claim overlaps the region it wants and refuses if one does, naming the region
 and the snippet that holds it.
 
-Asking the claims is what lets a one-face
+Asking the claims rather than the vertex values is what lets a one-face
 displacement and a whole-mesh one see each other: overlap is arithmetic, so
 neither has to guess the other's granularity. It also means a snippet needs no
 list of its siblings, so a snippet written later is accounted for without
@@ -393,7 +393,7 @@ different granularities do not: `jack_in_the_box` deposits at
 `cube.vertexBuffer/0+36`, which is a different key, so it installs even though
 that range sits wholly inside the record above.
 
-This is the host holding its boundary. `stash_put`
+This is the host holding its boundary rather than missing a case. `stash_put`
 cannot know that `0+216` and `0+36` denote overlapping float ranges without
 parsing a key schema, and a host that parsed keys would not be the byte store
 described below, which never interprets what it stores. Exact-key ownership is
@@ -448,9 +448,10 @@ python3 tools/agentctl.py call snippet.run \
 ```
 
 Loading a *different* path gives a separate module with its own copy of that
-state, which for these means a second draw hook, leaving the first in place. `tools/jit_snippet.py` writes a fresh path every time, precisely so
-`dlopen()` cannot hand back an already loaded object, so recompiling one of
-these and running it again does stack a second copy.
+state, which for these means a second draw hook, leaving the first in place.
+`tools/jit_snippet.py` writes a fresh path every time, precisely so `dlopen()`
+cannot hand back an already loaded object, so recompiling one of these and
+running it again does stack a second copy.
 
 Loading the *same* path twice is safe. The agent records a new module id per
 load, but `dlopen()` returns the same handle, so both ids address one copy of
@@ -627,9 +628,9 @@ own record instead, so the two never have to agree.
 | `failed` | a release ran and did not complete |
 
 Only `failed` stops the new generation being run, and `--force` overrides that.
-Nothing can be unloaded, so the new module stays resident and inert instead. Without a handover the new generation would install
-alongside the old one, which for two `frameRendered` hooks means two copies
-both drawing.
+Nothing can be unloaded, so the new module stays resident and inert instead.
+Without a handover the new generation would install alongside the old one, which
+for two `frameRendered` hooks means two copies both drawing.
 
 `--handover-request` covers a module that declares no release. It sends a
 request payload and cannot report whether anything acted on it, which is the
@@ -700,10 +701,10 @@ python3 tools/agentctl.py call module.list
 
 No executor is needed. The agent records how each module was last run
 *successfully*, and runs the release there. The last success, since a snippet
-needing a GL context fails under `gui` with "use
-executor=render" and is retried. `module.list` reports that record alongside
-`declaresRelease`. Passing `executor` or `target` overrides it; a recorded
-target that no longer exists is reported as `recorded_target_gone`.
+needing a GL context fails under `gui` with "use executor=render" and is
+retried. `module.list` reports that record alongside `declaresRelease`. Passing
+`executor` or `target` overrides it; a recorded target that no longer exists is
+reported as `recorded_target_gone`.
 
 Release must not report completion before its effects are applied, because a
 handover is sequenced on that completion. The scene snippets refuse for this
