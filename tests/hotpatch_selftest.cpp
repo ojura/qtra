@@ -3,10 +3,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
+#include <cstddef>
 #include <dlfcn.h>
 #include <iostream>
 #include <string>
+
+#if defined(__linux__)
+#  include <sys/mman.h>
+#endif
 
 namespace {
 
@@ -16,6 +22,20 @@ bool approximatelyEqual(float a, float b)
 {
     return std::abs(a - b) < 0.0001F;
 }
+
+#if defined(__linux__) && defined(__x86_64__)
+// Allows the mapping to be made writable and refuses to put it back, which is
+// the order that leaves the bytes changed after the caller has been told the
+// write failed.
+int failRestoreProtect(void* address, std::size_t length, int protection)
+{
+    if ((protection & PROT_WRITE) != 0) {
+        return ::mprotect(address, length, protection);
+    }
+    errno = EACCES;
+    return -1;
+}
+#endif
 
 } // namespace
 
@@ -130,8 +150,53 @@ int main(int argc, char** argv)
         return 13;
     }
 
+    // A permission restore that fails after the copy is the one path that
+    // leaves the process changed while the caller is told the install failed.
+    // A real mprotect will not fail on demand, so the call is substituted.
+    {
+        runtime_agent::EntryHotpatch faulted;
+        faulted.setProtectFunction(&failRestoreProtect);
+        std::string faultError;
+        if (faulted.apply(reinterpret_cast<void*>(&cube_step_builtin),
+                          reinterpret_cast<void*>(patch->step),
+                          16,
+                          faultError)) {
+            std::cerr << "apply reported success although the mapping was never restored\n";
+            return 14;
+        }
+        if (faulted.state() != runtime_agent::PatchState::RecoveryRequired) {
+            std::cerr << "a write that changed bytes did not leave recovery required\n";
+            return 15;
+        }
+        if (!faulted.active() || faulted.reservedBytes() == 0) {
+            std::cerr << "the saved original bytes were discarded after a partial install\n";
+            return 16;
+        }
+
+        const CubeStepOutput faultedOutput = cube_step_builtin(&input);
+        if (approximatelyEqual(faultedOutput.angle_degrees, before.angle_degrees)
+            && approximatelyEqual(faultedOutput.scale, before.scale)) {
+            std::cerr << "the entry was reported rewritten but still ran the builtin\n";
+            return 17;
+        }
+
+        // Recovery has to be possible from the state the failure left behind.
+        faulted.setProtectFunction(nullptr);
+        if (!faulted.rollback(faultError)) {
+            std::cerr << "rollback after a partial install failed: " << faultError << '\n';
+            return 18;
+        }
+        const CubeStepOutput recovered = cube_step_builtin(&input);
+        if (!approximatelyEqual(recovered.angle_degrees, before.angle_degrees)
+            || !approximatelyEqual(recovered.scale, before.scale)) {
+            std::cerr << "recovery did not restore the builtin function\n";
+            return 19;
+        }
+    }
+
     std::cout << "PASS: " << patch->name_utf8
-              << " redirected and restored cube_step_builtin\n";
+              << " redirected and restored cube_step_builtin, and a failed"
+                 " permission restore left recoverable state\n";
     // Intentionally do not dlclose: the running app follows the same policy.
     return 0;
 #endif

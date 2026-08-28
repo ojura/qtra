@@ -24,6 +24,69 @@ std::string errnoMessage(const char* operation)
 
 } // namespace
 
+TextWriteResult writeText(void* address,
+                          const std::uint8_t* bytes,
+                          const std::size_t size,
+                          const ProtectFunction protect)
+{
+    TextWriteResult result;
+#if !defined(__linux__) || !defined(__x86_64__)
+    (void)address;
+    (void)bytes;
+    (void)size;
+    (void)protect;
+    result.error = "writing mapped text is implemented only for Linux/x86-64";
+    return result;
+#else
+    if (address == nullptr || bytes == nullptr || size == 0) {
+        result.error = "invalid write request";
+        return result;
+    }
+
+    const long page_size_long = ::sysconf(_SC_PAGESIZE);
+    if (page_size_long <= 0) {
+        result.error = errnoMessage("sysconf(_SC_PAGESIZE)");
+        return result;
+    }
+    const auto page_size = static_cast<std::uintptr_t>(page_size_long);
+    const auto target_address = reinterpret_cast<std::uintptr_t>(address);
+    const auto page_begin = target_address & ~(page_size - 1U);
+
+    if (size > std::numeric_limits<std::uintptr_t>::max() - target_address) {
+        result.error = "address range overflow";
+        return result;
+    }
+    const auto end_address = target_address + size;
+    const auto page_end = (end_address + page_size - 1U) & ~(page_size - 1U);
+    const auto mapping_size = static_cast<std::size_t>(page_end - page_begin);
+
+    auto* mapping = reinterpret_cast<void*>(page_begin);
+    const ProtectFunction change = protect != nullptr ? protect : &::mprotect;
+
+    if (change(mapping, mapping_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        result.error = errnoMessage("mprotect(RWX)");
+        return result;
+    }
+
+    std::memcpy(address, bytes, size);
+    __builtin___clear_cache(static_cast<char*>(address),
+                            static_cast<char*>(address) + size);
+
+    // Past this point the bytes have changed, so every exit reports that. The
+    // demo target lives in the executable's text segment; a patcher for
+    // arbitrary mappings should record and restore each one's prior
+    // permissions instead of assuming these.
+    if (change(mapping, mapping_size, PROT_READ | PROT_EXEC) != 0) {
+        result.outcome = TextWriteOutcome::WrittenProtectionNotRestored;
+        result.error = errnoMessage("mprotect(RX)");
+        return result;
+    }
+
+    result.outcome = TextWriteOutcome::Written;
+    return result;
+#endif
+}
+
 EntryHotpatch::~EntryHotpatch()
 {
     if (active()) {
@@ -104,14 +167,30 @@ bool EntryHotpatch::apply(void* target,
     patch[11] = 0xFFU;
     patch[12] = 0xE3U;
 
-    if (!writeBytes(patch.data(), patch.size(), error)) {
+    const TextWriteResult write = writeText(m_patchAddress, patch.data(), patch.size(), m_protect);
+    if (write.complete()) {
+        m_state = PatchState::Active;
+        return true;
+    }
+
+    error = write.error;
+    if (!write.changedBytes()) {
+        m_state = PatchState::Inactive;
         m_target = nullptr;
         m_patchAddress = nullptr;
         m_replacement = nullptr;
         m_original.clear();
         return false;
     }
-    return true;
+
+    // The entry now holds the jump and the mapping could not be put back. The
+    // replacement is reachable, so the saved bytes are the only route to the
+    // original and are kept. A caller that treats this as "nothing happened"
+    // resumes a target that is already redirected.
+    m_state = PatchState::RecoveryRequired;
+    error += "; the entry was already rewritten, so the replacement is live and "
+             "rollback is still required";
+    return false;
 #endif
 }
 
@@ -123,67 +202,29 @@ bool EntryHotpatch::rollback(std::string& error)
         return false;
     }
 
-    if (!writeBytes(m_original.data(), m_original.size(), error)) {
+    const TextWriteResult write =
+        writeText(m_patchAddress, m_original.data(), m_original.size(), m_protect);
+    if (!write.changedBytes()) {
+        // The entry still holds the jump, so the patch is still in force.
+        error = write.error;
         return false;
     }
 
+    // The saved bytes are back, so the target runs its own instructions again
+    // whatever else went wrong.
+    m_state = PatchState::Inactive;
     m_target = nullptr;
     m_patchAddress = nullptr;
     m_replacement = nullptr;
     m_original.clear();
-    return true;
-}
 
-bool EntryHotpatch::writeBytes(const std::uint8_t* bytes,
-                               const std::size_t size,
-                               std::string& error)
-{
-#if !defined(__linux__) || !defined(__x86_64__)
-    (void)bytes;
-    (void)size;
-    error = "unsupported platform";
-    return false;
-#else
-    if (m_target == nullptr || m_patchAddress == nullptr || bytes == nullptr || size == 0) {
-        error = "invalid write request";
-        return false;
-    }
-
-    const long page_size_long = ::sysconf(_SC_PAGESIZE);
-    if (page_size_long <= 0) {
-        error = errnoMessage("sysconf(_SC_PAGESIZE)");
-        return false;
-    }
-    const auto page_size = static_cast<std::uintptr_t>(page_size_long);
-    const auto target_address = reinterpret_cast<std::uintptr_t>(m_patchAddress);
-    const auto page_begin = target_address & ~(page_size - 1U);
-
-    if (size > std::numeric_limits<std::uintptr_t>::max() - target_address) {
-        error = "address range overflow";
-        return false;
-    }
-    const auto end_address = target_address + size;
-    const auto page_end = (end_address + page_size - 1U) & ~(page_size - 1U);
-    const auto mapping_size = static_cast<std::size_t>(page_end - page_begin);
-
-    auto* mapping = reinterpret_cast<void*>(page_begin);
-    if (::mprotect(mapping, mapping_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        error = errnoMessage("mprotect(RWX)");
-        return false;
-    }
-
-    std::memcpy(m_patchAddress, bytes, size);
-    __builtin___clear_cache(static_cast<char*>(m_patchAddress),
-                            static_cast<char*>(m_patchAddress) + size);
-
-    // The demo target lives in the executable's text segment. A production
-    // patcher should query and restore the exact prior permissions per mapping.
-    if (::mprotect(mapping, mapping_size, PROT_READ | PROT_EXEC) != 0) {
-        error = errnoMessage("mprotect(RX)");
+    if (!write.complete()) {
+        error = write.error;
+        error += "; the entry was restored, so the target is no longer "
+                 "redirected, and the mapping is left writable";
         return false;
     }
     return true;
-#endif
 }
 
 } // namespace runtime_agent

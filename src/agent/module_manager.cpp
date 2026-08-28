@@ -264,6 +264,18 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
         reinterpret_cast<void*>(loaded->cubePatch->step),
         16,
         nativeError);
+    if (!applied && m_entryHotpatch.state() == runtime_agent::PatchState::RecoveryRequired) {
+        // The entry was rewritten and the mapping could not be restored, so the
+        // replacement is reachable. Resuming the animation here would drive the
+        // cube through code the caller has just been told is not installed, so
+        // the timer stays stopped and the module is recorded as the one whose
+        // patch is live. Rollback still has the saved bytes.
+        m_activeEntryModule = id;
+        m_cube->setActivePatchLabel(QStringLiteral("entry (recovery required): %1").arg(loaded->name));
+        error = QString::fromStdString(nativeError);
+        return false;
+    }
+
     if (wasRunning) {
         m_cube->setRunning(true);
     }
@@ -304,6 +316,11 @@ QJsonObject ModuleManager::patchStatus() const
             : QJsonValue()},
         {QStringLiteral("reservedEntryBytes"), 16},
         {QStringLiteral("entryPatchActive"), m_entryHotpatch.active()},
+        // Reported separately from entryPatchActive, because a caller that sees
+        // only "active" cannot tell an installed patch from one whose install
+        // failed partway and left the entry rewritten.
+        {QStringLiteral("recoveryRequired"),
+         m_entryHotpatch.state() == runtime_agent::PatchState::RecoveryRequired},
     };
     if (LoadedModule* loaded = module(moduleId); loaded != nullptr) {
         result.insert(QStringLiteral("module"), moduleJson(*loaded));
