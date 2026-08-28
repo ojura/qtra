@@ -904,9 +904,6 @@ when a failure occurs.
 - An optimized-away source variable may have no recoverable runtime value. The
   agent can use DWARF and assembly where possible, or hot-install a rebuilt probe
   that explicitly materializes the value on the next execution.
-- A kernel module is unnecessary for this prototype. It would not solve C++ ABI,
-  Qt affinity, or application invariants, and a bug in one takes down the whole
-  machine instead of a single process.
 
 ## Repository map
 
