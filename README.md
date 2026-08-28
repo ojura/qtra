@@ -50,8 +50,6 @@ behavior.
 `./scripts/validate.sh --with-gui` adds the Qt application and the
 Xvfb/current-display smoke session, which needs the Qt 6 packages below.
 
-A recorded run is in [`docs/validation-result.md`](docs/validation-result.md).
-
 ## Architecture
 
 ```text
