@@ -5,9 +5,9 @@
 
 extern "C" {
 
-inline constexpr std::uint32_t CUBE_STEP_ABI_V1 = 0x0001'0000u;
+inline constexpr std::uint32_t CUBE_STEP_ABI = 0x0001'0000u;
 
-struct CubeStepInputV1 {
+struct CubeStepInput {
     float angle_degrees;
     float angular_velocity_degrees_per_second;
     float delta_seconds;
@@ -15,7 +15,7 @@ struct CubeStepInputV1 {
     std::uint64_t frame_index;
 };
 
-struct CubeStepOutputV1 {
+struct CubeStepOutput {
     float angle_degrees;
     float tint_r;
     float tint_g;
@@ -23,24 +23,24 @@ struct CubeStepOutputV1 {
     float scale;
 };
 
-using CubeStepFunctionV1 = CubeStepOutputV1 (*)(const CubeStepInputV1* input) noexcept;
+using CubeStepFunction = CubeStepOutput (*)(const CubeStepInput* input) noexcept;
 
-struct CubeStepPatchV1 {
+struct CubeStepPatch {
     std::uint32_t abi_version;
     std::uint32_t struct_size;
     const char* name_utf8;
-    CubeStepFunctionV1 step;
+    CubeStepFunction step;
 };
 
-using CubeStepPatchInitV1 = const CubeStepPatchV1* (*)();
+using CubeStepPatchInit = const CubeStepPatch* (*)();
 
 // The optimized host calls this through a function pointer. On GCC/x86-64 its
 // entry contains a reserved NOP area, allowing the raw hotpatch demo to redirect
 // it without relocating a real prologue.
-RUNTIME_AGENT_EXPORT CubeStepOutputV1
-cube_step_builtin_v1(const CubeStepInputV1* input) noexcept;
+RUNTIME_AGENT_EXPORT CubeStepOutput
+cube_step_builtin(const CubeStepInput* input) noexcept;
 
 // Every cube patch module exports this exact symbol.
-RUNTIME_AGENT_EXPORT const CubeStepPatchV1* cube_step_patch_init_v1();
+RUNTIME_AGENT_EXPORT const CubeStepPatch* cube_step_patch_init();
 
 } // extern "C"

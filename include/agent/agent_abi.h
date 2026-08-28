@@ -27,15 +27,15 @@ extern "C" {
 // This is a prototype under active development: there is no compatibility path
 // and none is wanted. A refused load fails where the caller can see it, and a
 // mismatched one fails somewhere inside the process.
-inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0003'0000u;
+inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0003'0000u;
 
-// The version above covers this interface. It says nothing about the
+// RUNTIME_AGENT_ABI covers this interface. It says nothing about the
 // application's own types, which a module compiled with -fno-access-control
 // reads directly: cube->m_angleDegrees and its neighbours resolve to byte
-// offsets when the module is compiled, and nothing versions the class they
-// address. A module built from source that moved those members loads into an
-// older process, passes every check above, and writes to whatever now lives at
-// the offsets it remembers.
+// offsets when the module is compiled, and no constant here describes the class
+// they address. A module built from source that moved those members loads into
+// a process built before the move, passes every check above, and writes to
+// whatever now lives at the offsets it remembers.
 //
 // So a module also carries the build id of the host it was compiled against.
 // The agent compares it with the running executable's own and refuses a module
@@ -58,7 +58,7 @@ runtime_agent_target_build_id()
 }
 #endif
 
-enum RuntimeAgentLogLevelV1 : std::int32_t {
+enum RuntimeAgentLogLevel : std::int32_t {
     RUNTIME_AGENT_LOG_DEBUG = 0,
     RUNTIME_AGENT_LOG_INFO = 1,
     RUNTIME_AGENT_LOG_WARNING = 2,
@@ -68,7 +68,7 @@ enum RuntimeAgentLogLevelV1 : std::int32_t {
 // This is intentionally a small, stable C ABI. A snippet may include all of the
 // application's C++ headers, but its entry point and host callbacks remain easy
 // to validate and version.
-struct RuntimeAgentHostV1 {
+struct RuntimeAgentHost {
     std::uint32_t abi_version;
     std::uint32_t struct_size;
 
@@ -180,13 +180,13 @@ struct RuntimeAgentHostV1 {
     std::int64_t (*stash_list)(void* agent_context, char* buffer, std::int64_t capacity);
 };
 
-using RuntimeAgentSnippetRunV1 = void (*)(const RuntimeAgentHostV1* host);
+using RuntimeAgentSnippetRun = void (*)(const RuntimeAgentHost* host);
 
-struct RuntimeAgentSnippetV1 {
+struct RuntimeAgentSnippet {
     std::uint32_t abi_version;
     std::uint32_t struct_size;
     const char* name_utf8;
-    RuntimeAgentSnippetRunV1 run;
+    RuntimeAgentSnippetRun run;
 
     // Optional: undo whatever run() installed. It receives a host the same way
     // run() does and reports through complete_json/fail, so a failed release is
@@ -209,12 +209,12 @@ struct RuntimeAgentSnippetV1 {
     //
     // Release should be safe to call when nothing is installed, and leaves the
     // module resident and runnable again afterwards.
-    RuntimeAgentSnippetRunV1 release;
+    RuntimeAgentSnippetRun release;
 };
 
-using RuntimeAgentSnippetInitV1 = const RuntimeAgentSnippetV1* (*)();
+using RuntimeAgentSnippetInit = const RuntimeAgentSnippet* (*)();
 
 // Every runtime-compiled snippet exports this exact symbol.
-RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1* runtime_agent_snippet_init_v1();
+RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet_init();
 
 } // extern "C"

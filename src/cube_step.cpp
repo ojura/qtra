@@ -13,11 +13,11 @@
 #  define DEMO_PATCHABLE_ENTRY
 #endif
 
-extern "C" DEMO_PATCHABLE_ENTRY CubeStepOutputV1
-cube_step_builtin_v1(const CubeStepInputV1* input) noexcept
+extern "C" DEMO_PATCHABLE_ENTRY CubeStepOutput
+cube_step_builtin(const CubeStepInput* input) noexcept
 {
     if (input == nullptr) {
-        return CubeStepOutputV1{0.0F, 1.0F, 1.0F, 1.0F, 1.0F};
+        return CubeStepOutput{0.0F, 1.0F, 1.0F, 1.0F, 1.0F};
     }
 
     float angle = input->angle_degrees
@@ -27,5 +27,5 @@ cube_step_builtin_v1(const CubeStepInputV1* input) noexcept
         angle += 360.0F;
     }
 
-    return CubeStepOutputV1{angle, 1.0F, 1.0F, 1.0F, 1.0F};
+    return CubeStepOutput{angle, 1.0F, 1.0F, 1.0F, 1.0F};
 }

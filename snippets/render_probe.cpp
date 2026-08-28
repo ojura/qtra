@@ -22,9 +22,9 @@ QString glString(GLFunctions* functions, const GLenum name)
         : QString();
 }
 
-void run(const RuntimeAgentHostV1* host)
+void run(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
 
@@ -90,17 +90,17 @@ void run(const RuntimeAgentHostV1* host)
     host->complete_json(host->invocation_context, json.constData());
 }
 
-const RuntimeAgentSnippetV1 descriptor{
-    RUNTIME_AGENT_ABI_V1,
-    sizeof(RuntimeAgentSnippetV1),
+const RuntimeAgentSnippet descriptor{
+    RUNTIME_AGENT_ABI,
+    sizeof(RuntimeAgentSnippet),
     "inspect the current OpenGL render callback",
     &run,
 };
 
 } // namespace
 
-extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1*
-runtime_agent_snippet_init_v1()
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet*
+runtime_agent_snippet_init()
 {
     return &descriptor;
 }

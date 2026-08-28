@@ -222,11 +222,11 @@ See [`docs/protocol.md`](docs/protocol.md) for the command inventory.
 A snippet is an ordinary ELF shared object with one stable exported initializer:
 
 ```cpp
-extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1*
-runtime_agent_snippet_init_v1();
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet*
+runtime_agent_snippet_init();
 ```
 
-Its descriptor points to a function receiving `RuntimeAgentHostV1`. The host ABI
+Its descriptor points to a function receiving `RuntimeAgentHost`. The host ABI
 provides logging, structured events, QObject lookup, dynamic-symbol lookup,
 request JSON, completion/failure, and monotonic time.
 
@@ -672,7 +672,7 @@ A module compiled with `-fno-access-control` reads application members
 directly, and `cube->m_angleDegrees` becomes a byte offset when that module is
 compiled. The offset describes the source the module saw. Load it into a process
 built from source where that member moved, and it reads and writes whatever now
-lives at that offset. `RUNTIME_AGENT_ABI_V1` says nothing about this, because
+lives at that offset. `RUNTIME_AGENT_ABI` says nothing about this, because
 the agent's own interface is what it covers and the application's types are what
 moved.
 
@@ -717,15 +717,15 @@ A snippet that installs something lasting can declare how to undo it, as a
 fifth field in its descriptor:
 
 ```cpp
-const RuntimeAgentSnippetV1 descriptor{
-    RUNTIME_AGENT_ABI_V1, sizeof(RuntimeAgentSnippetV1), "...", &run, &release,
+const RuntimeAgentSnippet descriptor{
+    RUNTIME_AGENT_ABI, sizeof(RuntimeAgentSnippet), "...", &run, &release,
 };
 ```
 
 `release` receives a host and reports through `complete_json`/`fail` exactly as
 `run` does, so a release that fails is an error a program can act on.
 
-`RUNTIME_AGENT_ABI_V1` is bumped whenever either ABI struct changes shape, and
+`RUNTIME_AGENT_ABI` is bumped whenever either ABI struct changes shape, and
 the loader accepts only an exact match: a module that disagrees with the host
 about either struct fails to load, so it cannot run against fields the host
 never wrote. There is no adaptation path and none is intended. Rebuild the
@@ -848,7 +848,7 @@ Unpatched overhead is one atomic load plus an indirect call per tick.
 
 ### Raw entry mode
 
-`cube_step_builtin_v1` is built as:
+`cube_step_builtin` is built as:
 
 ```cpp
 __attribute__((noinline, noclone, patchable_function_entry(16, 0)))
@@ -894,7 +894,7 @@ symbols can be resolved by name:
 
 ```bash
 python3 tools/agentctl.py call symbol.resolve \
-  --params '{"name":"cube_step_builtin_v1"}'
+  --params '{"name":"cube_step_builtin"}'
 ```
 
 With `--unsafe-agent`:

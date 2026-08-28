@@ -36,20 +36,20 @@ int main(int argc, char** argv)
         return 3;
     }
 
-    auto init = reinterpret_cast<CubeStepPatchInitV1>(
-        ::dlsym(module, "cube_step_patch_init_v1"));
+    auto init = reinterpret_cast<CubeStepPatchInit>(
+        ::dlsym(module, "cube_step_patch_init"));
     if (init == nullptr) {
         std::cerr << "dlsym failed: " << ::dlerror() << '\n';
         return 4;
     }
-    const CubeStepPatchV1* patch = init();
-    if (patch == nullptr || patch->abi_version != CUBE_STEP_ABI_V1 || patch->step == nullptr) {
+    const CubeStepPatch* patch = init();
+    if (patch == nullptr || patch->abi_version != CUBE_STEP_ABI || patch->step == nullptr) {
         std::cerr << "invalid patch descriptor\n";
         return 5;
     }
 
-    const CubeStepInputV1 input{10.0F, 90.0F, 0.5F, 1.25F, 77};
-    const CubeStepOutputV1 before = cube_step_builtin_v1(&input);
+    const CubeStepInput input{10.0F, 90.0F, 0.5F, 1.25F, 77};
+    const CubeStepOutput before = cube_step_builtin(&input);
     if (!approximatelyEqual(before.angle_degrees, 55.0F)
         || !approximatelyEqual(before.scale, 1.0F)) {
         std::cerr << "unexpected builtin result before patch\n";
@@ -92,7 +92,7 @@ int main(int argc, char** argv)
 
     runtime_agent::EntryHotpatch hotpatch;
     std::string error;
-    if (!hotpatch.apply(reinterpret_cast<void*>(&cube_step_builtin_v1),
+    if (!hotpatch.apply(reinterpret_cast<void*>(&cube_step_builtin),
                         reinterpret_cast<void*>(patch->step),
                         16,
                         error)) {
@@ -101,7 +101,7 @@ int main(int argc, char** argv)
     }
 
     const auto* targetBytes = reinterpret_cast<const std::uint8_t*>(
-        reinterpret_cast<void*>(&cube_step_builtin_v1));
+        reinterpret_cast<void*>(&cube_step_builtin));
     const bool cetTarget = std::equal(endbr64.begin(), endbr64.end(), targetBytes);
     const auto expectedPatchAddress = reinterpret_cast<std::uintptr_t>(targetBytes)
         + (cetTarget ? endbr64.size() : 0U);
@@ -111,7 +111,7 @@ int main(int argc, char** argv)
         return 10;
     }
 
-    const CubeStepOutputV1 during = cube_step_builtin_v1(&input);
+    const CubeStepOutput during = cube_step_builtin(&input);
     if (approximatelyEqual(during.angle_degrees, before.angle_degrees)
         && approximatelyEqual(during.scale, before.scale)) {
         std::cerr << "patched function still produced the builtin result\n";
@@ -123,7 +123,7 @@ int main(int argc, char** argv)
         return 12;
     }
 
-    const CubeStepOutputV1 after = cube_step_builtin_v1(&input);
+    const CubeStepOutput after = cube_step_builtin(&input);
     if (!approximatelyEqual(after.angle_degrees, before.angle_degrees)
         || !approximatelyEqual(after.scale, before.scale)) {
         std::cerr << "rollback did not restore the builtin function\n";
@@ -131,7 +131,7 @@ int main(int argc, char** argv)
     }
 
     std::cout << "PASS: " << patch->name_utf8
-              << " redirected and restored cube_step_builtin_v1\n";
+              << " redirected and restored cube_step_builtin\n";
     // Intentionally do not dlclose: the running app follows the same policy.
     return 0;
 #endif

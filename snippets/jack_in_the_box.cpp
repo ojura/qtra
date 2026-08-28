@@ -499,7 +499,7 @@ void drawJackInTheBox(CubeWidget* cube)
 }
 
 // Needs the widget's OpenGL context to be current.
-bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1* host, QString& error)
+bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHost* host, QString& error)
 {
     // No list of sibling snippets to switch off first. Whether this region is
     // already taken is a question about records, asked below, and it is
@@ -662,11 +662,11 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
     // silently. The host refuses the overwrite if the entry belongs to another
     // snippet, so this cannot take one that is not its to take.
     //
-    // No null check on the stash callbacks. A host too old to have them
-    // presents a shorter struct, so those fields would be whatever sits after
-    // it in memory, making the test one that reads past the end of the struct
-    // and passes on garbage. The version check at the top of run() rules that
-    // host out, and the loader refuses the module before it ever gets here.
+    // No null check on the stash callbacks. A host without them presents a
+    // shorter struct, so those fields would be whatever sits after it in
+    // memory, making the test one that reads past the end of the struct and
+    // passes on garbage. The RUNTIME_AGENT_ABI check at the top of run() rules
+    // that host out, and the loader refuses the module before it gets here.
     state->stashKey = cube_mesh::regionKey(offsetFloats, cubeFloatsPerFace);
     state->claimKey = cube_mesh::claimKey(offsetFloats, cubeFloatsPerFace);
     // A refused deposit is a refused install. The host rejects an overwrite of
@@ -711,7 +711,7 @@ bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1*
 
 // Needs the widget's OpenGL context to be current. The note says what happened
 // to the face, which is not always "put back".
-void removeJack(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& note)
+void removeJack(CubeWidget* cube, const RuntimeAgentHost* host, QString& note)
 {
     QObject::disconnect(drawConnection);
 
@@ -792,7 +792,7 @@ void syncToggleAction()
 // message carries what became of the face rather than an error.
 bool setJackEnabled(CubeWidget* cube,
                     const bool enabled,
-                    const RuntimeAgentHostV1* host,
+                    const RuntimeAgentHost* host,
                     QString& message)
 {
     if (enabled == (jack != nullptr)) {
@@ -808,7 +808,7 @@ bool setJackEnabled(CubeWidget* cube,
     return installed;
 }
 
-void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
+void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHost* host)
 {
     if (toggleAction != nullptr) {
         return;
@@ -819,7 +819,7 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
     // call that is ending, so that is the one field cleared. Rebuilding a
     // partial struct here instead would leave the newer callbacks null while
     // struct_size claimed they were there.
-    RuntimeAgentHostV1 menuHost = *host;
+    RuntimeAgentHost menuHost = *host;
     menuHost.invocation_context = nullptr;
 
     toggleAction = scene_toggle::install(
@@ -874,9 +874,9 @@ int faceIndexFromName(const QString& name, bool& recognized)
 // let this report completion before the face is back, and a handover sequenced
 // on that completion would hand the next generation the zeroed vertices. So
 // this refuses instead of deferring.
-void release(const RuntimeAgentHostV1* host)
+void release(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
     auto* cube = static_cast<CubeWidget*>(
@@ -907,9 +907,9 @@ void release(const RuntimeAgentHostV1* host)
                         QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
 }
 
-void run(const RuntimeAgentHostV1* host)
+void run(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
 
@@ -1005,9 +1005,9 @@ void run(const RuntimeAgentHostV1* host)
     });
 }
 
-const RuntimeAgentSnippetV1 descriptor{
-    RUNTIME_AGENT_ABI_V1,
-    sizeof(RuntimeAgentSnippetV1),
+const RuntimeAgentSnippet descriptor{
+    RUNTIME_AGENT_ABI,
+    sizeof(RuntimeAgentSnippet),
     "hollow one side of the cube and hide a jack in the box in it",
     &run,
     &release,
@@ -1015,8 +1015,8 @@ const RuntimeAgentSnippetV1 descriptor{
 
 } // namespace
 
-extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1*
-runtime_agent_snippet_init_v1()
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet*
+runtime_agent_snippet_init()
 {
     return &descriptor;
 }

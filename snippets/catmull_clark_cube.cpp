@@ -381,7 +381,7 @@ void drawSubdividedCube(const CubeWidget* cube)
 }
 
 // Needs the widget's OpenGL context to be current.
-bool installSubdivision(CubeWidget* cube, const RuntimeAgentHostV1* host, QString& error)
+bool installSubdivision(CubeWidget* cube, const RuntimeAgentHost* host, QString& error)
 {
     // No list of sibling snippets to switch off first. Whether this region is
     // already taken is a question about records, asked below, and it is
@@ -508,7 +508,7 @@ bool installSubdivision(CubeWidget* cube, const RuntimeAgentHostV1* host, QStrin
 }
 
 // Needs the widget's OpenGL context to be current.
-void removeSubdivision(CubeWidget* cube, const RuntimeAgentHostV1* host)
+void removeSubdivision(CubeWidget* cube, const RuntimeAgentHost* host)
 {
     QObject::disconnect(drawConnection);
 
@@ -554,7 +554,7 @@ void syncToggleAction()
 
 // Returns false only when an install was asked for and failed.
 bool setSubdivisionEnabled(CubeWidget* cube, const bool enabled,
-                           const RuntimeAgentHostV1* host, QString& error)
+                           const RuntimeAgentHost* host, QString& error)
 {
     if (enabled == (subdivision != nullptr)) {
         return true;
@@ -569,12 +569,12 @@ bool setSubdivisionEnabled(CubeWidget* cube, const bool enabled,
     return installed;
 }
 
-void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
+void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHost* host)
 {
     if (toggleAction != nullptr) {
         return;
     }
-    RuntimeAgentHostV1 menuHost = *host;
+    RuntimeAgentHost menuHost = *host;
     menuHost.invocation_context = nullptr;
 
     toggleAction = scene_toggle::install(
@@ -617,9 +617,9 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHostV1* host)
 // completion before the scene is actually back, and a handover sequenced on
 // that completion would hand the next generation state this one still owns. So
 // this refuses rather than defers.
-void release(const RuntimeAgentHostV1* host)
+void release(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
     auto* cube = static_cast<CubeWidget*>(
@@ -645,9 +645,9 @@ void release(const RuntimeAgentHostV1* host)
     host->complete_json(host->invocation_context, "{\"removed\":true}");
 }
 
-void run(const RuntimeAgentHostV1* host)
+void run(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
 
@@ -730,9 +730,9 @@ void run(const RuntimeAgentHostV1* host)
     });
 }
 
-const RuntimeAgentSnippetV1 descriptor{
-    RUNTIME_AGENT_ABI_V1,
-    sizeof(RuntimeAgentSnippetV1),
+const RuntimeAgentSnippet descriptor{
+    RUNTIME_AGENT_ABI,
+    sizeof(RuntimeAgentSnippet),
     "replace the cube with its Catmull-Clark subdivision surface",
     &run,
     &release,
@@ -740,8 +740,8 @@ const RuntimeAgentSnippetV1 descriptor{
 
 } // namespace
 
-extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1*
-runtime_agent_snippet_init_v1()
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet*
+runtime_agent_snippet_init()
 {
     return &descriptor;
 }

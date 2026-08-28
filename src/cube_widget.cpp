@@ -176,10 +176,10 @@ void CubeWidget::setWireframe(const bool wireframe)
     update();
 }
 
-void CubeWidget::installDispatchStep(CubeStepFunctionV1 function, const QString& patchName)
+void CubeWidget::installDispatchStep(CubeStepFunction function, const QString& patchName)
 {
     if (function == nullptr) {
-        function = &cube_step_builtin_v1;
+        function = &cube_step_builtin;
     }
     m_stepFunction.store(function, std::memory_order_release);
     setActivePatchLabel(patchName.isEmpty() ? QStringLiteral("dispatch patch") : patchName);
@@ -187,7 +187,7 @@ void CubeWidget::installDispatchStep(CubeStepFunctionV1 function, const QString&
 
 void CubeWidget::resetDispatchStep()
 {
-    m_stepFunction.store(&cube_step_builtin_v1, std::memory_order_release);
+    m_stepFunction.store(&cube_step_builtin, std::memory_order_release);
     setActivePatchLabel(QStringLiteral("builtin"));
 }
 
@@ -387,17 +387,17 @@ void CubeWidget::advanceAnimation()
     m_elapsedSeconds += delta;
     ++m_frameIndex;
 
-    const CubeStepInputV1 input{
+    const CubeStepInput input{
         m_angleDegrees,
         m_angularVelocity,
         delta,
         m_elapsedSeconds,
         m_frameIndex,
     };
-    const CubeStepFunctionV1 step = m_stepFunction.load(std::memory_order_acquire);
-    const CubeStepOutputV1 output = step != nullptr
+    const CubeStepFunction step = m_stepFunction.load(std::memory_order_acquire);
+    const CubeStepOutput output = step != nullptr
         ? step(&input)
-        : cube_step_builtin_v1(&input);
+        : cube_step_builtin(&input);
 
     m_angleDegrees = normalizeAngle(output.angle_degrees);
     m_tint = QVector3D(output.tint_r, output.tint_g, output.tint_b);

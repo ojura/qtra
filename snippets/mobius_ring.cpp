@@ -444,9 +444,9 @@ QJsonObject describe(const RingState* state)
 // completion before the scene is actually back, and a handover sequenced on
 // that completion would hand the next generation state this one still owns. So
 // this refuses rather than defers.
-void release(const RuntimeAgentHostV1* host)
+void release(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
     auto* cube = static_cast<CubeWidget*>(
@@ -472,9 +472,9 @@ void release(const RuntimeAgentHostV1* host)
     host->complete_json(host->invocation_context, "{\"removed\":true}");
 }
 
-void run(const RuntimeAgentHostV1* host)
+void run(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
 
@@ -546,9 +546,9 @@ void run(const RuntimeAgentHostV1* host)
     complete(result);
 }
 
-const RuntimeAgentSnippetV1 descriptor{
-    RUNTIME_AGENT_ABI_V1,
-    sizeof(RuntimeAgentSnippetV1),
+const RuntimeAgentSnippet descriptor{
+    RUNTIME_AGENT_ABI,
+    sizeof(RuntimeAgentSnippet),
     "rotating translucent Mobius strip around the scene",
     &run,
     &release,
@@ -556,8 +556,8 @@ const RuntimeAgentSnippetV1 descriptor{
 
 } // namespace
 
-extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1*
-runtime_agent_snippet_init_v1()
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet*
+runtime_agent_snippet_init()
 {
     return &descriptor;
 }

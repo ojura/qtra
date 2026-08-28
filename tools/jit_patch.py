@@ -24,7 +24,7 @@ from compile_snippet import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path, help="C++ source exporting cube_step_patch_init_v1")
+    parser.add_argument("source", type=Path, help="C++ source exporting cube_step_patch_init")
     parser.add_argument("--compile-db", required=True, type=Path)
     parser.add_argument("--context", required=True, help="translation-unit path/output match")
     parser.add_argument("--output", type=Path)

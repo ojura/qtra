@@ -65,9 +65,9 @@ AboutFilter* filter = nullptr;
 // executor: installing and removing an application-wide event filter both
 // happen on the thread that owns the application object, which is where any of
 // the three executors ends up for this module.
-void release(const RuntimeAgentHostV1* host)
+void release(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
     auto* application = qobject_cast<QApplication*>(QCoreApplication::instance());
@@ -95,9 +95,9 @@ void release(const RuntimeAgentHostV1* host)
                         QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
 }
 
-void run(const RuntimeAgentHostV1* host)
+void run(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
     auto* application = qobject_cast<QApplication*>(QCoreApplication::instance());
@@ -159,9 +159,9 @@ void run(const RuntimeAgentHostV1* host)
     });
 }
 
-const RuntimeAgentSnippetV1 descriptor{
-    RUNTIME_AGENT_ABI_V1,
-    sizeof(RuntimeAgentSnippetV1),
+const RuntimeAgentSnippet descriptor{
+    RUNTIME_AGENT_ABI,
+    sizeof(RuntimeAgentSnippet),
     "sign the About box without rebuilding the application",
     &run,
     &release,
@@ -169,8 +169,8 @@ const RuntimeAgentSnippetV1 descriptor{
 
 } // namespace
 
-extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1*
-runtime_agent_snippet_init_v1()
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet*
+runtime_agent_snippet_init()
 {
     return &descriptor;
 }

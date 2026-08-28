@@ -25,8 +25,8 @@ public:
         QString name;
         Kind kind = Kind::Snippet;
         void* handle = nullptr;
-        const RuntimeAgentSnippetV1* snippet = nullptr;
-        const CubeStepPatchV1* cubePatch = nullptr;
+        const RuntimeAgentSnippet* snippet = nullptr;
+        const CubeStepPatch* cubePatch = nullptr;
 
         // How this module was last run successfully, which is what its release
         // runs under unless the caller says otherwise. This is observed rather

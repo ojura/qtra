@@ -93,10 +93,10 @@ inline bool anyFaceCollapsed(const std::vector<float>& vertices)
 // A claim outlives its module only in one way, and it is not the obvious one.
 // The stash lives in this process, so a crash takes the claims, the bytes and
 // the displaced buffer together and the next process starts clean, which
-// unsafe.crash verifies. What does persist is a claim
-// whose module never released successfully: a release that could not recover
-// the originals keeps its claim deliberately, and one that is simply never
-// called keeps it by default.
+// unsafe.crash verifies. What does persist is a claim whose module never
+// released successfully: a release that could not recover the originals keeps
+// its claim deliberately, and one that is simply never called keeps it by
+// default.
 //
 // Such a claim blocks its region until someone drops it, which is the
 // conservative failure. The escape is a stash.drop from the driver, and for a
@@ -123,7 +123,7 @@ struct Claim {
 
 // Every claim currently in the host's stash, as records rather than as a
 // pattern read out of the buffer.
-inline std::vector<Claim> currentClaims(const RuntimeAgentHostV1* host)
+inline std::vector<Claim> currentClaims(const RuntimeAgentHost* host)
 {
     std::vector<Claim> claims;
     if (host->stash_list == nullptr) {
@@ -167,7 +167,7 @@ inline std::vector<Claim> currentClaims(const RuntimeAgentHostV1* host)
 // The claim overlapping this region, if any. Overlap is arithmetic over
 // records, so a six-vertex displacement and a thirty-six-vertex one compare
 // directly instead of one being invisible to the other's guard.
-inline bool overlappingClaim(const RuntimeAgentHostV1* host,
+inline bool overlappingClaim(const RuntimeAgentHost* host,
                              const int offsetFloats,
                              const int lengthFloats,
                              Claim& found)

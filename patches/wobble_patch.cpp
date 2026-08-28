@@ -4,10 +4,10 @@
 
 namespace {
 
-CubeStepOutputV1 wobbleStep(const CubeStepInputV1* input) noexcept
+CubeStepOutput wobbleStep(const CubeStepInput* input) noexcept
 {
     if (input == nullptr) {
-        return CubeStepOutputV1{0.0F, 1.0F, 0.2F, 0.2F, 1.0F};
+        return CubeStepOutput{0.0F, 1.0F, 0.2F, 0.2F, 1.0F};
     }
 
     float angle = input->angle_degrees
@@ -22,19 +22,19 @@ CubeStepOutputV1 wobbleStep(const CubeStepInputV1* input) noexcept
     const float green = 0.55F + 0.45F * std::sin(phase * 1.7F + 2.094F);
     const float blue = 0.55F + 0.45F * std::sin(phase * 1.7F + 4.188F);
     const float scale = 0.88F + 0.15F * std::sin(phase * 2.4F);
-    return CubeStepOutputV1{angle, red, green, blue, scale};
+    return CubeStepOutput{angle, red, green, blue, scale};
 }
 
-const CubeStepPatchV1 descriptor{
-    CUBE_STEP_ABI_V1,
-    sizeof(CubeStepPatchV1),
+const CubeStepPatch descriptor{
+    CUBE_STEP_ABI,
+    sizeof(CubeStepPatch),
     "wobble/rainbow patch",
     &wobbleStep,
 };
 
 } // namespace
 
-extern "C" RUNTIME_AGENT_EXPORT const CubeStepPatchV1* cube_step_patch_init_v1()
+extern "C" RUNTIME_AGENT_EXPORT const CubeStepPatch* cube_step_patch_init()
 {
     return &descriptor;
 }

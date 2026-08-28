@@ -77,7 +77,7 @@ public:
     void setWireframe(bool wireframe);
 
     // Portable patch seam: one atomic load and indirect call per animation tick.
-    void installDispatchStep(CubeStepFunctionV1 function, const QString& patchName);
+    void installDispatchStep(CubeStepFunction function, const QString& patchName);
     void resetDispatchStep();
 
     void setActivePatchLabel(const QString& label);
@@ -138,7 +138,7 @@ private:
     float m_scale = 1.0F;
     QString m_activePatch = QStringLiteral("builtin");
 
-    std::atomic<CubeStepFunctionV1> m_stepFunction{&cube_step_builtin_v1};
+    std::atomic<CubeStepFunction> m_stepFunction{&cube_step_builtin};
 
     QOpenGLShaderProgram m_program;
     QOpenGLDebugLogger* m_debugLogger = nullptr;

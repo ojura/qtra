@@ -43,7 +43,7 @@ Inspect the prepared entry:
 
 ```bash
 objdump -d -M intel build/selftest/hotpatch_selftest \
-  | sed -n '/<cube_step_builtin_v1>:/,+20p'
+  | sed -n '/<cube_step_builtin>:/,+20p'
 readelf -SW build/selftest/hotpatch_selftest \
   | grep __patchable_function_entries
 ```

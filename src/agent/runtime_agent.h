@@ -62,7 +62,7 @@ private:
         SnippetEntry entry = SnippetEntry::Run;
         QString executor;
         QPointer<QObject> target;
-        RuntimeAgentHostV1 host{};
+        RuntimeAgentHost host{};
     };
 
     // What a module's host callbacks carry as agent_context, instead of the

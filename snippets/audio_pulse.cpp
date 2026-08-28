@@ -273,7 +273,7 @@ struct VizState {
     // The step function and label this one displaced. Release puts them back,
     // so a dispatch patch that was already driving the cube goes on driving it
     // afterwards.
-    CubeStepFunctionV1 previousStep = nullptr;
+    CubeStepFunction previousStep = nullptr;
     QString previousLabel;
 
     std::uint64_t framesDrawn = 0;
@@ -282,7 +282,7 @@ struct VizState {
 VizState* viz = nullptr;
 QMetaObject::Connection drawConnection;
 QAction* toggleAction = nullptr;
-RuntimeAgentHostV1 hookHost{};
+RuntimeAgentHost hookHost{};
 bool hookHostValid = false;
 QString lastDeviceName;
 bool emitBeatEvents = true;
@@ -321,9 +321,9 @@ QVector3D ambientTemperature(const float centroid)
 // The cube's own motion, as a dispatch step
 // ---------------------------------------------------------------------------
 
-CubeStepOutputV1 audioStep(const CubeStepInputV1* input) noexcept
+CubeStepOutput audioStep(const CubeStepInput* input) noexcept
 {
-    CubeStepOutputV1 output{};
+    CubeStepOutput output{};
     if (input == nullptr) {
         return output;
     }
@@ -1232,9 +1232,9 @@ void ensureToggleAction(CubeWidget* cube)
 // Entry points
 // ---------------------------------------------------------------------------
 
-void release(const RuntimeAgentHostV1* host)
+void release(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
     auto* cube = static_cast<CubeWidget*>(
@@ -1271,9 +1271,9 @@ void release(const RuntimeAgentHostV1* host)
             .constData());
 }
 
-void run(const RuntimeAgentHostV1* host)
+void run(const RuntimeAgentHost* host)
 {
-    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI_V1) {
+    if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
 
@@ -1380,9 +1380,9 @@ void run(const RuntimeAgentHostV1* host)
     });
 }
 
-const RuntimeAgentSnippetV1 descriptor{
-    RUNTIME_AGENT_ABI_V1,
-    sizeof(RuntimeAgentSnippetV1),
+const RuntimeAgentSnippet descriptor{
+    RUNTIME_AGENT_ABI,
+    sizeof(RuntimeAgentSnippet),
     "drive the cube from the system audio mix",
     &run,
     &release,
@@ -1390,8 +1390,8 @@ const RuntimeAgentSnippetV1 descriptor{
 
 } // namespace
 
-extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippetV1*
-runtime_agent_snippet_init_v1()
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet*
+runtime_agent_snippet_init()
 {
     return &descriptor;
 }

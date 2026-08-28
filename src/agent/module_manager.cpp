@@ -112,20 +112,20 @@ ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QSt
     }
 
     ::dlerror();
-    auto init = reinterpret_cast<RuntimeAgentSnippetInitV1>(
-        ::dlsym(handle, "runtime_agent_snippet_init_v1"));
+    auto init = reinterpret_cast<RuntimeAgentSnippetInit>(
+        ::dlsym(handle, "runtime_agent_snippet_init"));
     if (init == nullptr) {
         error = dynamicLoaderError(QStringLiteral("snippet init symbol not found"));
         closeFailedModule(handle);
         return nullptr;
     }
 
-    const RuntimeAgentSnippetV1* descriptor = init();
+    const RuntimeAgentSnippet* descriptor = init();
     if (descriptor == nullptr
-        || descriptor->abi_version != RUNTIME_AGENT_ABI_V1
-        || descriptor->struct_size < sizeof(RuntimeAgentSnippetV1)
+        || descriptor->abi_version != RUNTIME_AGENT_ABI
+        || descriptor->struct_size < sizeof(RuntimeAgentSnippet)
         || descriptor->run == nullptr) {
-        error = QStringLiteral("invalid RuntimeAgentSnippetV1 descriptor");
+        error = QStringLiteral("invalid RuntimeAgentSnippet descriptor");
         closeFailedModule(handle);
         return nullptr;
     }
@@ -171,20 +171,20 @@ ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, Q
     }
 
     ::dlerror();
-    auto init = reinterpret_cast<CubeStepPatchInitV1>(
-        ::dlsym(handle, "cube_step_patch_init_v1"));
+    auto init = reinterpret_cast<CubeStepPatchInit>(
+        ::dlsym(handle, "cube_step_patch_init"));
     if (init == nullptr) {
         error = dynamicLoaderError(QStringLiteral("cube patch init symbol not found"));
         closeFailedModule(handle);
         return nullptr;
     }
 
-    const CubeStepPatchV1* descriptor = init();
+    const CubeStepPatch* descriptor = init();
     if (descriptor == nullptr
-        || descriptor->abi_version != CUBE_STEP_ABI_V1
-        || descriptor->struct_size < sizeof(CubeStepPatchV1)
+        || descriptor->abi_version != CUBE_STEP_ABI
+        || descriptor->struct_size < sizeof(CubeStepPatch)
         || descriptor->step == nullptr) {
-        error = QStringLiteral("invalid CubeStepPatchV1 descriptor");
+        error = QStringLiteral("invalid CubeStepPatch descriptor");
         closeFailedModule(handle);
         return nullptr;
     }
@@ -260,7 +260,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
     m_cube->setRunning(false);
     std::string nativeError;
     const bool applied = m_entryHotpatch.apply(
-        reinterpret_cast<void*>(&cube_step_builtin_v1),
+        reinterpret_cast<void*>(&cube_step_builtin),
         reinterpret_cast<void*>(loaded->cubePatch->step),
         16,
         nativeError);
@@ -298,7 +298,7 @@ QJsonObject ModuleManager::patchStatus() const
     QJsonObject result{
         {QStringLiteral("mode"), mode},
         {QStringLiteral("moduleId"), moduleId == 0 ? QJsonValue() : QJsonValue(QString::number(moduleId))},
-        {QStringLiteral("target"), pointerString(reinterpret_cast<void*>(&cube_step_builtin_v1))},
+        {QStringLiteral("target"), pointerString(reinterpret_cast<void*>(&cube_step_builtin))},
         {QStringLiteral("patchAddress"), m_entryHotpatch.active()
             ? QJsonValue(pointerString(m_entryHotpatch.patchAddress()))
             : QJsonValue()},

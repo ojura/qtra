@@ -1323,8 +1323,8 @@ QJsonObject RuntimeAgent::hello() const
     return QJsonObject{
         {QStringLiteral("name"), QStringLiteral("qt-runtime-agent-demo")},
         {QStringLiteral("protocolVersion"), 1},
-        {QStringLiteral("agentAbi"), QStringLiteral("0x%1").arg(RUNTIME_AGENT_ABI_V1, 8, 16, QLatin1Char('0'))},
-        {QStringLiteral("cubePatchAbi"), QStringLiteral("0x%1").arg(CUBE_STEP_ABI_V1, 8, 16, QLatin1Char('0'))},
+        {QStringLiteral("agentAbi"), QStringLiteral("0x%1").arg(RUNTIME_AGENT_ABI, 8, 16, QLatin1Char('0'))},
+        {QStringLiteral("cubePatchAbi"), QStringLiteral("0x%1").arg(CUBE_STEP_ABI, 8, 16, QLatin1Char('0'))},
         {QStringLiteral("pid"), QCoreApplication::applicationPid()},
         {QStringLiteral("uid"), static_cast<int>(::getuid())},
         {QStringLiteral("socket"), m_socketName},
@@ -1395,9 +1395,9 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
         invocation->requestJson = "{}";
     }
 
-    invocation->host = RuntimeAgentHostV1{
-        RUNTIME_AGENT_ABI_V1,
-        sizeof(RuntimeAgentHostV1),
+    invocation->host = RuntimeAgentHost{
+        RUNTIME_AGENT_ABI,
+        sizeof(RuntimeAgentHost),
         // Not the agent itself: the module's own context, so that a callback
         // made later from a draw hook or a menu handler still identifies the
         // module it came from.
