@@ -22,7 +22,7 @@ MainWindow::MainWindow(QWidget* parent)
     , m_cube(new CubeWidget(this))
 {
     setObjectName(QStringLiteral("mainWindow"));
-    setWindowTitle(QStringLiteral("Qt Runtime Agent — Hotpatch Cube"));
+    setWindowTitle(QStringLiteral("Qt Runtime Agent / Hotpatch Cube"));
     resize(920, 700);
     setCentralWidget(m_cube);
 

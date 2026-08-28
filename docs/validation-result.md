@@ -1,4 +1,4 @@
-# Local validation result — 2026-08-17
+# Local validation result, 2026-08-17
 
 This record describes what was actually built and executed in the supplied
 Debian 13 container. It intentionally separates the Qt-independent native core

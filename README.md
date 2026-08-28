@@ -27,29 +27,30 @@ This is not a production debugger or a security boundary. It is an experiment
 whose operating principle is: **correct native code can do almost anything;
 incorrect native code may corrupt or crash the process.**
 
-## Validation status
+## Validation
 
-The Qt-independent part has been built and executed in this repository with GCC
-14 in a clean Release configuration:
+`./scripts/validate.sh` builds the Qt-independent core in three Release
+configurations and runs the hotpatch tests against each: ordinary `-O3`, `-O3`
+with GCC LTO, and `-O3` with Intel CET/IBT (`-fcf-protection=full`). Every run
+calls the optimized built-in function, installs an x86-64 entry redirect,
+checks the replacement behavior, rolls the original bytes back, and checks the
+original behavior again. The CET configuration also checks that `ENDBR64`
+survives, that the jump lands in the NOP area after it, and that a replacement
+entry point without `ENDBR64` is rejected.
 
-- the host function is compiled at `-O3`;
-- disassembly shows the requested 16-byte GCC patchable entry region;
-- both supplied patch DSOs redirect the function and rollback successfully;
-- the same redirect/rollback tests also pass with GCC LTO enabled;
-- an Intel CET/IBT build preserves `ENDBR64`, patches the following NOP sled,
-  rejects replacement entry points without `ENDBR64`, and passes rollback;
-- the build-oracle tool generated a fresh `-O3` patch DSO from
-  `compile_commands.json`, and that generated DSO passed the same test;
-- Python tests cover compilation-command transformation, retained-event replay,
-  quiet event streams, and socket protocol behavior.
+For each configuration the build oracle then derives a fresh `-O3`
+shared-object command from that build's `compile_commands.json`, compiles
+`patches/wobble_patch.cpp` with it, and puts the result through the same
+redirect and rollback.
 
-The current execution container does not contain the Qt 6 development packages,
-and its shell cannot reach Debian package mirrors. Consequently the GUI target
-could not be compiled or launched here. The GUI source, build scripts, Xvfb
-runner, controller, and end-to-end smoke test are included for a Qt-capable
-Linux environment.
+The Python tests run under `ctest` and cover compilation-command
+transformation, retained-event replay, quiet event streams, and socket protocol
+behavior.
 
-The exact clean-build results are recorded in [`docs/validation-result.md`](docs/validation-result.md).
+`./scripts/validate.sh --with-gui` adds the Qt application and the
+Xvfb/current-display smoke session, which needs the Qt 6 packages below.
+
+A recorded run is in [`docs/validation-result.md`](docs/validation-result.md).
 
 ## Architecture
 
@@ -103,10 +104,6 @@ apt-get install -y --no-install-recommends \
   qt6-base-dev qt6-base-dev-tools libqt6opengl6-dev \
   libgl1-mesa-dri mesa-utils xvfb xauth
 ```
-
-The earlier attempt inside the supplied container used the same Qt packages but
-did not complete because the container could not resolve/reach Debian mirrors.
-Qt was therefore not successfully installed there.
 
 Required application components are Qt 6 Core, Gui, Widgets, Network,
 Concurrent, OpenGL, and OpenGLWidgets. The CMake project currently requires Qt
@@ -210,8 +207,8 @@ python3 tools/agentctl.py history --after 100 --prefix operation.
 ```
 
 `--seconds` bounds how long `events` streams for. `--timeout` is a different
-setting: it belongs to the client rather than to any subcommand, so it goes
-before the subcommand name, and it sets how long a single read waits. A quiet
+setting: it is a client option, so it goes before the subcommand name, and it
+sets how long a single read waits. A quiet
 stream simply starts another read interval, so raising it does not extend the
 session.
 
@@ -341,8 +338,8 @@ python3 tools/agentctl.py call snippet.run \
 
 A menu click arrives on the GUI thread with no current OpenGL context, and both
 installing and removing need one, so the handler defers the work to the next
-`paintGL()` through `CubeWidget::enqueueRenderCallback()` rather than touching
-GL state where it stands. Parameters survive being switched off: a snippet keeps
+`paintGL()` through `CubeWidget::enqueueRenderCallback()`, where a context is
+current. Parameters survive being switched off: a snippet keeps
 the values it was last given and reuses them when it comes back on.
 
 A second copy of the same snippet loaded from a different path does not add a
@@ -350,23 +347,22 @@ second entry. It would carry the same name while driving different state, so the
 module that got there first keeps the menu, and the later one is reachable only
 through its own `moduleId`.
 
-**They exclude each other by record, not by name.** Three of them replace part
-of the mesh: `catmull_clark`, `pillow_cube` and `jack_in_the_box` displace some
-region of the widget's vertex buffer by overwriting it with zeros, and record
-that in the host's byte stash: the displaced originals under
-`cube.vertexBuffer/<offset>+<length>`, and a claim alongside it saying a
-displacement is in effect. Installing asks whether any claim overlaps the region
-it wants and refuses if one does, naming the region and the snippet that holds
-it.
+**They exclude each other through the claims they leave in the stash.** Three of
+them replace part of the mesh: `catmull_clark`, `pillow_cube` and
+`jack_in_the_box` displace some region of the widget's vertex buffer by
+overwriting it with zeros, and record that in the host's byte stash: the
+displaced originals under `cube.vertexBuffer/<offset>+<length>`, and a claim
+alongside it saying a displacement is in effect. Installing asks whether any
+claim overlaps the region it wants and refuses if one does, naming the region
+and the snippet that holds it.
 
-Asking the claims rather than the vertex values is what lets a one-face
+Asking the claims is what lets a one-face
 displacement and a whole-mesh one see each other: overlap is arithmetic, so
 neither has to guess the other's granularity. It also means a snippet needs no
-list of its siblings. An earlier version had each of them naming the other two
-by menu action, which grew as the square of their number and could never account
-for a snippet written later.
+list of its siblings, so a snippet written later is accounted for without
+touching any of the ones already here.
 
-A value check still runs, answering a different question. The claim says who
+A value check also runs, answering a different question. The claim says who
 owns a region; the values say whether it is displaced right now. Both are needed,
 because a release that could not recover the originals leaves a region collapsed
 with no claim on it, and recording those zeros as the originals is how a face is
@@ -397,15 +393,15 @@ different granularities do not: `jack_in_the_box` deposits at
 `cube.vertexBuffer/0+36`, which is a different key, so it installs even though
 that range sits wholly inside the record above.
 
-This is the host holding its boundary rather than missing a case. `stash_put`
+This is the host holding its boundary. `stash_put`
 cannot know that `0+216` and `0+36` denote overlapping float ranges without
-parsing a key schema, and a host that parsed keys would no longer be the
-byte store described below, which never interprets what it stores. Exact-key
-ownership is the strongest rule available to something that does not read its
-own keys. Range arithmetic needs to know what a key means, so it belongs to the
-domain, which is why the overlap test lives in `snippets/cube_mesh.h` next to
-the layout it understands. `stash_list` reports every key with its owner, which
-is all a domain needs to build such a test.
+parsing a key schema, and a host that parsed keys would not be the byte store
+described below, which never interprets what it stores. Exact-key ownership is
+the strongest rule available to something that does not read its own keys.
+Range arithmetic needs to know what a key means, so it belongs to the domain,
+which is why the overlap test lives in `snippets/cube_mesh.h` next to the layout
+it understands. `stash_list` reports every key with its owner, which is all a
+domain needs to build such a test.
 
 The consequence is worth stating, because it cuts against what an entry is
 declared to mean further down: an entry is *what the displacement currently in
@@ -437,11 +433,11 @@ the surface stays closed while each panel keeps its own normals along the seam
 and shades as a crease. Its parameters trade off against each other: pushing
 `puff` much past the corner radius set by `roundness` and `tuck` puts the panel
 centers as far from the middle as the corners are, and the silhouette becomes a
-ball rather than a cube. `fabric` fades the six saturated face colors toward a
+ball. `fabric` fades the six saturated face colors toward a
 linen tone; it defaults to 0, which keeps them exactly as the widget draws them.
 Re-running the loaded module keeps any parameter the new request omits.
 
-Re-run a loaded module rather than loading it again, so that the module's static
+Re-run a loaded module, so that the module's static
 state is the one that gets updated:
 
 ```bash
@@ -452,8 +448,7 @@ python3 tools/agentctl.py call snippet.run \
 ```
 
 Loading a *different* path gives a separate module with its own copy of that
-state, which for these means a second draw hook rather than a change to the
-first. `tools/jit_snippet.py` writes a fresh path every time, precisely so
+state, which for these means a second draw hook, leaving the first in place. `tools/jit_snippet.py` writes a fresh path every time, precisely so
 `dlopen()` cannot hand back an already loaded object, so recompiling one of
 these and running it again does stack a second copy.
 
@@ -474,16 +469,17 @@ python3 tools/agentctl.py snippet \
   --executor gui --request '{"line":"claude was here"}'
 ```
 
-Replacing the About action's handler would have been the obvious approach, and
-it is the wrong one: the wording lives in a lambda in `main_window.cpp`, a
-snippet cannot read a string out of compiled code, and a replacement handler
-would have to restate the application's own text and then go stale when the
-application changes it.
-
-The snippet installs an application-wide event filter instead. `QMessageBox`
-sees `QEvent::Show` before it reaches the screen, so the application builds its
+The snippet installs an application-wide event filter. `QMessageBox` sees
+`QEvent::Show` before it reaches the screen, so the application builds its
 dialog exactly as it always does and the line is appended to whatever text that
-box turned out to carry. Reading it back while the dialog was open gave:
+box turned out to carry.
+
+Appending is what keeps this correct. The wording lives in a lambda in
+`main_window.cpp`, and a snippet cannot read a string literal out of compiled
+code, so the only text a snippet can depend on is the text the application
+itself produced. The filter appends to that and needs to know none of it.
+
+Reading it back while the dialog is open gives:
 
 ```text
 An optimized Qt 6/OpenGL process with semantic RPC, runtime-compiled C++
@@ -497,22 +493,21 @@ claude was here
 ### Writing through the seam that owns the value
 
 `agent_snippet_audio_pulse` drives the cube from whatever the machine is
-playing. The reason it is documented here is the mistake it had to avoid, which
-applies to any process this tooling is pointed at.
+playing. What generalizes from it is a rule about which seam to write through,
+and that rule applies to any process this tooling is pointed at.
 
-The obvious way to tint the cube on a beat is from the `frameRendered` hook,
-where every other scene snippet does its work. It has no effect at all.
-`advanceAnimation()` writes `m_angleDegrees`, `m_tint` and `m_scale` from the
-step function's output once per tick, and it does that before the next
-`paintGL()` reads them, so a value written from a draw hook is overwritten
-before anything can draw with it. Nothing reports an error. The write succeeds,
-the field holds the new value for part of a frame, and the screen never shows
-it.
+A value the target recomputes every frame has an owner: the code that writes it
+each tick. Only writes made through that owner survive. Write the same field
+from anywhere else and the write itself succeeds, the field holds the new value
+for part of a frame, and the next tick overwrites it before anything draws with
+it. Nothing reports an error, so the wrong seam reads like a bug in your own
+code.
 
-The general rule is to find what writes a value each frame and write through
-that, because a value has an owner per frame and the seam that owns it is the
-only one whose writes survive. Picking the wrong one fails silently and reads
-like a bug in your own code.
+The cube's tint is exactly that. `advanceAnimation()` writes `m_angleDegrees`,
+`m_tint` and `m_scale` from the step function's output once per tick, and it
+does so before the next `paintGL()` reads them. Tinting the cube from the
+`frameRendered` hook, where the other scene snippets do their work, therefore
+has no effect at all.
 
 So this snippet uses both seams at once, according to which owns what:
 
@@ -521,8 +516,8 @@ So this snippet uses both seams at once, according to which owns what:
 | dispatch step function | the cube's angle, tint and scale | the widget recomputes all three every tick from the step's output |
 | `frameRendered` hook | the geometry drawn around the cube | it runs while the context is current and the depth buffer still holds the cube, so the drawing is occluded by the cube for free |
 
-Releasing restores whichever step function was installed beforehand rather than
-assuming that was the builtin, so a dispatch patch loaded first survives this
+Releasing restores whichever step function was installed beforehand, so a
+dispatch patch loaded first survives this
 snippet being switched on and off.
 
 ```bash
@@ -597,11 +592,8 @@ A real system would add generations and epoch/reference tracking before unload.
 `dlopen()` keys loaded objects by pathname, so asking for a path that is
 already loaded returns the resident handle and its code, whatever the file on
 disk now says. Rebuilding a snippet target and loading it again therefore runs
-the *old* module, and reports success while doing it: a new module id comes
-back, `snippet.run` completes, and nothing anywhere says the edit was ignored.
-Measured on this repository, rebuilding with `springRingSegments` changed from
-8 to 12 and loading the same path still reported the old `springTriangles` of
-1920.
+the resident module, and reports success while doing it: a new module id comes
+back, `snippet.run` completes, and nothing says the edit was ignored.
 
 Getting the new code in takes two steps: tell the installed generation to
 release whatever it installed, and present the object under a pathname nothing
@@ -616,8 +608,8 @@ python3 tools/agentctl.py reload build/release/agent_snippet_jack_in_the_box.so 
 
 That copies the object to `runtime-snippets/<name>-<hash>.so`, loads it, finds
 the generation it supersedes, asks that one to release what it installed, and
-then runs the new one. The same edit through this path reported 3360 triangles
-for `springRingSegments = 14`, in a process that was never restarted.
+then runs the new one. The edited code is live in a process that was never
+restarted.
 
 The handover needs no payload and no executor, because the outgoing module
 declares a release entry point and the agent knows where it ran. `--executor`
@@ -637,32 +629,32 @@ own record instead, so the two never have to agree.
 Only `failed` stops the new generation being run, and `--force` overrides that.
 Nothing can be unloaded, so the new module stays resident and inert instead. Without a handover the new generation would install
 alongside the old one, which for two `frameRendered` hooks means two copies
-rather than a replacement.
+both drawing.
 
-`--handover-request` is still there for a module that declares no release. It
-sends a request payload and cannot report whether anything acted on it, which is
-the difference the declaration removes.
+`--handover-request` covers a module that declares no release. It sends a
+request payload and cannot report whether anything acted on it, which is the
+difference the declaration removes.
 
-Generations are matched by the descriptor's `name_utf8`, which is the same
-string in every build of one source, rather than by filename. Reloads and
-`jit_snippet.py` output do not share a filename stem. `--replace ID` picks the
+Generations are matched by the descriptor's `name_utf8`, the same string in
+every build of one source. Reloads and `jit_snippet.py` output do not share a
+filename stem, so the name is the only stable key. `--replace ID` picks the
 outgoing module explicitly.
 
-`jit_snippet.py` remains the tool for a source file with no CMake target. For
-one that has a target, building it is not the slower option. An incremental
-build measured 4.4 s against 4.1 s for the oracle's own compile, and the built
-object is the artifact the project actually produces, compiled with the
-project's command line rather than the oracle's reconstruction of it.
+`jit_snippet.py` is the tool for a source file with no CMake target. For one
+that has a target, build the target: an incremental build costs about what the
+oracle's own compile costs, and the built object is the artifact the project
+produces, compiled with the project's own command line instead of the oracle's
+reconstruction of it.
 
-Two properties still hold across a reload:
+Two properties hold across a reload:
 
 - Nothing is unloaded, so every iteration leaves its predecessor resident.
 - A menu entry created by `scene_toggle` is handed to the newest generation.
-  The entry is rebound rather than duplicated, so the checkbox drives the code
+  The entry is rebound, so the checkbox drives the code
   that is installed. This assumes the handover ran first.
 
-Plain `agentctl.py snippet` on a path that is already loaded now says so on
-stderr, rather than letting a stale load look like a rebuild that did not take.
+Plain `agentctl.py snippet` on a path that is already loaded says so on stderr,
+naming the path and pointing at `reload`.
 
 Work queued for the `render` executor runs inside `paintGL()`, and `update()`
 only asks for a repaint. A window the compositor has stopped sending frame
@@ -673,7 +665,7 @@ caller sees only its own request timing out. `CubeWidget` therefore starts a
 100 ms single-shot watchdog whenever it queues render work, and a queue still
 unserved when it fires is drained through `grabFramebuffer()`, which renders
 whatever the compositor is doing. A visible window never reaches it. This lives
-in the widget rather than in the client tools, so every caller gets it.
+in the widget, so every caller gets it.
 
 ### Declaring how a module lets go
 
@@ -687,20 +679,19 @@ const RuntimeAgentSnippetV1 descriptor{
 ```
 
 `release` receives a host and reports through `complete_json`/`fail` exactly as
-`run` does, so a release that fails is an error a program can act on rather than
-a payload nobody checked.
+`run` does, so a release that fails is an error a program can act on.
 
-There is no compatibility path for older descriptors, and none is wanted here.
 `RUNTIME_AGENT_ABI_V1` is bumped whenever either ABI struct changes shape, and
-the loader refuses anything that does not match, so a module built against an
-older layout fails to load instead of reading fields the host never wrote.
-Rebuild the snippets when the header changes; a stale `.so` under
-`runtime-snippets/` will be rejected rather than run.
+the loader accepts only an exact match: a module that disagrees with the host
+about either struct fails to load, so it cannot run against fields the host
+never wrote. There is no adaptation path and none is intended. Rebuild the
+snippets when the header changes; a stale `.so` under `runtime-snippets/` is
+rejected at load.
 
-A null `release` means the module declares it has nothing to undo. That is a
-real answer and not a placeholder. Of the ten snippets here, `inspect_cube`,
-`install_observer` and `render_probe` genuinely install nothing that outlives
-the call, and `install_observer` already said as much in its own result.
+A null `release` declares that the module has nothing to undo. Of the ten
+snippets here, `inspect_cube`, `install_observer` and `render_probe` install
+nothing that outlives the call, and `install_observer` says as much in its own
+result.
 
 ```bash
 python3 tools/agentctl.py call snippet.release --params '{"moduleId":1}'
@@ -708,27 +699,25 @@ python3 tools/agentctl.py call module.list
 ```
 
 No executor is needed. The agent records how each module was last run
-*successfully*, and runs the release there. The last success rather than the
-first attempt, since a snippet needing a GL context fails under `gui` with "use
+*successfully*, and runs the release there. The last success, since a snippet
+needing a GL context fails under `gui` with "use
 executor=render" and is retried. `module.list` reports that record alongside
 `declaresRelease`. Passing `executor` or `target` overrides it; a recorded
-target that no longer exists is reported as `recorded_target_gone` rather than
-quietly replaced.
+target that no longer exists is reported as `recorded_target_gone`.
 
 Release must not report completion before its effects are applied, because a
-handover is sequenced on that completion. The scene snippets refuse rather than
-defer for this reason: releasing one under `gui` returns an error telling you to
-use `render`, instead of queueing the teardown for the next frame and reporting
-success while the cube is still collapsed.
+handover is sequenced on that completion. The scene snippets refuse for this
+reason: releasing one under `gui` returns an error telling you to use `render`,
+because a deferred teardown would report success while the cube is still
+collapsed.
 
-What this does not do is verify the effects are gone. It raises "nobody can tell
-whether the handover did anything" to "the handover ran and reported"; a buggy
-release that leaves half its state behind passes exactly as before. The
-declaration is also one bit per module, so a snippet that installed three things
-cannot say it can undo two. The install-time defences, such as the scene
-snippets refusing to save an already-collapsed vertex buffer, still matter for that
-reason, because nothing distinguishes "nothing to release" from "the author
-forgot".
+What this does not do is verify the effects are gone. It establishes that the
+release ran and reported, and nothing beyond that: a buggy release that leaves
+half its state behind reports success. The declaration is also one bit per
+module, so a snippet that installed three things cannot say it can undo two. The
+install-time defences, such as the scene snippets refusing to save an
+already-collapsed vertex buffer, matter for that reason, because nothing
+distinguishes "nothing to release" from "the author forgot".
 
 ### The byte stash
 
@@ -751,13 +740,12 @@ oldest value ever seen, so installing overwrites it. Keeping the first copy
 forever would replay factory vertices over a later legitimate edit and revert it
 silently.
 
-Two rules follow from that meaning, and both are placement rather than
-exhortation:
+Two rules follow from that meaning, and both are matters of placement:
 
-- **Deposit behind the guard that makes the install safe.** The jack already
-  refuses to install onto an already-collapsed face, and the deposit sits after
-  that check, so nothing can reach it with bytes the module has not just
-  validated. There is no separate obligation on whoever writes the next snippet.
+- **Deposit behind the guard that makes the install safe.** The jack refuses to
+  install onto an already-collapsed face, and the deposit sits after that check,
+  so nothing can reach it with bytes the module has not just validated. There is
+  no separate obligation on whoever writes the next snippet.
 - **Replay only onto your own displacement.** Before writing the saved bytes
   back, the jack checks the face still holds the zeros it wrote. If something
   else changed it since, the bytes are left alone and the result says so. That
@@ -768,7 +756,7 @@ own restore reads it back from there. That is deliberate: a saved copy nobody
 reads is a copy nobody notices going wrong, whereas here the bytes another
 module would rely on are the bytes this module's own restore needs. Drop the
 entry while the face is still open and releasing reports that the face could not
-be restored, rather than writing whatever happened to be in the buffer.
+be restored, leaving the buffer untouched.
 
 ```bash
 python3 tools/agentctl.py call stash.list
@@ -784,8 +772,8 @@ to serve. The convention is `<module-name>/<what>`.
 
 Entries are not dropped when a module releases. Deciding that a restore actually
 worked takes an observation no module can make about itself, so that call
-belongs to whoever is driving; and a restore that corrupts rather than restores
-must not delete the only good copy as its final act.
+belongs to whoever is driving; and a restore that corrupts must not delete the
+only good copy as its final act.
 
 This is not an undo log. The host stores bytes and has no idea what they mean,
 which is the point: a host that had to replay effects would need a vocabulary
@@ -905,7 +893,7 @@ when a failure occurs.
 - Writing 13 bytes is not atomic. General multi-threaded targets need cooperative
   quiescence, thread suspension, trap-assisted staging, or a different patch
   strategy.
-- Only successful DSO loads are retained. Failed loads are now closed.
+- Only successful DSO loads are retained; a failed load is closed.
 - The semantic registry covers the main-window QObject tree and explicitly
   registered objects; non-QObject domain state needs generated/manual adapters.
 - `object.invoke` currently handles only zero-argument methods.
