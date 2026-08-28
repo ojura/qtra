@@ -112,6 +112,16 @@ Required application components are Qt 6 Core, Gui, Widgets, Network,
 Concurrent, OpenGL, and OpenGLWidgets. The CMake project currently requires Qt
 6.4 or later.
 
+One snippet has a dependency of its own. `agent_snippet_audio_pulse` reads the
+system audio mix through PulseAudio, which on Debian-like systems means
+`libpulse-dev`. The list above leaves it out, and the build looks for it with
+`pkg-config` and skips that one target when it is absent, so everything else
+configures and builds either way. Install it to get the beat visualizer:
+
+```bash
+apt-get install -y --no-install-recommends libpulse-dev
+```
+
 ## Build
 
 Optimized application and all modules:
@@ -195,9 +205,15 @@ python3 tools/agentctl.py call object.set \
   --params '{"objectName":"cubeView","property":"angularVelocity","value":180}'
 python3 tools/agentctl.py call action.trigger \
   --params '{"objectName":"actionWireframe"}'
-python3 tools/agentctl.py events --prefix operation. --prefix patch. --timeout 60
+python3 tools/agentctl.py events --prefix operation. --prefix patch. --seconds 60
 python3 tools/agentctl.py history --after 100 --prefix operation.
 ```
+
+`--seconds` bounds how long `events` streams for. `--timeout` is a different
+setting: it belongs to the client rather than to any subcommand, so it goes
+before the subcommand name, and it sets how long a single read waits. A quiet
+stream simply starts another read interval, so raising it does not extend the
+session.
 
 The protocol is one compact JSON object per line. Requests have `id`, `command`,
 and `params`. Replies have matching `id`, `ok`, and either `result` or `error`.
@@ -254,12 +270,12 @@ python3 tools/agentctl.py snippet SOME_SNIPPET.so \
 
 ### Ready-made scene modifications
 
-Four prebuilt snippets change what the widget draws. Each installs a direct
+Six prebuilt snippets change what the widget draws. Each installs a direct
 connection to `CubeWidget::frameRendered`, which is emitted at the end of
 `paintGL()` while the context is still current and the depth buffer still holds
 the cube, so a hook there gets correct occlusion without touching `paintGL()`.
-All four read private `CubeWidget` state for the frame's angle, scale, tint,
-elapsed time, and projection, and all four are compiled with
+All six read private `CubeWidget` state for the frame's angle, scale, tint,
+elapsed time, and projection, and all six are compiled with
 `-fno-access-control`.
 
 ```bash
@@ -271,6 +287,10 @@ python3 tools/agentctl.py snippet \
   build/release/agent_snippet_mobius_ring.so --executor render --request '{}'
 python3 tools/agentctl.py snippet \
   build/release/agent_snippet_pillow_cube.so --executor render --request '{}'
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_jack_in_the_box.so --executor render --request '{}'
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_audio_pulse.so --executor render --request '{}'
 ```
 
 | module | what it does | parameters |
@@ -279,10 +299,12 @@ python3 tools/agentctl.py snippet \
 | `agent_snippet_catmull_clark` | replaces the cube with its Catmull-Clark subdivision surface, keeping the six face colors | `level` 0 to 5, default 2 |
 | `agent_snippet_pillow_cube` | turns each side into a stuffed pillow panel with sewn edges and stitching | `puff`, `roundness`, `tuck`, `resolution`, `seam`, `stitches`, `fabric` |
 | `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
+| `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front` |
+| `agent_snippet_audio_pulse` | drives the cube and a rig around it from the system audio mix | `device`, `sensitivity`, `dynamicRangeDb`, `events` |
 
 ### Switching them on and off
 
-All four add a checkable entry to the application's Cube menu when the snippet
+All six add a checkable entry to the application's Cube menu when the snippet
 is loaded, under a separator that marks off everything added at runtime:
 
 | entry | shortcut | object name |
@@ -291,6 +313,8 @@ is loaded, under a separator that marks off everything added at runtime:
 | Catmull-Clark | `Ctrl+Shift+C` | `actionCatmullClark` |
 | Mobius ring | `Ctrl+Shift+M` | `actionMobiusRing` |
 | Pillow mode | `Ctrl+Shift+P` | `actionPillowMode` |
+| Jack in the box | `Ctrl+Shift+J` | `actionJackInTheBox` |
+| Beat visualizer | `Ctrl+Shift+B` | `actionBeatVisualizer` |
 
 The application has no knowledge of these snippets and must not acquire any:
 they are separate shared objects that may never be loaded at all. Each entry is
@@ -326,15 +350,16 @@ second entry. It would carry the same name while driving different state, so the
 module that got there first keeps the menu, and the later one is reachable only
 through its own `moduleId`.
 
-**They exclude each other by record, not by name.** Each of these snippets
-displaces some region of the widget's vertex buffer by overwriting it with
-zeros, and records that in the host's byte stash: the displaced originals under
+**They exclude each other by record, not by name.** Three of them replace part
+of the mesh: `catmull_clark`, `pillow_cube` and `jack_in_the_box` displace some
+region of the widget's vertex buffer by overwriting it with zeros, and record
+that in the host's byte stash: the displaced originals under
 `cube.vertexBuffer/<offset>+<length>`, and a claim alongside it saying a
 displacement is in effect. Installing asks whether any claim overlaps the region
 it wants and refuses if one does, naming the region and the snippet that holds
 it.
 
-Asking the records rather than the vertex values is what lets a one-face
+Asking the claims rather than the vertex values is what lets a one-face
 displacement and a whole-mesh one see each other: overlap is arithmetic, so
 neither has to guess the other's granularity. It also means a snippet needs no
 list of its siblings. An earlier version had each of them naming the other two
@@ -354,18 +379,51 @@ originals would lose them
 ```
 
 A byte record outlives its claim, so a region can be free while its record still
-names the snippet that last displaced it. A different snippet taking that region
-is refused, because its own snapshot cannot be recorded and displacing with
-somebody else's record in place would be worse than not displacing at all. The
-refusal names the key, and clearing a record nothing claims is a `stash.drop`
-the driver makes.
+names the snippet that last displaced it. Whether that record stops a later
+install depends on which of two rules applies, and the two work at different
+granularities on purpose.
+
+Claims are compared arithmetically. `cube_mesh::overlappingClaim` reads every
+`/claimed` entry out of `stash_list` and intersects the float ranges, so a
+six-vertex displacement and a thirty-six-vertex one see each other whatever
+offsets they use.
+
+Records are compared by exact key. `stash_put` refuses an overwrite when an
+entry under *that key* belongs to another snippet, and returns -2 so the caller
+can report it. Two snippets wanting the identical key therefore exclude each
+other: running `pillow_cube` against a `catmull_clark` record left at
+`cube.vertexBuffer/0+216` is refused with the key named. Two snippets at
+different granularities do not: `jack_in_the_box` deposits at
+`cube.vertexBuffer/0+36`, which is a different key, so it installs even though
+that range sits wholly inside the record above.
+
+This is the host holding its boundary rather than missing a case. `stash_put`
+cannot know that `0+216` and `0+36` denote overlapping float ranges without
+parsing a key schema, and a host that parsed keys would no longer be the
+byte store described below, which never interprets what it stores. Exact-key
+ownership is the strongest rule available to something that does not read its
+own keys. Range arithmetic needs to know what a key means, so it belongs to the
+domain, which is why the overlap test lives in `snippets/cube_mesh.h` next to
+the layout it understands. `stash_list` reports every key with its owner, which
+is all a domain needs to build such a test.
+
+The consequence is worth stating, because it cuts against what an entry is
+declared to mean further down: an entry is *what the displacement currently in
+effect displaced*, and a `catmull_clark` record at `0+216` stops meaning that
+once `catmull_clark` has released and the jack owns `0+36` inside it. A repair
+module replaying `0+216` would put factory vertices back over the face the jack
+is holding open. Nothing is corrupted, because the jack replays only onto its
+own zeros and declines when the face holds anything else, but the record is
+stale in a way the host cannot detect and no claim marks. Clearing a record
+nothing claims is a `stash.drop` the driver makes.
 
 Also worth knowing from the menu: a refused install shows only as the checkbox
 snapping back. The reason is in the module's log line and in the result of the
 same install driven over the socket.
 
-The overlays are a different matter: the sphere and the ring only add draw
-passes, so they compose with each other and with either mesh replacement.
+The overlays are a different matter: the sphere, the ring and the beat
+visualizer only add draw passes, so they take no claim, compose with each other,
+and compose with any of the mesh replacements.
 
 Each also accepts `{"restore": true}` to take itself back off. The Catmull-Clark and
 pillow ones have to suppress the widget's own draw, because `paintGL()` calls
@@ -435,6 +493,60 @@ claude was here
 ```
 
 `{"restore": true}` removes the filter and reports how many dialogs it changed.
+
+### Writing through the seam that owns the value
+
+`agent_snippet_audio_pulse` drives the cube from whatever the machine is
+playing. The reason it is documented here is the mistake it had to avoid, which
+applies to any process this tooling is pointed at.
+
+The obvious way to tint the cube on a beat is from the `frameRendered` hook,
+where every other scene snippet does its work. It has no effect at all.
+`advanceAnimation()` writes `m_angleDegrees`, `m_tint` and `m_scale` from the
+step function's output once per tick, and it does that before the next
+`paintGL()` reads them, so a value written from a draw hook is overwritten
+before anything can draw with it. Nothing reports an error. The write succeeds,
+the field holds the new value for part of a frame, and the screen never shows
+it.
+
+The general rule is to find what writes a value each frame and write through
+that, because a value has an owner per frame and the seam that owns it is the
+only one whose writes survive. Picking the wrong one fails silently and reads
+like a bug in your own code.
+
+So this snippet uses both seams at once, according to which owns what:
+
+| seam | what it drives | why that one |
+| --- | --- | --- |
+| dispatch step function | the cube's angle, tint and scale | the widget recomputes all three every tick from the step's output |
+| `frameRendered` hook | the geometry drawn around the cube | it runs while the context is current and the depth buffer still holds the cube, so the drawing is occluded by the cube for free |
+
+Releasing restores whichever step function was installed beforehand rather than
+assuming that was the builtin, so a dispatch patch loaded first survives this
+snippet being switched on and off.
+
+```bash
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_audio_pulse.so --executor render --request '{}'
+python3 tools/agentctl.py --timeout 12 events --prefix audio.
+```
+
+Audio arrives from PulseAudio's `@DEFAULT_MONITOR@`, which is the monitor of
+whatever the default sink currently is, so it follows the output the machine is
+already using without being told which device that is. A capture thread runs a
+2048-point FFT every 512 samples and reduces it to 64 log-spaced bands, spectral
+flux onset detection with a separate detector over the low bands for kicks, and
+a tempo estimate from the median interval between onsets. The GUI thread only
+ever copies the result struct.
+
+Each detected onset is published as an `audio.beat` event carrying its strength,
+spectral centroid and the current tempo estimate, so a client can consume the
+analysis without drawing anything. `{"events": false}` turns that off.
+`sensitivity` and `dynamicRangeDb` tune detection and display range, and
+`device` names a monitor source explicitly.
+
+Its CMake target sits behind a `pkg-config` check for `libpulse-simple`. A
+machine without that library loses this one target and configures normally.
 
 ### Project-aware on-demand compilation
 
@@ -586,7 +698,7 @@ Rebuild the snippets when the header changes; a stale `.so` under
 `runtime-snippets/` will be rejected rather than run.
 
 A null `release` means the module declares it has nothing to undo. That is a
-real answer and not a placeholder. Of the nine snippets here, `inspect_cube`,
+real answer and not a placeholder. Of the ten snippets here, `inspect_cube`,
 `install_observer` and `render_probe` genuinely install nothing that outlives
 the call, and `install_observer` already said as much in its own result.
 
@@ -819,7 +931,15 @@ src/agent/entry_hotpatch.*      Linux/x86-64 entry rewriter
 src/cube_widget.*               OpenGL cube and execution seams
 snippets/                       native runtime code examples and scene modifications
 snippets/scene_toggle.h         runtime-added Cube menu entry shared by the scene snippets
+snippets/cube_mesh.h            vertex-buffer claim and overlap rules for the scene snippets
+snippets/audio_pulse.cpp        drives the cube and a rig around it from system audio
+snippets/audio_analysis.h       capture, FFT and onset detection; depends on PulseAudio
+                                and the standard library only, so unlike cube_mesh.h and
+                                scene_toggle.h beside it, it knows nothing of Qt, the
+                                agent ABI, or this demo
 patches/                        function replacement examples
+tests/                          hotpatch_selftest.cpp and the Python protocol,
+                                agentctl and compile-oracle tests
 tools/agentctl.py               protocol client, including snippet reload
 tools/compile_snippet.py        compile-database build oracle
 tools/jit_snippet.py            compile + load + execute pipeline
