@@ -23,6 +23,37 @@ if(ENABLE_CET)
     endif()
 endif()
 
+# Preparing a function for entry replacement.
+#
+# Three separate properties are needed and none of them belongs in the target's
+# source, because the tooling has to work on applications that were not written
+# for it.
+#
+#   -fpatchable-function-entry  reserves the NOP area the redirect is written
+#                               into, without which the patcher has nowhere to
+#                               go that does not require relocating real
+#                               instructions.
+#   -fno-lto                    keeps this an ordinary object, so callers in
+#                               other translation units see only the
+#                               declaration. That opacity is what stops a
+#                               caller assuming this body leaves a register
+#                               untouched, which a replacement is free to
+#                               clobber. The LTO presets would otherwise
+#                               dissolve the boundary this rests on.
+#   -fno-ipa-icf                stops the body being folded together with an
+#                               identical one, which would leave two names for
+#                               one entry and make "what did I patch" ambiguous.
+#
+# This is weaker than GCC's noipa attribute, which is per function and covers
+# IPA that does not exist yet. It holds here because cube_step.cpp has no
+# callers of its own, so the object boundary is the whole story. A target whose
+# callers share a translation unit needs a compiler plugin or a much broader
+# build profile.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set_source_files_properties(src/cube_step.cpp PROPERTIES COMPILE_OPTIONS
+        "-fpatchable-function-entry=16,0;-fno-lto;-fno-ipa-icf")
+endif()
+
 add_library(cube_patch_wobble MODULE patches/wobble_patch.cpp)
 target_include_directories(cube_patch_wobble PRIVATE include)
 set_target_properties(cube_patch_wobble PROPERTIES PREFIX "" OUTPUT_NAME "cube_patch_wobble")
