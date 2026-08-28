@@ -356,11 +356,11 @@ alongside it saying a displacement is in effect. Installing asks whether any
 claim overlaps the region it wants and refuses if one does, naming the region
 and the snippet that holds it.
 
-Asking the claims rather than the vertex values is what lets a one-face
-displacement and a whole-mesh one see each other: overlap is arithmetic, so
-neither has to guess the other's granularity. It also means a snippet needs no
-list of its siblings, so a snippet written later is accounted for without
-touching any of the ones already here.
+A claim is a record, so overlap between two of them is arithmetic: a one-face
+displacement and a whole-mesh one compare directly, and neither has to guess the
+other's granularity. It also means a snippet needs no list of its siblings, so a
+snippet written later is accounted for without touching any of the ones already
+here.
 
 A value check also runs, answering a different question. The claim says who
 owns a region; the values say whether it is displaced right now. Both are needed,
@@ -393,11 +393,11 @@ different granularities do not: `jack_in_the_box` deposits at
 `cube.vertexBuffer/0+36`, which is a different key, so it installs even though
 that range sits wholly inside the record above.
 
-This is the host holding its boundary rather than missing a case. `stash_put`
-cannot know that `0+216` and `0+36` denote overlapping float ranges without
-parsing a key schema, and a host that parsed keys would not be the byte store
-described below, which never interprets what it stores. Exact-key ownership is
-the strongest rule available to something that does not read its own keys.
+This is the host's boundary, and it is deliberate. `stash_put` cannot know that
+`0+216` and `0+36` denote overlapping float ranges without parsing a key schema,
+and a host that parsed keys would not be the byte store described below, which
+never interprets what it stores. Exact-key ownership is the strongest rule
+available to something that does not read its own keys.
 Range arithmetic needs to know what a key means, so it belongs to the domain,
 which is why the overlap test lives in `snippets/cube_mesh.h` next to the layout
 it understands. `stash_list` reports every key with its owner, which is all a
