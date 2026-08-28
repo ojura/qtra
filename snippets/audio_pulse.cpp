@@ -80,9 +80,10 @@ constexpr int ringSegments = 72;
 
 constexpr int maxShells = 4;
 constexpr float shellFrom = 1.06F;
-// At 1.95 the shell's half-diagonal reached 2.43 against a 2.24 half-frame,
-// so it left the frame at full inflation. A clipped wireframe reads as a cage
-// around the scene rather than as a skin the cube shed.
+// At full inflation the shell's half-diagonal is shellTo * cubeBaseScale *
+// sqrt(3), which is 2.12 against a 2.24 half-frame, so a shell finishes inside
+// the frame. One clipped by the frame edge reads as a cage around the scene
+// rather than as a skin the cube shed.
 constexpr float shellTo = 1.70F;
 
 constexpr int particleCount = 320;
@@ -269,8 +270,9 @@ struct VizState {
 
     std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
 
-    // What was driving the cube before this took over, so release puts back
-    // whatever it displaced rather than assuming that was the builtin.
+    // The step function and label this one displaced. Release puts them back,
+    // so a dispatch patch that was already driving the cube goes on driving it
+    // afterwards.
     CubeStepFunctionV1 previousStep = nullptr;
     QString previousLabel;
 
@@ -588,11 +590,10 @@ void buildSpectrumRing(std::vector<Vertex>& out,
         // of the ring is amber and the treble end ice, matching what an onset
         // from that part of the spectrum will throw.
         const QVector3D colour = ambientTemperature(position);
-        // Held deliberately dim. This is a continuous signal, and continuous
-        // signals that compete with the onsets leave nothing looking sharp.
-        // Barely flashes. This is the largest continuous element on screen and
-        // the brief's split puts the beat on the events, not on everything at
-        // once; at 2.4x the whole rig blinked and stole the shell's moment.
+        // Held dim, and barely flashing. This is the largest continuous element
+        // on screen, and the beat belongs to the events: a rig that brightens on
+        // every onset competes with the shell being born and leaves nothing on
+        // screen looking sharp.
         const float alpha = std::clamp(0.10F + 0.90F * shaped, 0.0F, 1.0F)
             * (1.0F + 0.20F * std::min(flash, 1.0F)) * 0.38F;
 
@@ -781,14 +782,14 @@ void advance(VizState& state,
         slot->radius = 0.6F;
         slot->life = 1.0F;
         slot->strength = std::clamp(0.45F + 0.55F * frame.kickStrength, 0.3F, 1.5F);
-        // Clamped against the beat interval the same way a shell is. Left at a
-        // fixed 1.18 s, two or three rings were alive at all times at 128 bpm
-        // and amber stopped meaning "a kick just happened".
+        // Clamped against the beat interval the same way a shell is, so a ring
+        // is gone by about the time the next kick lands. Amber means "a kick
+        // just happened" only while one ring at a time is showing it.
         const float interval = frame.bpm > 20.0F ? 60.0F / frame.bpm : 0.8F;
         slot->decayRate = std::clamp(1.0F / (0.9F * interval), 1.0F, 2.6F);
-        // Speed follows from the decay so every ring dies at about the same
-        // radius. Set independently, the hardest kicks crossed the frame edge
-        // while still bright enough to read as a live event.
+        // Speed follows from the decay, so a ring reaches much the same radius
+        // whatever the tempo and fades out before the frame edge instead of
+        // crossing it while still bright enough to read as a live event.
         const float deathRadius = 1.85F + 0.30F * std::clamp(frame.kickStrength, 0.0F, 1.5F);
         slot->speed = (deathRadius - slot->radius) * slot->decayRate;
     }
@@ -818,13 +819,13 @@ void advance(VizState& state,
         // would answer it a second time and teach the eye that the shapes are
         // decoration.
         //
-        // The test is whether a kick actually fired, not whether the centroid
-        // looks low. Routing on the centroid silenced a whole class of onset:
-        // a tom or a bass stab sits above the 30-170 Hz kick band but below the
-        // 360 Hz the centroid threshold worked out to, so it was refused a
-        // shell and never earned a ring either, and nothing was drawn for it at
-        // all. The window covers a kick landing an analysis hop either side of
-        // the beat, which happens often enough at 94 hops a second.
+        // The test is whether a kick fired, because a fired kick is exactly what
+        // draws the other shape. Where the energy sits answers a different
+        // question: an onset can be low and still miss the 30-170 Hz kick band,
+        // a tom or a bass stab being the usual case, and that onset needs its
+        // shell or nothing is drawn for it at all. The window covers a kick
+        // landing an analysis hop either side of the beat, which happens often
+        // enough at 94 hops a second.
         if (state.clock - state.lastKickAt > 0.07F) {
             // Oldest slot wins, so a dense passage replaces the shell nearest
             // to finishing rather than refusing to show the new one.
@@ -1113,9 +1114,9 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
 
     seedParticles(*state);
 
-    // Whatever is driving the cube now, so release restores that rather than
-    // assuming it was the builtin. A dispatch patch loaded before this one is
-    // otherwise silently replaced by the builtin when this lets go.
+    // Whatever is driving the cube now, recorded so release can restore it. A
+    // dispatch patch already installed here keeps the cube once this module
+    // lets go.
     state->previousStep = cube->m_stepFunction.load(std::memory_order_acquire);
     state->previousLabel = cube->m_activePatch;
 

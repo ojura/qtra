@@ -446,9 +446,10 @@ private:
 
         frame.flux = flux;
 
-        // About 1.5 s of history. At half that, a strong beat inflates the mean
-        // it is measured against and suppresses the next half second, which is a
-        // second refractory period nobody asked for and drops real off-beats.
+        // About 1.5 s of history. The window has to be long enough that one
+        // strong beat does not noticeably lift the mean it is measured against,
+        // because a lifted mean suppresses the onsets just after it and drops
+        // real off-beats.
         m_fluxHistory.push_back(flux);
         if (m_fluxHistory.size() > 144) {
             m_fluxHistory.pop_front();

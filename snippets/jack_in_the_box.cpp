@@ -501,12 +501,12 @@ void drawJackInTheBox(CubeWidget* cube)
 // Needs the widget's OpenGL context to be current.
 bool installJack(CubeWidget* cube, const int openFace, const RuntimeAgentHostV1* host, QString& error)
 {
-    // No list of sibling snippets to switch off first. This used to name the
-    // other mesh replacements by their menu action, which meant every snippet
-    // had to know every other one, could never account for a snippet written
-    // later, and grew as the square of their number. Whether this region is
-    // already taken is now a question about records, asked below, and it is
-    // answerable about a module this one has never heard of.
+    // No list of sibling snippets to switch off first. Whether this region is
+    // already taken is a question about records, asked below, and it is
+    // answerable about a module this one has never heard of. Naming the other
+    // mesh replacements by their menu action would mean every snippet knowing
+    // every other one, growing as the square of their number, and still not
+    // accounting for a snippet written later.
 
     auto* state = new JackState();
     state->owner = QOpenGLContext::currentContext();

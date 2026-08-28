@@ -17,17 +17,16 @@ extern "C" {
 // an existing call changes what it can return or what a return value means. The
 // loader rejects any module that does not match exactly.
 //
-// Shape is the obvious half: a module built against an older layout would read
-// fields the host never wrote. The second half is less obvious and was learned
-// here. stash_put gained a refusal for an entry owned by another snippet, and
-// every caller written before that ignored the return, so they carried on as if
-// the deposit had happened. Nothing about the struct changed, and a module
-// compiled against the older header would still link, run, and be wrong. A
-// contract is as much a part of this interface as a layout.
+// Both halves matter. A module compiled against a different layout reads fields
+// at offsets the host never wrote. A module compiled against a different meaning
+// links, runs, and is still wrong: a caller that ignores the refusal stash_put
+// returns for an entry owned by another snippet carries on as though its deposit
+// happened. What a call promises is as much a part of this interface as the
+// shape of the structs.
 //
 // This is a prototype under active development: there is no compatibility path
-// and none is wanted. A refused load is worse than nothing only if you have
-// never watched a module quietly act on a promise the host stopped making.
+// and none is wanted. A refused load fails where the caller can see it, and a
+// mismatched one fails somewhere inside the process.
 inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0003'0000u;
 
 enum RuntimeAgentLogLevelV1 : std::int32_t {
@@ -165,9 +164,9 @@ struct RuntimeAgentSnippetV1 {
     // an error a program can act on rather than a payload nobody checked.
     //
     // A null release means this module declares it has nothing to undo, and is
-    // the only way to declare that: a descriptor built against an older layout
-    // is refused at load rather than read as releaseless. It is a real answer,
-    // not a placeholder: a one-shot probe genuinely installs nothing.
+    // the only way to declare that: a descriptor whose version does not match is
+    // refused at load rather than read as releaseless. It is a real answer, not
+    // a placeholder: a one-shot probe genuinely installs nothing.
     //
     // It does not mean the module is safe. Nothing can distinguish "nothing to
     // release" from "the author forgot", so the defences at install time still

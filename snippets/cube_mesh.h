@@ -10,11 +10,11 @@
 // Two different questions live here, and they are answered in two different
 // ways on purpose.
 //
-// Who owns a region, answered by the records further down. That used to be
-// read out of the vertex values, which is in-band signalling: zeros are a
-// legal vertex value, so the check had to reason about which legal data
-// happened to look like a message, could only be done a whole face at a time,
-// and made a six-vertex displacement invisible to a thirty-six-vertex one's
+// Who owns a region, answered by the records further down. Reading ownership
+// out of the vertex values instead would be in-band signalling: zeros are a
+// legal vertex value, so such a check has to reason about which legal data
+// happens to look like a message, can only work a whole face at a time, and
+// leaves a six-vertex displacement invisible to a thirty-six-vertex one's
 // guard. A claim says it directly and overlap is arithmetic, so the two sizes
 // compare without either having to guess the other's granularity.
 //
@@ -92,8 +92,8 @@ inline bool anyFaceCollapsed(const std::vector<float>& vertices)
 //
 // A claim outlives its module only in one way, and it is not the obvious one.
 // The stash lives in this process, so a crash takes the claims, the bytes and
-// the displaced buffer together and the next process starts clean; that was
-// checked with unsafe.crash rather than assumed. What does persist is a claim
+// the displaced buffer together and the next process starts clean, which
+// unsafe.crash verifies. What does persist is a claim
 // whose module never released successfully: a release that could not recover
 // the originals keeps its claim deliberately, and one that is simply never
 // called keeps it by default.

@@ -23,9 +23,8 @@ class QOpenGLDebugLogger;
 
 // The layout of the vertex buffer initializeGeometry() fills: six faces, each
 // six vertices, each a position and a colour. Snippets that displace part of
-// that buffer depend on these numbers exactly, and were restating them: five
-// spellings across three files, none of them next to the array they described.
-// The widget owns the buffer, so it states the layout.
+// that buffer depend on these numbers exactly. The widget owns the buffer, so
+// it states the layout, and every caller reads the one copy.
 inline constexpr int cubeFaceCount = 6;
 inline constexpr int cubeVerticesPerFace = 6;
 inline constexpr int cubeFloatsPerVertex = 6;
@@ -35,16 +34,14 @@ inline constexpr int cubeVertexFloats = cubeFaceCount * cubeFloatsPerFace;
 
 // The camera distance and the axis the cube turns about, which paintGL() builds
 // its view and model matrices from. Anything drawing into the same frame has to
-// reproduce both exactly or it lands somewhere else, and the scene snippets were
-// copying them: the distance written out in six files and the axis in five,
-// none of them next to the matrices they had to match. The widget owns the
-// frame, so it states the frame.
+// reproduce both exactly or it lands somewhere else. The widget owns the frame,
+// so it states the frame, and every caller reads the one copy.
 //
-// Plain numbers rather than a QVector3D, matching the layout constants above.
-// What is being stated is the data, and each caller builds whatever vector type
-// it wants at the point it needs one. The axis is not normalized here because
-// QMatrix4x4::rotate normalizes it; a caller building a basis of its own does
-// that where the reason for wanting a unit vector is visible.
+// Plain numbers, matching the layout constants above: what is stated is the
+// data, and each caller builds whatever vector type it needs where it needs one.
+// The axis is not normalized here because QMatrix4x4::rotate normalizes it. A
+// caller building a basis of its own normalizes where the reason for wanting a
+// unit vector is visible.
 inline constexpr float cubeViewDistance = 5.4F;
 inline constexpr std::array<float, 3> cubeSpinAxis{0.72F, 1.0F, 0.31F};
 
