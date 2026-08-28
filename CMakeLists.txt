@@ -68,6 +68,8 @@ if(BUILD_QT_APP)
         src/agent/object_registry.cpp
         src/agent/module_manager.h
         src/agent/module_manager.cpp
+        src/agent/build_id.h
+        src/agent/build_id.cpp
         src/agent/runtime_agent.h
         src/agent/runtime_agent.cpp
     )
@@ -99,6 +101,48 @@ if(BUILD_QT_APP)
         DEMO_BUILD_TYPE="$<CONFIG>"
     )
 
+    # Stamping modules with the build they were compiled against.
+    #
+    # The build id is a property of the linked executable, so the header that
+    # carries it is written after the link and the modules are compiled with it
+    # force-included. Force-included rather than included by name, so a module
+    # is stamped whatever order its own includes are in and without any snippet
+    # source mentioning it.
+    #
+    # The dependency runs one way. Modules depend on the executable, and the
+    # executable depends on no module.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    set(RUNTIME_AGENT_BUILD_ID_HEADER "${CMAKE_BINARY_DIR}/generated/runtime_agent_build_id.h")
+    if(Python3_Interpreter_FOUND)
+        add_custom_command(
+            OUTPUT ${RUNTIME_AGENT_BUILD_ID_HEADER}
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/read_build_id.py
+                    $<TARGET_FILE:qt_runtime_cube>
+                    --header ${RUNTIME_AGENT_BUILD_ID_HEADER}
+            DEPENDS qt_runtime_cube ${CMAKE_SOURCE_DIR}/tools/read_build_id.py
+            COMMENT "Reading the host build id that modules are stamped with"
+            VERBATIM
+        )
+        add_custom_target(runtime_agent_build_id DEPENDS ${RUNTIME_AGENT_BUILD_ID_HEADER})
+        set(RUNTIME_AGENT_CAN_STAMP TRUE)
+    else()
+        message(STATUS
+            "Python3 interpreter not found; modules will be built without a host build id "
+            "and the agent will report them as unstamped")
+        set(RUNTIME_AGENT_CAN_STAMP FALSE)
+    endif()
+
+    # Modules that reach into application types need this. A module built
+    # without it loads and is reported as unstamped.
+    function(stamp_with_host_build_id target)
+        if(NOT RUNTIME_AGENT_CAN_STAMP)
+            return()
+        endif()
+        add_dependencies(${target} runtime_agent_build_id)
+        target_include_directories(${target} PRIVATE ${CMAKE_BINARY_DIR}/generated)
+        target_compile_options(${target} PRIVATE -include runtime_agent_build_id.h)
+    endfunction()
+
     add_library(agent_snippet_inspect MODULE snippets/inspect_cube.cpp)
     target_include_directories(agent_snippet_inspect PRIVATE include src)
     target_link_libraries(agent_snippet_inspect PRIVATE
@@ -106,6 +150,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_inspect PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_inspect PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_inspect")
+    stamp_with_host_build_id(agent_snippet_inspect)
 
     add_library(agent_snippet_observer MODULE snippets/install_observer.cpp)
     target_include_directories(agent_snippet_observer PRIVATE include src)
@@ -114,6 +159,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_observer PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_observer PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_observer")
+    stamp_with_host_build_id(agent_snippet_observer)
 
     add_library(agent_snippet_render_probe MODULE snippets/render_probe.cpp)
     target_include_directories(agent_snippet_render_probe PRIVATE include src)
@@ -122,6 +168,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_render_probe PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_render_probe PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_render_probe")
+    stamp_with_host_build_id(agent_snippet_render_probe)
 
     # Scene modifications. Each one installs a persistent draw hook on
     # CubeWidget::frameRendered and accepts {"restore": true} to take itself
@@ -134,6 +181,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_orbit_sphere PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_orbit_sphere PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_orbit_sphere")
+    stamp_with_host_build_id(agent_snippet_orbit_sphere)
 
     add_library(agent_snippet_catmull_clark MODULE snippets/catmull_clark_cube.cpp)
     target_include_directories(agent_snippet_catmull_clark PRIVATE include src)
@@ -142,6 +190,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_catmull_clark PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_catmull_clark PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_catmull_clark")
+    stamp_with_host_build_id(agent_snippet_catmull_clark)
 
     add_library(agent_snippet_mobius_ring MODULE snippets/mobius_ring.cpp)
     target_include_directories(agent_snippet_mobius_ring PRIVATE include src)
@@ -150,6 +199,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_mobius_ring PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_mobius_ring PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_mobius_ring")
+    stamp_with_host_build_id(agent_snippet_mobius_ring)
 
     add_library(agent_snippet_pillow_cube MODULE snippets/pillow_cube.cpp)
     target_include_directories(agent_snippet_pillow_cube PRIVATE include src)
@@ -158,6 +208,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_pillow_cube PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_pillow_cube PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_pillow_cube")
+    stamp_with_host_build_id(agent_snippet_pillow_cube)
 
     # Reads the system output mix through PulseAudio, so it is built only where
     # that library is present. Everything else here needs no audio stack, and a
@@ -176,6 +227,7 @@ if(BUILD_QT_APP)
         target_compile_options(agent_snippet_audio_pulse PRIVATE -fno-access-control)
         set_target_properties(agent_snippet_audio_pulse PROPERTIES
             PREFIX "" OUTPUT_NAME "agent_snippet_audio_pulse")
+        stamp_with_host_build_id(agent_snippet_audio_pulse)
     else()
         message(STATUS "libpulse-simple not found; skipping agent_snippet_audio_pulse")
     endif()
@@ -187,6 +239,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_about_signature PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_about_signature PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_about_signature")
+    stamp_with_host_build_id(agent_snippet_about_signature)
 
     add_library(agent_snippet_jack_in_the_box MODULE snippets/jack_in_the_box.cpp)
     target_include_directories(agent_snippet_jack_in_the_box PRIVATE include src)
@@ -195,6 +248,7 @@ if(BUILD_QT_APP)
     target_compile_options(agent_snippet_jack_in_the_box PRIVATE -fno-access-control)
     set_target_properties(agent_snippet_jack_in_the_box PROPERTIES
         PREFIX "" OUTPUT_NAME "agent_snippet_jack_in_the_box")
+    stamp_with_host_build_id(agent_snippet_jack_in_the_box)
 endif()
 
 if(BUILD_TESTING)

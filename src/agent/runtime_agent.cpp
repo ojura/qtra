@@ -1,5 +1,6 @@
 #include "agent/runtime_agent.h"
 
+#include "agent/build_id.h"
 #include "cube_widget.h"
 #include "main_window.h"
 
@@ -816,11 +817,21 @@ void RuntimeAgent::handleSnippetLoad(QLocalSocket* socket,
         sendError(socket, requestId, QStringLiteral("load_failed"), error);
         return;
     }
-    const QJsonObject result{
+    QJsonObject result{
         {QStringLiteral("moduleId"), QString::number(module->id)},
         {QStringLiteral("name"), module->name},
         {QStringLiteral("path"), module->path},
+        {QStringLiteral("stamped"), module->stamped},
     };
+    if (!module->stamped) {
+        // A stamped module was checked against this build. This one reports no
+        // build id, so nothing has been checked, and a caller deciding whether
+        // to run it should be told.
+        result.insert(
+            QStringLiteral("note"),
+            QStringLiteral("this module reports no host build id, so whether its offsets "
+                           "into application types describe this process is unchecked"));
+    }
     publishEvent(QStringLiteral("snippet.loaded"), result);
     sendSuccess(socket, requestId, result);
     return;
@@ -1324,6 +1335,9 @@ QJsonObject RuntimeAgent::hello() const
         {QStringLiteral("sourceDir"), QStringLiteral(DEMO_SOURCE_DIR)},
         {QStringLiteral("buildDir"), QStringLiteral(DEMO_BUILD_DIR)},
         {QStringLiteral("buildType"), QStringLiteral(DEMO_BUILD_TYPE)},
+        // The build a module has to have been compiled against for the loader
+        // to accept it, readable without loading anything.
+        {QStringLiteral("buildId"), runtime_agent::hostBuildId()},
         {QStringLiteral("cube"), cubeState()},
         {QStringLiteral("patch"), m_modules.patchStatus()},
     };

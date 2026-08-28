@@ -1,7 +1,9 @@
 #include "agent/module_manager.h"
 
+#include "agent/build_id.h"
 #include "cube_widget.h"
 
+#include <QDebug>
 #include <QFile>
 #include <QFileInfo>
 #include <QThread>
@@ -28,6 +30,47 @@ void closeFailedModule(void* handle)
     if (handle != nullptr) {
         (void)::dlclose(handle);
     }
+}
+
+// Whether the module was compiled against the build of the host that is running.
+//
+// A module compiled with -fno-access-control addresses application members at
+// offsets fixed when it was compiled. Those offsets describe the source it saw,
+// so a module built from different source describes a different object than the
+// one it is handed. The build id is the coarsest possible answer to that
+// question and the right one: any change to any translation unit produces a new
+// id, and any such change can move a member.
+//
+// A module that reports nothing is accepted. The host cannot tell one built
+// outside this build system from a stale one, and refusing both would rule out
+// toolchains rather than answer the question, so the caller reports it instead.
+bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
+{
+    ::dlerror();
+    auto reportBuildId = reinterpret_cast<const char* (*)()>(
+        ::dlsym(handle, "runtime_agent_target_build_id"));
+    if (reportBuildId == nullptr) {
+        moduleBuildId.clear();
+        return true;
+    }
+
+    const char* reported = reportBuildId();
+    moduleBuildId = reported != nullptr ? QString::fromLatin1(reported) : QString();
+
+    const QString hostBuildId = runtime_agent::hostBuildId();
+    if (hostBuildId.isEmpty() || moduleBuildId.isEmpty()
+        || moduleBuildId == hostBuildId) {
+        return true;
+    }
+
+    error = QStringLiteral(
+                "module was compiled against host build %1, and this process is build %2. "
+                "A module reads application types at offsets fixed when it was compiled, so "
+                "the offsets it holds do not describe this process. Rebuild the module "
+                "against this build, or restart the application from the build the module "
+                "was compiled against.")
+                .arg(moduleBuildId, hostBuildId);
+    return false;
 }
 
 } // namespace
@@ -60,6 +103,14 @@ ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QSt
         return nullptr;
     }
 
+    // Checked before the descriptor, because a module whose offsets do not
+    // describe this process should be refused on that ground and told so.
+    QString moduleBuildId;
+    if (!targetBuildMatches(handle, moduleBuildId, error)) {
+        closeFailedModule(handle);
+        return nullptr;
+    }
+
     ::dlerror();
     auto init = reinterpret_cast<RuntimeAgentSnippetInitV1>(
         ::dlsym(handle, "runtime_agent_snippet_init_v1"));
@@ -87,6 +138,14 @@ ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QSt
     module->kind = Kind::Snippet;
     module->handle = handle;
     module->snippet = descriptor;
+    module->targetBuildId = moduleBuildId;
+    module->stamped = !moduleBuildId.isEmpty();
+    if (!module->stamped) {
+        qWarning().noquote()
+            << "runtime-agent: loaded unstamped module" << absolutePath
+            << "which reports no host build id, so its offsets into application types are"
+            << "unchecked against this process";
+    }
     return insertModule(std::move(module));
 }
 
@@ -102,6 +161,12 @@ ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, Q
     void* handle = ::dlopen(encodedPath.constData(), RTLD_NOW | RTLD_LOCAL);
     if (handle == nullptr) {
         error = dynamicLoaderError(QStringLiteral("dlopen(%1) failed").arg(absolutePath));
+        return nullptr;
+    }
+
+    QString moduleBuildId;
+    if (!targetBuildMatches(handle, moduleBuildId, error)) {
+        closeFailedModule(handle);
         return nullptr;
     }
 
@@ -132,6 +197,8 @@ ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, Q
     module->kind = Kind::CubePatch;
     module->handle = handle;
     module->cubePatch = descriptor;
+    module->targetBuildId = moduleBuildId;
+    module->stamped = !moduleBuildId.isEmpty();
     return insertModule(std::move(module));
 }
 
@@ -286,7 +353,13 @@ QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
         {QStringLiteral("kind"), module.kind == Kind::Snippet
             ? QStringLiteral("snippet") : QStringLiteral("cubePatch")},
         {QStringLiteral("handle"), pointerString(module.handle)},
+        // A stamped module agrees with the running executable, because one that
+        // disagreed was refused. An unstamped one was never checked.
+        {QStringLiteral("stamped"), module.stamped},
     };
+    if (module.stamped) {
+        json.insert(QStringLiteral("targetBuildId"), module.targetBuildId);
+    }
     if (module.kind != Kind::Snippet) {
         return json;
     }

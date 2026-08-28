@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from read_build_id import BuildIdError, read_build_id
+
 
 class BuildOracleError(RuntimeError):
     pass
@@ -42,6 +44,12 @@ _DISCARD_EXACT_FLAGS = {
     "-ftest-coverage",
     "-pg",
 }
+# The build force-includes this into its own module targets. A reconstructed
+# command must not inherit it, because then whether a module carries a build id
+# would depend on which translation unit was named as the context. This tool
+# stamps explicitly instead, so the outcome is the same for every context.
+_BUILD_ID_HEADER = "runtime_agent_build_id.h"
+
 _PROFILE_PREFIXES = (
     "-flto",
     "-fno-lto",
@@ -153,6 +161,10 @@ def derive_shared_object_command(
         if token in {"-o", *_DEPENDENCY_VALUE_FLAGS}:
             index += 2
             continue
+        if (token == "-include" and index + 1 < len(tokens)
+                and Path(tokens[index + 1]).name == _BUILD_ID_HEADER):
+            index += 2
+            continue
         if token.startswith("-o") and token != "-openmp" and len(token) > 2:
             index += 1
             continue
@@ -187,6 +199,31 @@ def derive_shared_object_command(
     return retained
 
 
+def find_host_binary(compile_db: Path, explicit: Path | None) -> Path | None:
+    """Locate the executable whose build id a module should be stamped with.
+
+    A module compiled here reaches into the application's types, so it belongs
+    to one build of that application. The compile database sits in the build
+    directory that produced the executable, so that is where to look.
+    """
+    if explicit is not None:
+        if not explicit.is_file():
+            raise BuildOracleError(f"host binary is not a regular file: {explicit}")
+        return explicit
+    candidate = compile_db.parent / "qt_runtime_cube"
+    return candidate if candidate.is_file() else None
+
+
+def build_id_definition(host_binary: Path | None) -> str | None:
+    """The define that makes the module report the build it was compiled for."""
+    if host_binary is None:
+        return None
+    try:
+        return f'-DRUNTIME_AGENT_TARGET_BUILD_ID="{read_build_id(host_binary)}"'
+    except BuildIdError as exc:
+        raise BuildOracleError(str(exc)) from exc
+
+
 def command_record(entry: CompileEntry, command: Sequence[str], output: Path) -> dict[str, Any]:
     return {
         "contextFile": str(entry.file),
@@ -214,6 +251,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not add GCC -fno-access-control",
     )
     parser.add_argument("--extra", action="append", default=[], help="extra compiler/linker token")
+    parser.add_argument(
+        "--host-binary",
+        type=Path,
+        help="executable whose build id stamps the module; "
+             "defaults to qt_runtime_cube beside the compile database",
+    )
+    parser.add_argument(
+        "--no-build-id",
+        action="store_true",
+        help="do not stamp the module, which the agent then reports as unstamped",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--compact", action="store_true")
     return parser
@@ -222,20 +270,34 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        entries = load_database(args.compile_db.resolve())
+        compile_db = args.compile_db.resolve()
+        entries = load_database(compile_db)
         entry = select_entry(entries, args.context)
         source = args.source.resolve()
         output = args.output.resolve()
         if not source.is_file():
             raise BuildOracleError(f"source is not a regular file: {source}")
         output.parent.mkdir(parents=True, exist_ok=True)
+
+        extra = list(args.extra)
+        if not args.no_build_id:
+            definition = build_id_definition(find_host_binary(compile_db, args.host_binary))
+            if definition is not None:
+                extra.append(definition)
+            else:
+                print(
+                    "compile_snippet: no host binary found beside the compile database, so "
+                    "the module carries no build id and the agent will report it as unstamped",
+                    file=sys.stderr,
+                )
+
         command = derive_shared_object_command(
             entry,
             source,
             output,
             optimization=args.optimization,
             disable_access_control=not args.respect_access_control,
-            extra=args.extra,
+            extra=extra,
         )
         record = command_record(entry, command, output)
         print(

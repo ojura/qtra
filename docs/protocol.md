@@ -127,6 +127,11 @@ Errors worth handling separately:
 | `no_recorded_executor` | it has never been run at all, so it installed nothing |
 | `recorded_target_gone` | the object it last ran on no longer exists |
 
+`module.list` reports `stamped` for every module, and `targetBuildId` for a
+stamped one. A module compiled against a different build of the host is refused
+at load, so a stamped module here agrees with the running executable and an
+unstamped one was never checked. `hello` reports the running `buildId`.
+
 `module.list` reports `declaresRelease`, `hadSuccessfulRun`, `hadAttemptedRun`,
 and the recorded `lastExecutor`/`lastTarget` for each snippet module. A module
 that has attempted a run without completing one also reports

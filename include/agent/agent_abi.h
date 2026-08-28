@@ -29,6 +29,35 @@ extern "C" {
 // mismatched one fails somewhere inside the process.
 inline constexpr std::uint32_t RUNTIME_AGENT_ABI_V1 = 0x0003'0000u;
 
+// The version above covers this interface. It says nothing about the
+// application's own types, which a module compiled with -fno-access-control
+// reads directly: cube->m_angleDegrees and its neighbours resolve to byte
+// offsets when the module is compiled, and nothing versions the class they
+// address. A module built from source that moved those members loads into an
+// older process, passes every check above, and writes to whatever now lives at
+// the offsets it remembers.
+//
+// So a module also carries the build id of the host it was compiled against.
+// The agent compares it with the running executable's own and refuses a module
+// that disagrees. The identity is the GNU build id, which the linker emits
+// without the application asking for it, so this costs the target nothing.
+//
+// The build supplies RUNTIME_AGENT_TARGET_BUILD_ID after the executable links.
+// A module compiled without it exports no such symbol and is loaded and
+// reported as unstamped: the host cannot tell one built by other means from a
+// stale one, and refusing both would make this a rule about which toolchain may
+// be used when the question is whether the offsets are right.
+//
+// used, because an inline function the module never calls is one the compiler
+// is free not to emit, and it would then be missing from .dynsym.
+#ifdef RUNTIME_AGENT_TARGET_BUILD_ID
+extern "C" RUNTIME_AGENT_EXPORT __attribute__((used)) inline const char*
+runtime_agent_target_build_id()
+{
+    return RUNTIME_AGENT_TARGET_BUILD_ID;
+}
+#endif
+
 enum RuntimeAgentLogLevelV1 : std::int32_t {
     RUNTIME_AGENT_LOG_DEBUG = 0,
     RUNTIME_AGENT_LOG_INFO = 1,

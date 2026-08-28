@@ -666,6 +666,51 @@ unserved when it fires is drained through `grabFramebuffer()`, which renders
 whatever the compositor is doing. A visible window never reaches it. This lives
 in the widget, so every caller gets it.
 
+### Refusing a module built against a different host
+
+A module compiled with `-fno-access-control` reads application members
+directly, and `cube->m_angleDegrees` becomes a byte offset when that module is
+compiled. The offset describes the source the module saw. Load it into a process
+built from source where that member moved, and it reads and writes whatever now
+lives at that offset. `RUNTIME_AGENT_ABI_V1` says nothing about this, because
+the agent's own interface is what it covers and the application's types are what
+moved.
+
+So each module is stamped with the GNU build id of the executable it was
+compiled against, and the agent compares that with the build id of the running
+executable before the module runs:
+
+| the module reports | what happens |
+|---|---|
+| the running build id | it loads |
+| a different build id | it is refused and closed, and the error names both ids |
+| nothing | it loads, and the result reports that its offsets are unchecked |
+
+An unstamped module loads because the host cannot tell one built outside this
+build system from one built before the last change to the application. Refusing
+both would decide which toolchains may produce a module, and the question here
+is whether the offsets are right. `module.list` reports `stamped` for every
+module, `snippet.load` says so in its result, and the agent logs a warning.
+
+The identity is the note the linker already writes, so the application carries
+no code for this. CMake reads it after the executable links, writes it into a
+generated header, and force-includes that header into every module target, which
+is why no snippet source mentions it. `tools/compile_snippet.py` stamps the same
+value by reading the executable beside the compile database, so `jit_snippet.py`
+and `jit_patch.py` produce stamped modules too. Pass `--no-build-id` for one
+that is deliberately unstamped.
+
+The check is as coarse as the build id, which changes whenever any translation
+unit does. A module is therefore refused after a change that moved nothing it
+reads. Rebuilding it is the answer, and an edit that is reverted produces the
+original id again, so the modules built before it are accepted once more.
+
+`hello` reports the running `buildId`, which is what a module has to match:
+
+```bash
+python3 tools/agentctl.py call hello
+```
+
 ### Declaring how a module lets go
 
 A snippet that installs something lasting can declare how to undo it, as a
@@ -902,6 +947,10 @@ when a failure occurs.
 - An optimized-away source variable may have no recoverable runtime value. The
   agent can use DWARF and assembly where possible, or hot-install a rebuilt probe
   that explicitly materializes the value on the next execution.
+- A matching build id says a module was compiled against the running build. It
+  says nothing about whether the module is correct: the offsets it holds
+  describe the types this process has, and what it does through them is its own
+  business.
 
 ## Repository map
 
@@ -911,6 +960,7 @@ include/demo/cube_step_abi.h    patch function/descriptor ABI
 src/agent/runtime_agent.*       JSON socket and command dispatch
 src/agent/object_registry.*     QObject IDs and reflection
 src/agent/module_manager.*      dlopen, snippet, dispatch, entry patch state
+src/agent/build_id.*            the running executable's GNU build id
 src/agent/entry_hotpatch.*      Linux/x86-64 entry rewriter
 src/cube_widget.*               OpenGL cube and execution seams
 snippets/                       native runtime code examples and scene modifications
@@ -926,6 +976,7 @@ tests/                          hotpatch_selftest.cpp and the Python protocol,
                                 agentctl and compile-oracle tests
 tools/agentctl.py               protocol client, including snippet reload
 tools/compile_snippet.py        compile-database build oracle
+tools/read_build_id.py          reads the GNU build id modules are stamped with
 tools/jit_snippet.py            compile + load + execute pipeline
 tools/jit_patch.py              compile + load + hot-activate pipeline
 tools/smoke_test.py             end-to-end GUI test

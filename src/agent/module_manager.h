@@ -70,6 +70,15 @@ public:
         QPointer<QObject> lastAttemptedTarget;
         bool hadAttemptedRun = false;
 
+        // The host build this module reports having been compiled against, and
+        // whether it reported one at all. A module that reports a different
+        // build never gets this far, so a stamped module here agrees with the
+        // running executable. An unstamped one was built without the define the
+        // build supplies, and nothing about its offsets into application types
+        // has been checked.
+        QString targetBuildId;
+        bool stamped = false;
+
         // Whether the module carries a release entry point. The loader refuses
         // any descriptor whose layout does not match this host exactly, so the
         // field is always present and only its value is in question.
