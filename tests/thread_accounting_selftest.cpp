@@ -43,6 +43,34 @@ void spin()
     }
 }
 
+// Waits for a count of started threads to arrive, or gives up and says so.
+//
+// Every one of these waits was an unbounded yield loop. When a count never
+// arrived the process did not fail, it spun: one was found still running after
+// three hours, holding four cores and outliving the binary it had been built
+// from. A test that cannot proceed should say so and let the run go red, not
+// occupy the machine until somebody goes looking.
+//
+// Giving up records a failure and returns, rather than exiting early, because
+// the shutdown after each of these clears the flag the workers watch. Leaving
+// by another route would strand them in their loops and hang the join instead.
+bool started(const std::atomic<int>& counter, const int expected, const char* what)
+{
+    constexpr std::chrono::seconds limit{30};
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (counter.load(std::memory_order_acquire) < expected) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::printf("  FAIL %s: %d of %d started within %lld seconds\n", what,
+                        counter.load(std::memory_order_acquire), expected,
+                        static_cast<long long>(limit.count()));
+            ++failures;
+            return false;
+        }
+        std::this_thread::yield();
+    }
+    return true;
+}
+
 // Somewhere in this process's text that no thread is executing, for the case
 // where the answer should be yes.
 void quietCorner() {}
@@ -176,9 +204,7 @@ int main()
         for (int i = 0; i < workers; ++i) {
             threads.emplace_back(&spin);
         }
-        while (spinning.load(std::memory_order_acquire) < workers) {
-            std::this_thread::yield();
-        }
+        (void)started(spinning, workers, "four spinning threads");
 
         std::string error;
         std::vector<int> tids;
@@ -238,9 +264,7 @@ int main()
         keepTight.store(true, std::memory_order_release);
         tight.store(0, std::memory_order_release);
         std::thread worker(&tightSpin);
-        while (tight.load(std::memory_order_acquire) < 1) {
-            std::this_thread::yield();
-        }
+        (void)started(tight, 1, "the tight spinner");
 
         const runtime_agent::WriteRegion body{reinterpret_cast<void*>(&tightSpin), 256};
 
@@ -280,9 +304,7 @@ int main()
         keepSpinning.store(true, std::memory_order_release);
         spinning.store(0, std::memory_order_release);
         std::thread worker(&spin);
-        while (spinning.load(std::memory_order_acquire) < 1) {
-            std::this_thread::yield();
-        }
+        (void)started(spinning, 1, "the spinner");
 
         std::string error;
         runtime_agent::StopTheWorldQuiescer quiescer;
@@ -310,13 +332,9 @@ int main()
         keepSpinning.store(true, std::memory_order_release);
         spinning.store(0, std::memory_order_release);
         std::thread first(&spin);
-        while (spinning.load(std::memory_order_acquire) < 1) {
-            std::this_thread::yield();
-        }
+        (void)started(spinning, 1, "the spinner");
         std::thread second(&spin);
-        while (spinning.load(std::memory_order_acquire) < 2) {
-            std::this_thread::yield();
-        }
+        (void)started(spinning, 2, "both spinners");
 
         std::vector<int> tids;
         std::string listing;
@@ -360,9 +378,7 @@ int main()
         keepBlocking.store(true, std::memory_order_release);
         blocking.store(0, std::memory_order_release);
         std::thread worker(&blockAndWait);
-        while (blocking.load(std::memory_order_acquire) < 1) {
-            std::this_thread::yield();
-        }
+        (void)started(blocking, 1, "the thread with the parking signal blocked");
 
         std::vector<int> tids;
         std::string listing;
@@ -403,9 +419,7 @@ int main()
         for (int i = 0; i < workers; ++i) {
             threads.emplace_back(&spin);
         }
-        while (spinning.load(std::memory_order_acquire) < workers) {
-            std::this_thread::yield();
-        }
+        (void)started(spinning, workers, "four spinning threads");
 
         // Observed and not assumed. A deadline of nothing times out unless
         // every thread arrives between the last signal being sent and the first
@@ -463,9 +477,7 @@ int main()
         keepSpinning.store(true, std::memory_order_release);
         spinning.store(0, std::memory_order_release);
         std::thread worker(&spin);
-        while (spinning.load(std::memory_order_acquire) < 1) {
-            std::this_thread::yield();
-        }
+        (void)started(spinning, 1, "the spinner");
 
         runtime_agent::StopTheWorldQuiescer first;
         std::string error;
