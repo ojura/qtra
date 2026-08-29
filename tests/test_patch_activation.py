@@ -120,6 +120,10 @@ class Agent:
             return client
         raise RuntimeError("the demo never accepted a connection")
 
+    def call(self, command: str, **params: object) -> dict:
+        """The whole reply, for a test whose subject is the refusal."""
+        return self.connection.exchange(command, params)
+
     def ok(self, command: str, **params: object) -> dict:
         try:
             return self.connection.request(command, params)

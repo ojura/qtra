@@ -100,14 +100,20 @@ class AgentClient:
             self._socket.close()
             self._socket = None
 
-    def request(
+    def exchange(
         self,
         command: str,
         params: Mapping[str, Any] | None = None,
         *,
         timeout: float | None = None,
         on_event: EventHandler | None = None,
-    ) -> Any:
+    ) -> JsonObject:
+        """The whole reply, a refusal included.
+
+        For callers whose subject is the refusal: which code came back and what
+        the message said. request() below is the same exchange for callers that
+        want the result and would rather a refusal raised.
+        """
         request_id = self._next_id
         self._next_id += 1
         self.send({"id": request_id, "command": command, "params": dict(params or {})})
@@ -124,12 +130,23 @@ class AgentClient:
                 raise ProtocolError(
                     f"unexpected response id {message.get('id')!r}; expected {request_id!r}"
                 )
-            if not message.get("ok", False):
-                error = message.get("error") or {}
-                code = error.get("code", "agent_error")
-                text = error.get("message", "agent command failed")
-                raise ProtocolError(f"{code}: {text}", code)
-            return message.get("result")
+            return message
+
+    def request(
+        self,
+        command: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+        on_event: EventHandler | None = None,
+    ) -> Any:
+        message = self.exchange(command, params, timeout=timeout, on_event=on_event)
+        if not message.get("ok", False):
+            error = message.get("error") or {}
+            code = error.get("code", "agent_error")
+            text = error.get("message", "agent command failed")
+            raise ProtocolError(f"{code}: {text}", code)
+        return message.get("result")
 
     def subscribe(
         self,
