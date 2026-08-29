@@ -7,12 +7,14 @@
 #include <QAction>
 #include <QCoreApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QLocalSocket>
 #include <QMetaMethod>
 #include <QMetaProperty>
+#include <QSocketNotifier>
 #include <QThread>
 #include <QTimer>
 
@@ -21,14 +23,17 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstring>
 #include <exception>
 #include <mutex>
 #include <utility>
 
 #include <dlfcn.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace {
@@ -239,9 +244,6 @@ RuntimeAgent::RuntimeAgent(QObject* root,
     m_monotonicClock.start();
     registerCoreCommands();
 
-    connect(&m_server, &QLocalServer::newConnection,
-            this, &RuntimeAgent::acceptConnections);
-
     if (root == nullptr) {
         return;
     }
@@ -263,18 +265,23 @@ RuntimeAgent::~RuntimeAgent()
     // already entered has stopped using agent-owned state.
     m_callbackLifetime->stop();
 
-    // The client sockets are children of m_server, so ~QLocalServer deletes
-    // them, and that runs after m_clients has already been destroyed. Each
-    // socket aborts on the way out and emits disconnected, which would reach
-    // removeClient. Cut those connections while every member is still alive.
+    // Accepted sockets are QObject children of this agent, so QObject deletes
+    // them after the agent's members. Each socket aborts on the way out and emits
+    // disconnected, which would reach removeClient after m_clients was gone. Cut
+    // those connections while every member is still alive.
     for (auto iterator = m_clients.cbegin(); iterator != m_clients.cend(); ++iterator) {
         disconnect(iterator.key(), nullptr, this, nullptr);
     }
     m_clients.clear();
 
+    m_listenNotifier.reset();
+    if (m_listenSocket >= 0) {
+        (void)::close(m_listenSocket);
+        m_listenSocket = -1;
+    }
+
     const std::optional<BoundSocketIdentity> boundSocket = m_boundSocket;
     m_boundSocket.reset();
-    m_server.close();
 
     // The pathname may have been unlinked and reused while this server was
     // alive. Remove it only when it still names the socket this instance bound.
@@ -285,10 +292,10 @@ RuntimeAgent::~RuntimeAgent()
             const bool sameSocket = S_ISSOCK(current.st_mode)
                 && static_cast<std::uint64_t>(current.st_dev) == boundSocket->device
                 && static_cast<std::uint64_t>(current.st_ino) == boundSocket->inode;
-            if (sameSocket && !QLocalServer::removeServer(boundSocket->path)) {
+            if (sameSocket && ::unlink(encodedPath.constData()) != 0) {
                 qWarning().noquote()
                     << "runtime-agent: could not remove its socket during shutdown:"
-                    << boundSocket->path;
+                    << failedCall("unlink(runtime-agent socket)", errno);
             }
         } else if (errno != ENOENT) {
             qWarning().noquote()
@@ -304,11 +311,32 @@ bool RuntimeAgent::start(QString& error)
         error = QStringLiteral("socket name is empty");
         return false;
     }
+    if (!QFileInfo(m_socketName).isAbsolute()) {
+        error = QStringLiteral("runtime-agent socket path must be absolute: %1")
+                    .arg(m_socketName);
+        return false;
+    }
+    if (m_listenSocket >= 0) {
+        error = QStringLiteral("runtime agent is already listening on %1").arg(m_socketName);
+        return false;
+    }
+
+    const QByteArray encodedSocketName = QFile::encodeName(m_socketName);
+    if (encodedSocketName.contains('\0')) {
+        error = QStringLiteral("runtime-agent socket path contains a null byte");
+        return false;
+    }
+
+    sockaddr_un address {};
+    if (encodedSocketName.size() >= static_cast<qsizetype>(sizeof(address.sun_path))) {
+        error = QStringLiteral("runtime-agent socket path is too long for AF_UNIX: %1")
+                    .arg(m_socketName);
+        return false;
+    }
 
     // Only a filesystem socket that definitively has no listener may be removed.
     // A timeout or resource error says nothing about whether a live server owns
-    // it, and QLocalServer::removeServer would also unlink a regular file.
-    const QByteArray encodedSocketName = QFile::encodeName(m_socketName);
+    // it, and unlinking a non-socket would destroy somebody else's file.
     struct stat endpointStatus {};
     if (::lstat(encodedSocketName.constData(), &endpointStatus) == 0) {
         if (!S_ISSOCK(endpointStatus.st_mode)) {
@@ -333,41 +361,83 @@ bool RuntimeAgent::start(QString& error)
                         .arg(probe.errorString());
             return false;
         }
-        if (!QLocalServer::removeServer(m_socketName)) {
-            error = QStringLiteral("could not remove stale runtime-agent socket: %1")
-                        .arg(m_socketName);
+        if (::unlink(encodedSocketName.constData()) != 0) {
+            error = failedCall("unlink(stale runtime-agent socket)", errno);
             return false;
         }
     } else if (errno != ENOENT) {
         error = failedCall("lstat(runtime-agent socket)", errno);
         return false;
     }
-    m_server.setSocketOptions(QLocalServer::UserAccessOption);
-    if (!m_server.listen(m_socketName)) {
-        error = m_server.errorString();
+
+    int listener = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (listener < 0) {
+        error = failedCall("socket(AF_UNIX)", errno);
         return false;
     }
 
-    const QString boundPath = m_server.fullServerName();
-    const QByteArray encodedBoundPath = QFile::encodeName(boundPath);
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path,
+                encodedSocketName.constData(),
+                static_cast<std::size_t>(encodedSocketName.size()));
+    const socklen_t addressLength = static_cast<socklen_t>(
+        offsetof(sockaddr_un, sun_path) + encodedSocketName.size() + 1);
+    if (::bind(listener, reinterpret_cast<const sockaddr*>(&address), addressLength) != 0) {
+        error = failedCall("bind(runtime-agent socket)", errno);
+        (void)::close(listener);
+        return false;
+    }
+
     struct stat boundStatus {};
-    if (::lstat(encodedBoundPath.constData(), &boundStatus) != 0) {
+    if (::lstat(encodedSocketName.constData(), &boundStatus) != 0) {
         error = failedCall("lstat(bound runtime-agent socket)", errno);
-        m_server.close();
+        (void)::close(listener);
         return false;
     }
     if (!S_ISSOCK(boundStatus.st_mode)) {
-        error = QStringLiteral(
-                    "the runtime-agent socket path changed before its identity was recorded: %1")
-                    .arg(boundPath);
-        m_server.close();
+        error = QStringLiteral("the bound runtime-agent path is not a Unix socket");
+        (void)::close(listener);
         return false;
     }
-    m_boundSocket = BoundSocketIdentity{
-        boundPath,
+    const BoundSocketIdentity identity{
+        m_socketName,
         static_cast<std::uint64_t>(boundStatus.st_dev),
         static_cast<std::uint64_t>(boundStatus.st_ino),
     };
+
+    const auto removeBoundSocket = [&] {
+        struct stat current {};
+        if (::lstat(encodedSocketName.constData(), &current) == 0
+            && S_ISSOCK(current.st_mode)
+            && static_cast<std::uint64_t>(current.st_dev) == identity.device
+            && static_cast<std::uint64_t>(current.st_ino) == identity.inode) {
+            (void)::unlink(encodedSocketName.constData());
+        }
+    };
+
+    // The node exists before listen, so setting 0600 here admits no connection
+    // under broader umask-derived permissions.
+    if (::chmod(encodedSocketName.constData(), S_IRUSR | S_IWUSR) != 0) {
+        error = failedCall("chmod(runtime-agent socket)", errno);
+        (void)::close(listener);
+        removeBoundSocket();
+        return false;
+    }
+    constexpr int listenBacklog = 50;
+    if (::listen(listener, listenBacklog) != 0) {
+        error = failedCall("listen(runtime-agent socket)", errno);
+        (void)::close(listener);
+        removeBoundSocket();
+        return false;
+    }
+
+    auto notifier = std::make_unique<QSocketNotifier>(listener, QSocketNotifier::Read);
+    connect(notifier.get(), &QSocketNotifier::activated,
+            this, [this] { acceptConnections(); });
+
+    m_listenSocket = listener;
+    m_listenNotifier = std::move(notifier);
+    m_boundSocket = identity;
     return true;
 }
 
@@ -416,11 +486,31 @@ void RuntimeAgent::publishEvent(const QString& name, const QJsonObject& data)
 
 void RuntimeAgent::acceptConnections()
 {
-    while (m_server.hasPendingConnections()) {
-        QLocalSocket* socket = m_server.nextPendingConnection();
-        if (socket == nullptr) {
+    while (m_listenSocket >= 0) {
+        const int accepted = ::accept4(
+            m_listenSocket, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+        if (accepted < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                qWarning().noquote()
+                    << "runtime-agent:" << failedCall("accept4", errno);
+            }
+            return;
+        }
+
+        auto* socket = new QLocalSocket(this);
+        if (!socket->setSocketDescriptor(
+                accepted, QLocalSocket::ConnectedState, QIODevice::ReadWrite)) {
+            qWarning().noquote()
+                << "runtime-agent: could not adopt an accepted local socket:"
+                << socket->errorString();
+            (void)::close(accepted);
+            delete socket;
             continue;
         }
+
         m_clients.insert(socket, ClientState{});
         connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
             readClient(socket);

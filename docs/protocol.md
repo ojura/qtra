@@ -1,6 +1,6 @@
 # Runtime-agent protocol
 
-Transport: newline-delimited UTF-8 JSON over a user-only `QLocalServer` Unix
+Transport: newline-delimited UTF-8 JSON over a user-only filesystem `AF_UNIX`
 socket. The implementation limits a pending request buffer to 1 MiB.
 
 ## Message forms

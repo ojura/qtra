@@ -7,7 +7,6 @@
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonObject>
-#include <QLocalServer>
 #include <QMap>
 #include <QMutex>
 #include <QObject>
@@ -23,6 +22,7 @@
 #include <vector>
 
 class QLocalSocket;
+class QSocketNotifier;
 
 class RuntimeAgent final : public QObject {
     Q_OBJECT
@@ -379,7 +379,8 @@ private:
     std::shared_ptr<CallbackLifetime> m_callbackLifetime;
 
     QString m_socketName;
-    QLocalServer m_server;
+    int m_listenSocket = -1;
+    std::unique_ptr<QSocketNotifier> m_listenNotifier;
     std::optional<BoundSocketIdentity> m_boundSocket;
     QHash<QLocalSocket*, ClientState> m_clients;
     std::vector<CommandEntry> m_commands;
