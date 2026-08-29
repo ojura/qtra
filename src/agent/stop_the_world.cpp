@@ -226,9 +226,6 @@ class ParkedLease final : public QuiescenceLease {
 public:
     ~ParkedLease() override
     {
-        // Parked handlers may leave, and this stop stops being the one anybody
-        // belongs to, so a signal delivered from here on is recognised as late
-        // and returns without parking.
         // Parked handlers may leave, and this stop stops being one anybody can
         // belong to, so a signal delivered from here on returns without
         // parking.

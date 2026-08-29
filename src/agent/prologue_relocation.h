@@ -28,8 +28,8 @@
 // it sits means something different once moved. RIP-relative operands are
 // adjusted, since the copy's address is known and the correction is arithmetic.
 // Relative branches are refused: a branch out of a prologue is rare, and one
-// whose destination is inside the range being taken is the next hazard wearing
-// different clothes.
+// whose destination is inside the range being taken is refused by the sweep
+// below in any case.
 //
 // Something jumping back into the bytes taken. A loop later in the function
 // whose target is inside the overwritten range lands in the middle of the

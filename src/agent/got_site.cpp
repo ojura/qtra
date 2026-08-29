@@ -193,17 +193,15 @@ int visit(dl_phdr_info* object, std::size_t, void* opaque)
     return 1;
 }
 
-// Writes one pointer into a mapping the loader left read-only.
-//
-// The page is made writable, the store happens, and the permission goes back.
-// Failing to put it back leaves the slot correct and the page writable, which
-// is worth saying: the call is redirected as asked, and something that should
-// be read-only is not.
 // Writes one pointer, leaving the mapping as the loader had it.
 //
 // Making it writable is skipped where it already is, which is the common case
 // for a lazily bound object and the case where forcing it back to read-only
 // would break the next lazy resolution on that page.
+//
+// Failing to put the permission back leaves the slot correct and the page
+// writable, and says so: the call is redirected as asked, and something that
+// should not be writable is.
 bool storeIntoSlot(void** slot, void* value, const int protection, std::string& error)
 {
     const auto pageSize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));

@@ -49,7 +49,7 @@
 // replaces what is there and hands back what it replaced, so by the time a
 // conflict is visible the application's handler has already been displaced, and
 // putting it back can overwrite a third one installed in between. Nothing here
-// can close that, so it is stated instead of papered over.
+// can close that, so it is stated as a requirement instead of checked.
 //
 // What is done: an application handler found this way is put back immediately
 // and the stop refuses. That covers a process which set its handlers up before
