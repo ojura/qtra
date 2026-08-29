@@ -34,6 +34,8 @@ python3 -m py_compile "$root"/tools/*.py
 bash -n "$root"/scripts/*.sh
 
 if (( with_gui )); then
-  python3 "$root/tools/smoke_test.py" \
-    --build-dir "$root/build/release" --keep-runtime
+  # No --keep-runtime. A failed run keeps its capture and log and says where
+  # they are; passing that flag kept them on success too, so every validation
+  # run since the first commit has left a directory in /tmp. There were 63.
+  python3 "$root/tools/smoke_test.py" --build-dir "$root/build/release"
 fi
