@@ -93,19 +93,49 @@ bool PatchManager::installGateway(const PatchSite& site, Quiescer& quiescer, std
     return false;
 }
 
-bool PatchManager::activate(const PatchSite& site,
-                            void* replacement,
-                            Quiescer& quiescer,
-                            std::string& error)
+const PatchManager::Generation* PatchManager::newestLive() const noexcept
+{
+    for (auto it = m_generations.rbegin(); it != m_generations.rend(); ++it) {
+        if (!it->released) {
+            return &(*it);
+        }
+    }
+    return nullptr;
+}
+
+void PatchManager::publishSelection() noexcept
+{
+    if (m_record == nullptr) {
+        return;
+    }
+    const Generation* live = newestLive();
+    void* target = live != nullptr ? live->replacement : m_record->continuation;
+    m_record->slot.store(target, std::memory_order_release);
+    m_record->selected = target;
+    m_state = live != nullptr ? PatchState::GatewayReplacement : PatchState::GatewayOriginal;
+}
+
+void* PatchManager::continuation() const noexcept
+{
+    return m_record != nullptr ? m_record->continuation : nullptr;
+}
+
+bool PatchManager::bind(const PatchSite& site,
+                        void* replacement,
+                        const std::uint64_t owner,
+                        Quiescer& quiescer,
+                        PatchBinding& binding,
+                        std::string& error)
 {
     error.clear();
+    binding = PatchBinding{};
     if (!site.valid() || replacement == nullptr) {
         error = "a resolved site and a replacement are both required";
         return false;
     }
     if (m_state == PatchState::RecoveryRequired) {
-        error = "an earlier install left the entry rewritten and execution stopped; roll "
-                "back before selecting anything else";
+        error = "an earlier install left the entry rewritten and execution stopped; recover "
+                "before binding anything else";
         return false;
     }
     if (!replacementIsReachable(site, replacement, error)) {
@@ -123,53 +153,88 @@ bool PatchManager::activate(const PatchSite& site,
         return false;
     }
 
-    // The gateway exists, so selecting is a store. No lease: a thread reading
-    // the slot gets the continuation or the replacement, and both are code it
-    // may correctly run.
-    m_record->slot.store(replacement, std::memory_order_release);
-    m_record->selected = replacement;
-    m_state = PatchState::GatewayReplacement;
+    // What this binding displaces, which is what a replacement chains to.
+    const Generation* displaced = newestLive();
+    binding.previous = displaced != nullptr ? displaced->replacement : m_record->continuation;
+    binding.original = m_record->continuation;
+    binding.id = m_nextBinding++;
+
+    m_generations.push_back(Generation{binding.id, owner, replacement, false});
+    publishSelection();
     return true;
 }
 
-bool PatchManager::rollback(std::string& error)
+bool PatchManager::unbind(const std::uint64_t id, const std::uint64_t owner, std::string& error)
 {
     error.clear();
-
-    if (m_state == PatchState::RecoveryRequired) {
-        // The one way back to an entry holding its own bytes. The lease that
-        // stopped execution when the install failed is still held.
-        const TextWriteResult write = writeText(m_record->site.patchAddress,
-                                                m_original.data(),
-                                                m_original.size(),
-                                                m_protect);
-        if (!write.changedBytes()) {
-            error = write.error;
+    for (Generation& generation : m_generations) {
+        if (generation.id != id) {
+            continue;
+        }
+        if (generation.owner != owner) {
+            error = "this binding belongs to another module";
             return false;
         }
-
-        m_state = PatchState::NoGateway;
-        m_record.reset();
-        m_original.clear();
-        m_recoveryLease.reset();
-        if (!write.complete()) {
-            error = write.error;
-            error += "; the entry was restored, so execution may reach it again, and the "
-                     "mapping is left writable";
+        if (generation.released) {
+            error = "this binding was already released";
             return false;
         }
+        generation.released = true;
+        // Recomputed from what is still live, so releasing something that was
+        // not selected leaves the slot alone and releasing the selected one
+        // falls back to the newest predecessor rather than to the original.
+        publishSelection();
         return true;
     }
+    error = "no such binding";
+    return false;
+}
 
-    if (m_state != PatchState::GatewayReplacement) {
-        error = "no replacement is selected";
+std::size_t PatchManager::unbindOwner(const std::uint64_t owner)
+{
+    std::size_t released = 0;
+    for (Generation& generation : m_generations) {
+        if (generation.owner == owner && !generation.released) {
+            generation.released = true;
+            ++released;
+        }
+    }
+    if (released != 0) {
+        publishSelection();
+    }
+    return released;
+}
+
+bool PatchManager::recover(std::string& error)
+{
+    error.clear();
+    if (m_state != PatchState::RecoveryRequired) {
+        error = "there is nothing to recover";
         return false;
     }
 
-    // A store, like selecting one. The gateway stays where it is.
-    m_record->slot.store(m_record->continuation, std::memory_order_release);
-    m_record->selected = m_record->continuation;
-    m_state = PatchState::GatewayOriginal;
+    // The one path that writes code outside installation. The lease that
+    // stopped execution when the install failed is still held.
+    const TextWriteResult write = writeText(m_record->site.patchAddress,
+                                            m_original.data(),
+                                            m_original.size(),
+                                            m_protect);
+    if (!write.changedBytes()) {
+        error = write.error;
+        return false;
+    }
+
+    m_state = PatchState::NoGateway;
+    m_record.reset();
+    m_original.clear();
+    m_generations.clear();
+    m_recoveryLease.reset();
+    if (!write.complete()) {
+        error = write.error;
+        error += "; the entry was restored, so execution may reach it again, and the "
+                 "mapping is left writable";
+        return false;
+    }
     return true;
 }
 
@@ -180,8 +245,16 @@ PatchStatus PatchManager::status() const
     if (m_record != nullptr) {
         status.site = m_record->site;
         status.slotAddress = &m_record->slot;
-        status.replacement =
-            m_state == PatchState::GatewayReplacement ? m_record->selected : nullptr;
+        if (const Generation* live = newestLive(); live != nullptr) {
+            status.replacement = live->replacement;
+            status.selectedBinding = live->id;
+            status.selectedOwner = live->owner;
+        }
+    }
+    for (const Generation& generation : m_generations) {
+        if (!generation.released) {
+            ++status.liveBindings;
+        }
     }
     return status;
 }

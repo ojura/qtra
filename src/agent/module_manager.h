@@ -115,4 +115,7 @@ private:
     runtime_agent::PatchManager m_patches;
     quint64 m_activeDispatchModule = 0;
     quint64 m_activeEntryModule = 0;
+    // The protocol's own binding, so releasing it goes through the same
+    // generation rule a snippet's binding does.
+    std::uint64_t m_entryBinding = 0;
 };

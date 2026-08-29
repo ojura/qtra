@@ -156,9 +156,10 @@ int main(int argc, char** argv)
     // runs, and the saved bytes are the only way back to a pristine entry.
     {
         runtime_agent::PatchManager faulted;
+        runtime_agent::PatchBinding binding;
         faulted.setProtectFunction(&failRestoreProtect);
         std::string faultError;
-        if (faulted.activate(site, reinterpret_cast<void*>(patch->step), quiet, faultError)) {
+        if (faulted.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, binding, faultError)) {
             std::cerr << "activate reported success although the mapping was never restored\n";
             return 12;
         }
@@ -173,7 +174,7 @@ int main(int argc, char** argv)
         }
 
         faulted.setProtectFunction(nullptr);
-        if (!faulted.rollback(faultError)) {
+        if (!faulted.recover(faultError)) {
             std::cerr << "recovery failed: " << faultError << '\n';
             return 15;
         }
@@ -185,8 +186,9 @@ int main(int argc, char** argv)
 
     // The gateway proper.
     runtime_agent::PatchManager patches;
+    runtime_agent::PatchBinding first;
     std::string error;
-    if (!patches.activate(site, reinterpret_cast<void*>(patch->step), quiet, error)) {
+    if (!patches.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, first, error)) {
         std::cerr << "activate failed: " << error << '\n';
         return 17;
     }
@@ -208,8 +210,8 @@ int main(int argc, char** argv)
 
     // The gateway stays. Rolling back is a store naming the continuation, and
     // the original runs again through an entry that is still rewritten.
-    if (!patches.rollback(error)) {
-        std::cerr << "rollback failed: " << error << '\n';
+    if (!patches.unbind(first.id, 1, error)) {
+        std::cerr << "unbind failed: " << error << '\n';
         return 21;
     }
     if (patches.state() != runtime_agent::PatchState::GatewayOriginal) {
@@ -224,18 +226,47 @@ int main(int argc, char** argv)
     }
 
     // Selecting again writes no code at all.
-    if (!patches.activate(site, reinterpret_cast<void*>(patch->step), quiet, error)) {
-        std::cerr << "reselecting failed: " << error << '\n';
+    runtime_agent::PatchBinding second;
+    if (!patches.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, second, error)) {
+        std::cerr << "rebinding failed: " << error << '\n';
         return 24;
+    }
+    if (second.original != first.original) {
+        std::cerr << "the continuation moved between bindings\n";
+        return 27;
     }
     const CubeStepOutput again = cube_step_builtin(&input);
     if (approximatelyEqual(again.angle_degrees, before.angle_degrees)) {
         std::cerr << "reselecting did not reach the replacement\n";
         return 25;
     }
-    if (!patches.rollback(error)) {
-        std::cerr << "final rollback failed: " << error << '\n';
+    // A binding released out of order leaves the slot alone, because it is not
+    // the one selected.
+    runtime_agent::PatchBinding third;
+    if (!patches.bind(site, reinterpret_cast<void*>(patch->step), 2, quiet, third, error)) {
+        std::cerr << "third bind failed: " << error << '\n';
         return 26;
+    }
+    if (!patches.unbind(second.id, 1, error)) {
+        std::cerr << "releasing a binding underneath the selected one failed: " << error << '\n';
+        return 28;
+    }
+    if (patches.status().selectedBinding != third.id) {
+        std::cerr << "releasing an unselected binding changed the selection\n";
+        return 29;
+    }
+    std::string ownership;
+    if (patches.unbind(third.id, 1, ownership) || ownership.empty()) {
+        std::cerr << "a module released a binding it does not own\n";
+        return 30;
+    }
+    if (!patches.unbind(third.id, 2, error)) {
+        std::cerr << "final unbind failed: " << error << '\n';
+        return 31;
+    }
+    if (patches.state() != runtime_agent::PatchState::GatewayOriginal) {
+        std::cerr << "releasing the last binding did not return to the original\n";
+        return 32;
     }
 
     std::cout << "PASS: " << patch->name_utf8

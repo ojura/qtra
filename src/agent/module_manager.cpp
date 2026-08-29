@@ -307,22 +307,32 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
         return false;
     }
 
+    // A site is a measurement of untouched NOPs, so it can only be taken before
+    // anything is installed. Once a gateway exists the manager's record is the
+    // answer, and resolving again would find the gateway's own bytes and refuse.
     runtime_agent::PatchSite site;
     std::string nativeError;
-    if (!runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&cube_step_builtin),
-                                         runtime_agent::patchAreaBytes,
-                                         site,
-                                         nativeError)) {
-        error = QString::fromStdString(nativeError);
-        return false;
+    if (const auto recorded = m_patches.status().site; recorded.has_value()) {
+        site = *recorded;
+    } else {
+        if (!runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&cube_step_builtin),
+                                             runtime_agent::patchAreaBytes,
+                                             site,
+                                             nativeError)) {
+            error = QString::fromStdString(nativeError);
+            return false;
+        }
+        site.name = QStringLiteral("cube_step_builtin").toStdString();
     }
-    site.name = QStringLiteral("cube_step_builtin").toStdString();
 
     CubeTimerQuiescer quiescer(m_cube);
-    if (!m_patches.activate(site,
-                            reinterpret_cast<void*>(loaded->cubePatch->step),
-                            quiescer,
-                            nativeError)) {
+    runtime_agent::PatchBinding binding;
+    if (!m_patches.bind(site,
+                        reinterpret_cast<void*>(loaded->cubePatch->step),
+                        id,
+                        quiescer,
+                        binding,
+                        nativeError)) {
         error = QString::fromStdString(nativeError);
         if (m_patches.status().state == runtime_agent::PatchState::RecoveryRequired) {
             // The manager is holding execution stopped. Recording the module
@@ -334,6 +344,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
         return false;
     }
 
+    m_entryBinding = binding.id;
     m_activeEntryModule = id;
     m_cube->setActivePatchLabel(QStringLiteral("entry: %1").arg(loaded->name));
     return true;
@@ -394,12 +405,13 @@ ModuleManager::LoadedModule* ModuleManager::insertModule(std::unique_ptr<LoadedM
 
 bool ModuleManager::resetActivePatch(QString& error)
 {
-    if (m_patches.replacementSelected()) {
+    if (m_entryBinding != 0) {
         std::string nativeError;
-        if (!m_patches.rollback(nativeError)) {
+        if (!m_patches.unbind(m_entryBinding, m_activeEntryModule, nativeError)) {
             error = QString::fromStdString(nativeError);
             return false;
         }
+        m_entryBinding = 0;
     }
 
     m_activeEntryModule = 0;
