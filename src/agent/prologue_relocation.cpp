@@ -1202,6 +1202,21 @@ bool restoreRelocatedPrologue(const RelocatedPrologue& installed,
     const TextWriteResult result =
         writer.write(installed.plan.patchAddress, installed.savedBytes.data(),
                      installed.savedBytes.size());
+
+    // Threads go before anything composes a message, for the reason the check
+    // above gives.
+    lease.reset();
+
+    if (result.changedBytes() && !result.complete()) {
+        // The entry holds the function's own bytes again and the page is
+        // writable. Reporting that as a failure would say the restore did not
+        // happen, and a caller acting on it would put the same bytes back over
+        // themselves or leave the entry described as still redirected.
+        error = result.message()
+            + "; the entry holds the function's own bytes again, and the page it is on is "
+              "still writable, which repairing needs no code write and no stop";
+        return true;
+    }
     if (!result.complete()) {
         error = result.message();
         return false;

@@ -13,7 +13,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <cerrno>
 #include <dlfcn.h>
+#include <sys/mman.h>
 #include <iostream>
 #include <string>
 #include <chrono>
@@ -57,6 +59,27 @@ std::size_t mappedByteCount()
     }
     return total;
 }
+
+// Lets the mapping be made writable and refuses to put it back, which leaves
+// the bytes changed after the write reports that it did not finish.
+int failRestoreProtect(void* address, std::size_t length, int protection)
+{
+    if ((protection & PROT_WRITE) != 0) {
+        return ::mprotect(address, length, protection);
+    }
+    errno = EACCES;
+    return -1;
+}
+
+class FailRestoreWriter final : public runtime_agent::TextWriter {
+public:
+    [[nodiscard]] runtime_agent::TextWriteResult write(void* address,
+                                                       const std::uint8_t* bytes,
+                                                       const std::size_t count) override
+    {
+        return runtime_agent::writeText(address, bytes, count, &failRestoreProtect);
+    }
+};
 
 int replacementMemcpyCalls = 0;
 char gotScratch[64] = {};
@@ -659,6 +682,64 @@ int main(int argc, char** argv)
         if (fixtureAddsOne(10) != 11) {
             std::cerr << "the refused second restore wrote anyway\n";
             return 109;
+        }
+
+        // A restore that puts the bytes back and cannot put the permission
+        // back.
+        //
+        // The entry holds the function's own instructions again, so calling it
+        // runs the original. Reporting that as a failure would say the restore
+        // did not happen, and what is actually left is a page to make read-only
+        // again.
+        why.clear();
+        {
+            runtime_agent::ProloguePlan againPlan;
+            if (!runtime_agent::planPrologueRelocation(
+                    reinterpret_cast<void*>(&fixtureAddsOne), againPlan, why)) {
+                std::cerr << "the fixture could not be planned again: " << why << '\n';
+                return 118;
+            }
+            runtime_agent::RelocatedPrologue partial;
+            if (!runtime_agent::installRelocatedPrologue(
+                    againPlan, reinterpret_cast<void*>(&replacementAddsOne), quiet, *writer,
+                    partial, why)) {
+                std::cerr << "installing again failed: " << why << '\n';
+                return 119;
+            }
+            if (fixtureAddsOne(10) != 1010) {
+                std::cerr << "the reinstalled replacement does not run\n";
+                return 120;
+            }
+
+            FailRestoreWriter awkward;
+            why.clear();
+            const bool restored =
+                runtime_agent::restoreRelocatedPrologue(partial, quiet, awkward, why);
+            if (!restored) {
+                std::cerr << "a restore that changed the bytes reported failure: "
+                          << why << '\n';
+                return 121;
+            }
+            if (why.find("still writable") == std::string::npos) {
+                std::cerr << "it did not say the page was left writable: " << why << '\n';
+                return 122;
+            }
+            if (fixtureAddsOne(10) != 11) {
+                std::cerr << "the bytes were not actually put back\n";
+                return 123;
+            }
+
+            // Put the permission back, so nothing after this runs with writable
+            // text.
+            const std::uint8_t* const entry =
+                static_cast<const std::uint8_t*>(againPlan.patchAddress);
+            std::vector<std::uint8_t> asFound(entry, entry + againPlan.takenBytes);
+            if (!runtime_agent::writeText(againPlan.patchAddress, asFound.data(),
+                                          asFound.size())
+                     .complete()) {
+                std::cerr << "the page could not be made read-only again\n";
+                return 124;
+            }
         }
 
         // An install that maps pages and then refuses gives them back.
