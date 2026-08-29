@@ -18,7 +18,19 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-24.04
+    # Two distributions, because what this project asks of the toolchain is
+    # unusual enough that "it builds on mine" is weak evidence. 24.04 carries
+    # Qt 6.4, which is the floor the README claims, and 26.04 carries whatever
+    # is current. A patcher that reads its own build's DWARF and rewrites entry
+    # bytes is exactly the kind of thing a compiler change breaks quietly.
+    #
+    # 26.04 is a preview image. It can change under us or go away, and if it
+    # does the failure is about the image rather than about this tree.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-26.04]
     timeout-minutes: 60
 
     steps:
@@ -63,7 +75,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: validate-failure
+          name: validate-failure-${{ matrix.runner }}
           path: |
             build/*/Testing/Temporary/LastTest.log
             build/oracle-validation/
