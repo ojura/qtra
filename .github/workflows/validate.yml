@@ -1,0 +1,72 @@
+# What a push has to survive.
+#
+# The same script a developer runs locally, so a green run here means the same
+# thing as a green run there rather than something CI-shaped. It builds the
+# three presets, runs their tests, rebuilds the wobble patch through the build
+# oracle against each one, and drives the application under a private display.
+#
+# The GUI half is not optional. The cube is a QOpenGLWidget and several tests
+# load modules into a running application, so a configuration that skips it
+# reports success for the paths most likely to break.
+
+name: validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo ./scripts/install_deps_debian.sh
+
+      - name: Report the toolchain
+        run: |
+          gcc --version | head -1
+          cmake --version | head -1
+          qmake6 --version 2>/dev/null | tail -1 || dpkg -s qt6-base-dev | grep ^Version
+
+      # Software rendering, because the runner has no GPU. The private display
+      # comes from the test harness itself rather than from a wrapper here, so
+      # it starts and stops the server it owns.
+      - name: Validate
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: ./scripts/validate.sh --with-gui
+
+      # The two presets are only distinct if one of them actually has no branch
+      # protection. A silent regression there leaves the suite green while the
+      # release column stops being a control for the CET one.
+      - name: Check the presets still differ
+        run: |
+          release_notes=$(readelf -n build/release/qt_runtime_cube | grep -c IBT || true)
+          cet_notes=$(readelf -n build/release-cet/qt_runtime_cube | grep -c IBT || true)
+          echo "release IBT notes: ${release_notes}, release-cet: ${cet_notes}"
+          test "${release_notes}" -eq 0
+          test "${cet_notes}" -ge 1
+
+      - name: Check nothing was left running
+        if: always()
+        run: |
+          ! pgrep -x qt_runtime_cube
+          ! pgrep -x Xvfb
+          test -z "$(find /tmp -maxdepth 1 -name 'qt-runtime-agent-smoke-*' -print -quit)"
+
+      - name: Keep the evidence when it fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validate-failure
+          path: |
+            build/*/Testing/Temporary/LastTest.log
+            build/oracle-validation/
+            /tmp/qt-runtime-agent-smoke-*/
+          if-no-files-found: ignore
+          retention-days: 7
