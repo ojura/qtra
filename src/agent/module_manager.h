@@ -145,5 +145,13 @@ private:
     // recovery restores the bytes that write left behind, and the decision
     // covering those bytes is the one taken when they were written. Asking the
     // manifest again would ask about whatever is on disk at that later moment.
+    //
+    // This holds the decision belonging to the write only because both paths
+    // call admits() immediately before the one operation that can leave
+    // recovery required. Admitting in one place and writing in another would
+    // leave this naming an admission that wrote nothing. It is a field of the
+    // manager and its lifetime is the manager's, where what it describes is a
+    // single write; the decision belongs on the record of that write, which is
+    // where the registry split puts it.
     std::optional<runtime_agent::CoverageDecision> m_admitted;
 };
