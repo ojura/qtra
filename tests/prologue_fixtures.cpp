@@ -160,3 +160,18 @@ fixtureCallsThroughARegister:
     ret
 .size fixtureCallsThroughARegister, .-fixtureCallsThroughARegister
 )");
+
+// A symbol that is not a function, for the planner's type check.
+//
+// Exported and sized exactly like the functions above, so it reaches the type
+// check rather than being refused earlier for want of a symbol or a size. Its
+// bytes are an ordinary value, which is the point: decoding them as a prologue
+// would be decoding data.
+asm(R"(
+.data
+.globl fixtureNotAFunction
+.type fixtureNotAFunction, @object
+fixtureNotAFunction:
+    .quad 0x1122334455667788
+.size fixtureNotAFunction, .-fixtureNotAFunction
+)");

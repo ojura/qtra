@@ -642,6 +642,35 @@ bool extentOf(void* const function, const std::uint8_t*& entry, std::size_t& byt
     }
 
     const auto* symbol = static_cast<const ElfW(Sym)*>(symbolPointer);
+
+    // The symbol has to start where the caller pointed, and has to be a
+    // function.
+    //
+    // dladdr reports the nearest symbol at or before an address, not the symbol
+    // containing it. Without this, an address partway into a function is
+    // answered with that function's entry, and everything downstream then plans
+    // against an entry nobody asked for: the sweep measures the wrong body, the
+    // bytes taken come from the wrong place, and the jump is written at the
+    // start of a function the caller did not name. A caller that arrived at the
+    // address by arithmetic, or through an alias that resolved elsewhere, gets a
+    // refusal rather than a patched neighbour.
+    //
+    // The type check is the same argument for data. A pointer into a table sits
+    // after some object symbol, and relocating a prologue there would decode
+    // whatever the bytes happen to be as instructions.
+    if (info.dli_saddr != function) {
+        error = std::string("this address is inside '")
+            + (info.dli_sname != nullptr ? info.dli_sname : "?")
+            + "' rather than at its entry, and what would be patched is that entry and not "
+              "what was asked for";
+        return false;
+    }
+    if (ELF64_ST_TYPE(symbol->st_info) != STT_FUNC) {
+        error = std::string("'") + (info.dli_sname != nullptr ? info.dli_sname : "?")
+            + "' is not a function, so its bytes are not instructions to relocate";
+        return false;
+    }
+
     if (symbol->st_size == 0) {
         error = std::string("the symbol '")
             + (info.dli_sname != nullptr ? info.dli_sname : "?")
@@ -1048,7 +1077,11 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     std::vector<std::uint8_t> written(plan.takenBytes, 0x90U);
     // jmp qword ptr [rip+disp32]. The distance is from the end of this
     // instruction to the word, and the word holds where to go.
-    const auto fromEnd = reinterpret_cast<std::intptr_t>(patchAt + entryJumpBytes);
+    // Formed as an integer, like the two above: patchAt points into the
+    // function being patched, and advancing it past the jump is arithmetic on
+    // an object this program never declared.
+    const auto fromEnd = static_cast<std::intptr_t>(
+        reinterpret_cast<std::uintptr_t>(patchAt) + entryJumpBytes);
     const auto toSlot = reinterpret_cast<std::intptr_t>(selection);
     const std::intptr_t reach = toSlot - fromEnd;
     if (reach > std::numeric_limits<std::int32_t>::max()

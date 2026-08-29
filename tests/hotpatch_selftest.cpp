@@ -361,6 +361,35 @@ int main(int argc, char** argv)
             return 52;
         }
 
+        // An address inside a function is not that function's entry.
+        //
+        // dladdr answers with the nearest symbol at or before an address, so
+        // asking about a byte partway into a function gets that function back
+        // and nothing says the caller pointed elsewhere. Planning on that
+        // answer would sweep the right body, take bytes from the entry, and
+        // write the jump there, none of which is what was asked for. One byte
+        // in is enough to tell the two apart.
+        why.clear();
+        {
+            auto* const inside = reinterpret_cast<std::uint8_t*>(&fixtureAddsOne) + 1;
+            if (runtime_agent::planPrologueRelocation(inside, plan, why)
+                || why.find("rather than at its entry") == std::string::npos) {
+                std::cerr << "an address inside a function was planned as though it were the "
+                             "entry: " << why << '\n';
+                return 106;
+            }
+        }
+
+        // And a data symbol holds no instructions.
+        why.clear();
+        if (runtime_agent::planPrologueRelocation(
+                reinterpret_cast<void*>(&fixtureNotAFunction), plan, why)
+            || why.find("is not a function") == std::string::npos) {
+            std::cerr << "a data symbol was planned as though it held a prologue: "
+                      << why << '\n';
+            return 107;
+        }
+
         // A function that leaves something in r11 among the bytes being moved
         // still returns it.
         //

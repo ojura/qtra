@@ -12,6 +12,10 @@ extern "C" {
 // branches back into them.
 int fixtureAddsOne(int value);
 
+// Not a function. Declared so a test can take its address and ask the planner
+// what it makes of a symbol whose bytes are data.
+extern unsigned long long fixtureNotAFunction;
+
 // Reads a counter through an operand naming its address as a distance from the
 // instruction after it, so the copy has to have that distance corrected.
 int fixtureCounter(void);
