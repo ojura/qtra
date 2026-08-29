@@ -342,7 +342,8 @@ bool decodeInstruction(const std::uint8_t* const at,
         }
         decoded.relativeBranch = true;
         decoded.transfersControl = true;
-        decoded.branchTarget = at + offset + delta;
+        decoded.branchTarget = reinterpret_cast<std::uintptr_t>(at + offset)
+            + static_cast<std::uintptr_t>(delta);
     }
 
     // Anything that hands control somewhere, by whatever means.
@@ -550,8 +551,11 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
     }
 
     // The whole body, for anything jumping back into what would be taken.
-    const std::uint8_t* const takenBegin = patchAt;
-    const std::uint8_t* const takenEnd = patchAt + taken;
+    // As integers, for the same reason the target is: a branch reaching another
+    // function gives an address outside these bytes, and comparing that with
+    // the relational operators on pointers is undefined once it leaves them.
+    const auto takenBegin = reinterpret_cast<std::uintptr_t>(patchAt);
+    const auto takenEnd = takenBegin + taken;
 
     std::size_t offset = 0;
     while (offset < functionBytes) {
@@ -590,7 +594,8 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
             && decoded.branchTarget < takenEnd) {
             std::ostringstream message;
             message << "the instruction at offset " << offset << " branches to offset "
-                    << static_cast<std::size_t>(decoded.branchTarget - entry)
+                    << static_cast<std::size_t>(decoded.branchTarget
+                                                - reinterpret_cast<std::uintptr_t>(entry))
                     << ", which is inside the " << taken
                     << " bytes a jump would be written over. That branch would land in the "
                        "middle of the jump and run whatever the remaining bytes happen to "

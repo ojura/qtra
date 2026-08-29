@@ -31,7 +31,14 @@ constexpr std::size_t maxParked = 1024;
 // nothing and parks nobody.
 std::atomic<unsigned> generation{0};
 std::atomic<unsigned> arrivals{0};
-std::atomic<unsigned> departures{0};
+// How many handlers are executing, counted before anything else they do and
+// uncounted on every way out.
+//
+// This is what a stop can wait for. Waiting for the signals it sent to arrive
+// waits forever when one went to a thread that has the signal blocked: it stays
+// pending until that thread unblocks it, which may be never. A handler that is
+// running will finish.
+std::atomic<unsigned> inside{0};
 std::atomic<bool> released{true};
 std::atomic<bool> arranging{false};
 
@@ -50,6 +57,10 @@ int currentTid() noexcept
 // system call: std::this_thread::yield is not promised to be safe here.
 void parkHandler(int signalNumber, siginfo_t* info, void* contextPointer)
 {
+    // Counted first, before anything is decided, so a controller waiting for
+    // handlers to leave cannot miss one between arriving and being recognised.
+    inside.fetch_add(1, std::memory_order_acq_rel);
+
     // Whose stop this is. si_value carries it, set when the signal was queued.
     const unsigned mine = info != nullptr
         ? static_cast<unsigned>(info->si_value.sival_int)
@@ -59,6 +70,7 @@ void parkHandler(int signalNumber, siginfo_t* info, void* contextPointer)
         // A signal left over from a stop that has finished. Its sender is gone
         // and nobody is counting it.
         (void)signalNumber;
+        inside.fetch_sub(1, std::memory_order_acq_rel);
         return;
     }
 
@@ -82,9 +94,7 @@ void parkHandler(int signalNumber, siginfo_t* info, void* contextPointer)
         (void)::syscall(SYS_sched_yield);
     }
 
-    // Counted on the way out as well as in. A handler still returning is still
-    // inside this stop, and the next one must not begin underneath it.
-    departures.fetch_add(1, std::memory_order_release);
+    inside.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 // The thread ids this process has, read into storage the caller already owns.
@@ -167,18 +177,20 @@ class ParkedLease final : public QuiescenceLease {
 public:
     ~ParkedLease() override
     {
+        // Parked handlers may leave, and this stop stops being the one anybody
+        // belongs to, so a signal delivered from here on is recognised as late
+        // and returns without parking.
         released.store(true, std::memory_order_release);
+        arranging.store(false, std::memory_order_release);
 
-        // Every handler has to be out before the next stop may begin. One still
-        // returning would otherwise be caught by the next generation clearing
-        // released, and park in a stop nobody sent it to.
-        while (departures.load(std::memory_order_acquire) < m_expected) {
+        // Then wait for the handlers actually running, and only those. A signal
+        // sent to a thread that has it blocked stays pending until that thread
+        // unblocks it, which may be never, so waiting for every signal sent to
+        // arrive waits for something that need not happen.
+        while (inside.load(std::memory_order_acquire) != 0U) {
             (void)::syscall(SYS_sched_yield);
         }
-        arranging.store(false, std::memory_order_release);
     }
-
-    unsigned m_expected = 0;
 };
 
 } // namespace
@@ -289,7 +301,6 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
 
     const unsigned mine = generation.fetch_add(1, std::memory_order_acq_rel) + 1;
     arrivals.store(0, std::memory_order_relaxed);
-    departures.store(0, std::memory_order_relaxed);
     nextSlot.store(0, std::memory_order_relaxed);
     released.store(false, std::memory_order_release);
 
@@ -320,7 +331,6 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
                 // read again below, which is where that is answered.
                 continue;
             }
-            lease->m_expected = sent;
             lease.reset();
             error = "a thread could not be signalled, so not every one of them could be "
                     "asked where it stands";
@@ -328,7 +338,6 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         }
         ++sent;
     }
-    lease->m_expected = sent;
     others = sent;
 
     const auto until = std::chrono::steady_clock::now() + m_deadline;
@@ -336,7 +345,6 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         if (std::chrono::steady_clock::now() >= until) {
             // The lease releases whoever did arrive and waits for them to
             // leave, so the abandoned stop does not overlap the next one.
-            lease->m_expected = arrivals.load(std::memory_order_acquire);
             lease.reset();
             error = "not every thread stopped before the deadline. A thread inside a "
                     "blocking call arrives when the call returns, and one that never "

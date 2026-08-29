@@ -115,7 +115,15 @@ struct DecodedInstruction {
     // is different in one way that matters: it returns, so what it threatens is
     // a return address and not an entry, which is why the two are told apart.
     bool unprovableTarget = false;
-    const std::uint8_t* branchTarget = nullptr;
+// As an integer, not a pointer.
+    //
+    // A call reaches another function, so this address is outside the object
+    // the instruction bytes belong to. Forming it by adding to a pointer, and
+    // comparing it against a range with the relational operators, are both
+    // things the language leaves undefined once the result leaves that object.
+    // Nothing has miscompiled here yet and the compiler is under no obligation
+    // to keep it that way.
+    std::uintptr_t branchTarget = 0;
 };
 
 // Reads one instruction. Refuses anything outside the list above.
