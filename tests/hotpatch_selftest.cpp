@@ -460,6 +460,42 @@ int main(int argc, char** argv)
             }
         }
 
+        // Forms that decode to a known length and still must not be moved.
+        //
+        // A length the decoder is sure of does not make an instruction
+        // movable. XBEGIN is the one that matters: it shares its opcode with an
+        // ordinary move, and carries a distance to where the processor goes if
+        // the region aborts, so moving it sends an abort somewhere else.
+        {
+            struct Form {
+                const char* name;
+                std::vector<std::uint8_t> bytes;
+            };
+            const std::vector<Form> immovable{
+                {"xbegin", {0xC7U, 0xF8U, 0x00U, 0x00U, 0x00U, 0x00U}},
+                {"sysret", {0x0FU, 0x07U}},
+                {"ud2", {0x0FU, 0x0BU}},
+                {"hlt", {0xF4U}},
+                {"rsm", {0x0FU, 0xAAU}},
+            };
+            for (const Form& form : immovable) {
+                std::uint8_t buffer[16] = {};
+                std::memcpy(buffer, form.bytes.data(), form.bytes.size());
+                runtime_agent::DecodedInstruction decoded;
+                std::string why;
+                if (!runtime_agent::decodeInstruction(buffer, sizeof(buffer), decoded, why)) {
+                    std::cerr << form.name << " could not be decoded at all: " << why << '\n';
+                    return 77;
+                }
+                if (!decoded.transfersControl && !decoded.relativeBranch) {
+                    std::cerr << form.name
+                              << " decoded as an ordinary instruction, so it would be moved "
+                                 "into a copy where it means something else\n";
+                    return 78;
+                }
+            }
+        }
+
         // A plan that succeeds, and what it says about the site.
         why.clear();
         if (!runtime_agent::planPrologueRelocation(

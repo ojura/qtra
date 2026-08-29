@@ -43,10 +43,9 @@ BINDER = BUILD / "agent_snippet_bind_probe.so"
 
 # Asked at import, before the display exists, so this is whether one can be had.
 CAN_DRAW = bool(
-    os.environ.get("DISPLAY")
-    or os.environ.get("WAYLAND_DISPLAY")
-    or (os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") != "host"
-        and shutil.which("Xvfb") is not None)
+    shutil.which("Xvfb") is not None
+    or (os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host"
+        and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")))
 )
 
 # Where the demo is shown.
@@ -114,11 +113,15 @@ def tearDownModule() -> None:
 
 
 def has_somewhere_to_draw() -> bool:
-    return bool(
-        DISPLAY_FOR_TESTS.number
-        or os.environ.get("DISPLAY")
-        or os.environ.get("WAYLAND_DISPLAY")
-    )
+    """A private display, or the host one only because it was asked for.
+
+    Falling back to the host display when the private one fails to start puts
+    windows on somebody's screen at the moment something has gone wrong, which
+    is the worst time to do it. A failure to start one skips instead.
+    """
+    if os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host":
+        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return DISPLAY_FOR_TESTS.number is not None
 
 
 class Agent:
@@ -132,6 +135,10 @@ class Agent:
         environment = dict(os.environ)
         if DISPLAY_FOR_TESTS.number is not None:
             environment["DISPLAY"] = DISPLAY_FOR_TESTS.number
+            # Qt prefers Wayland where the environment offers it, which would
+            # be the session on somebody's screen, so the choice is made here.
+            environment.pop("WAYLAND_DISPLAY", None)
+            environment["QT_QPA_PLATFORM"] = "xcb"
             # A virtual display has no GPU behind it.
             environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
         self.process = subprocess.Popen(
@@ -140,7 +147,14 @@ class Agent:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        self.connection = self._connect()
+        try:
+            self.connection = self._connect()
+        except BaseException:
+            # The demo is already running. Failing out of the constructor
+            # without this leaves it running, because nothing has been
+            # registered to stop it yet.
+            self.close()
+            raise
         self.next_id = 0
 
     def _connect(self) -> socket.socket:
@@ -180,11 +194,26 @@ class Agent:
         return answer["result"]
 
     def close(self) -> None:
-        try:
-            self.connection.close()
-        finally:
+        """Stops the demo, and is safe to call more than once.
+
+        Asking politely and waiting is not enough on its own: a demo that has
+        wedged stays running, and the next thing to notice is somebody finding
+        it hours later.
+        """
+        connection = getattr(self, "connection", None)
+        if connection is not None:
+            connection.close()
+            self.connection = None
+        if self.process is None:
+            return
+        if self.process.poll() is None:
             self.process.terminate()
-            self.process.wait(10)
+            try:
+                self.process.wait(10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(10)
+        self.process = None
 
 
 @unittest.skipUnless(

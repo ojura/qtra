@@ -309,8 +309,10 @@ bool decodeInstruction(const std::uint8_t* at,
     ++offset;
 
     std::uint8_t modrmReg = 0;
+    std::uint8_t modrmByte = 0;
     if ((form & formModRM) != 0U) {
         const std::uint8_t modrm = at[offset];
+        modrmByte = modrm;
         ++offset;
         const std::uint8_t mod = (modrm >> 6U) & 0x03U;
         modrmReg = (modrm >> 3U) & 0x07U;
@@ -377,6 +379,32 @@ bool decodeInstruction(const std::uint8_t* at,
             : DecodedInstruction::Transfer::Exit;
         decoded.branchTarget = reinterpret_cast<std::uintptr_t>(origin + offset)
             + static_cast<std::uintptr_t>(delta);
+    }
+
+    // XBEGIN, which shares its opcode with an ordinary move and is told apart
+    // by the addressing byte. It carries a distance to the address the
+    // processor goes to if the region aborts, so moving it sends an abort
+    // somewhere else. Marked as a relative branch, which is what it is, and
+    // refused for that.
+    if (!escaped && primaryOpcode == 0xC7U && modrmByte == 0xF8U) {
+        decoded.relativeBranch = true;
+        decoded.transfersControl = true;
+        decoded.transfer = DecodedInstruction::Transfer::Call;
+    }
+
+    // Leaving in a way this cannot copy: a return to a different privilege
+    // level, a resume from system management mode, a deliberate fault, or a
+    // halt. None of them continue into the next instruction, so an opening
+    // containing one never reaches the continuation the copy ends with.
+    if (!escaped && primaryOpcode == 0xF4U) {
+        decoded.transfersControl = true;
+        decoded.transfer = DecodedInstruction::Transfer::Exit;
+    }
+    if (escaped
+        && (primaryOpcode == 0x07U || primaryOpcode == 0x0BU || primaryOpcode == 0xAAU
+            || primaryOpcode == 0xFFU)) {
+        decoded.transfersControl = true;
+        decoded.transfer = DecodedInstruction::Transfer::Exit;
     }
 
     // Anything that hands control somewhere, by whatever means.

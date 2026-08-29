@@ -75,7 +75,12 @@ def main(argv: list[str] | None = None) -> int:
     # shell already has.
     command: list[str]
     on_host = os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host"
-    if not on_host and shutil.which("xvfb-run"):
+    if on_host:
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            print("asked for the host display and there is none", file=sys.stderr)
+            return 2
+        command = [str(app)]
+    elif shutil.which("xvfb-run"):
         command = [
             "xvfb-run",
             "-a",
@@ -83,15 +88,21 @@ def main(argv: list[str] | None = None) -> int:
             "-screen 0 1280x800x24 +extension GLX +render -noreset",
             str(app),
         ]
-    elif os.environ.get("DISPLAY"):
-        command = [str(app)]
     else:
-        print("there is no display and xvfb-run is unavailable", file=sys.stderr)
+        # No falling back to whatever display is around. That would put a window
+        # on somebody's screen at the moment something has gone wrong.
+        print("xvfb-run is unavailable, and using the host display has to be asked for "
+              "with RUNTIME_AGENT_TEST_DISPLAY=host", file=sys.stderr)
         return 2
     command += ["--agent-socket", str(socket_path)]
 
     environment = os.environ.copy()
     environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    if not on_host:
+        # Qt prefers Wayland where the environment offers it, which would be the
+        # session on somebody's screen.
+        environment.pop("WAYLAND_DISPLAY", None)
+        environment["QT_QPA_PLATFORM"] = "xcb"
     log = log_path.open("wb")
     # Its own process group, so shutting down reaches the application and the
     # display server xvfb-run started, and not only the wrapper.
