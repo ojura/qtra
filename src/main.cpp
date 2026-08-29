@@ -1,4 +1,6 @@
+#include "agent/module_manager.h"
 #include "agent/runtime_agent.h"
+#include "cube_protocol.h"
 #include "main_window.h"
 
 #include <QApplication>
@@ -69,10 +71,25 @@ int main(int argc, char** argv)
     }
 
     MainWindow window;
+
+    // Declared before the agent, so it is destroyed after it. Rolling the
+    // active patch back on the way out makes the cube emit, and the events
+    // registered below have the agent as their receiver: with the agent
+    // already gone, Qt has dropped them and that emission reaches nothing.
+    ModuleManager modules(window.cubeWidget());
+
     std::unique_ptr<RuntimeAgent> agent;
     if (!parser.isSet(noAgentOption)) {
         agent = std::make_unique<RuntimeAgent>(
-            &window, window.cubeWidget(), parser.value(socketOption), &application);
+            &window, modules, parser.value(socketOption), &application);
+        // Assembly is this file's job, and this is the line that says which
+        // application the agent is serving. The agent names none of it: the
+        // cube's commands, events, render executor and hello fields are all
+        // registered from here. MainWindow is the wrong place for it, because
+        // then a window would have to know the protocol to be shown.
+        if (!registerCubeProtocol(*agent, *window.cubeWidget(), modules)) {
+            qFatal("the cube's commands collided with names the agent already had");
+        }
         QString error;
         if (!agent->start(error)) {
             qWarning().noquote() << "Runtime agent disabled:" << error;

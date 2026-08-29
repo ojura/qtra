@@ -1252,7 +1252,8 @@ when a failure occurs.
 ```text
 include/agent/agent_abi.h       stable snippet host ABI
 include/demo/cube_step_abi.h    patch function/descriptor ABI
-src/agent/runtime_agent.*       JSON socket and command dispatch
+src/agent/runtime_agent.*       JSON socket, one command table, and dispatch; names
+                                nothing of the application it serves
 src/agent/object_registry.*     QObject IDs and reflection
 src/agent/module_manager.*      dlopen, snippets, module registry, cube adapter
 src/agent/build_id.*            the running executable's GNU build id
@@ -1265,6 +1266,8 @@ src/agent/gateway_record.h      one gateway's slot, never freed
 src/agent/quiescence*.h         when writing an entry is safe, and who says so
 src/agent/coverage_manifest.*   reading the build's decision back at runtime
 tools/analyze_coverage.py       deciding, at build time, whether replacing reaches every call
+src/cube_protocol.*             the cube's commands, events, executor and hello fields,
+                                registered with the agent from main.cpp
 src/cube_widget.*               OpenGL cube and execution seams
 snippets/                       native runtime code examples and scene modifications
 snippets/scene_toggle.h         runtime-added Cube menu entry shared by the scene snippets

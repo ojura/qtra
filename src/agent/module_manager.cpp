@@ -130,7 +130,7 @@ ModuleManager::~ModuleManager()
     // machine code and static storage live in these modules.
 }
 
-ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, QString& error)
+ModuleManager::LoadedModule* ModuleManager::loadEntryPatch(const QString& path, QString& error)
 {
     QString buildId;
     void* handle = m_registry.open(path, buildId, error);

@@ -1,7 +1,6 @@
 #include "agent/runtime_agent.h"
 
 #include "agent/build_id.h"
-#include "cube_widget.h"
 #include "main_window.h"
 
 #include <QAbstractButton>
@@ -112,64 +111,22 @@ QString errnoText(const char* operation)
 } // namespace
 
 RuntimeAgent::RuntimeAgent(MainWindow* window,
-                           CubeWidget* cube,
+                           ModuleManager& modules,
                            QString socketName,
                            QObject* parent)
     : QObject(parent)
     , m_window(window)
-    , m_cube(cube)
+    , m_modules(modules)
     , m_socketName(std::move(socketName))
     , m_registry(window, this)
     , m_unsafeEnabled(qEnvironmentVariableIntValue("QT_RUNTIME_AGENT_UNSAFE") == 1)
-    , m_modules(cube)
 {
     setObjectName(QStringLiteral("runtimeAgent"));
     m_monotonicClock.start();
+    registerCoreCommands();
 
     connect(&m_server, &QLocalServer::newConnection,
             this, &RuntimeAgent::acceptConnections);
-
-    connect(m_cube, &CubeWidget::stateChanged, this, [this] {
-        publishEvent(QStringLiteral("cube.stateChanged"), cubeState());
-    });
-    connect(m_cube, &CubeWidget::frameRendered, this,
-            [this](const qulonglong frame, const float angle) {
-                // High-rate events are deliberately throttled. A real client can
-                // install a native observer snippet when it needs every frame.
-                if ((frame % 60U) == 0U) {
-                    publishEvent(QStringLiteral("cube.frame"), QJsonObject{
-                        {QStringLiteral("frameIndex"), QString::number(frame)},
-                        {QStringLiteral("angleDegrees"), angle},
-                    });
-                }
-            });
-    connect(m_cube, &CubeWidget::activePatchChanged, this, [this](const QString& name) {
-        publishEvent(QStringLiteral("patch.changed"), QJsonObject{
-            {QStringLiteral("name"), name},
-            {QStringLiteral("status"), m_modules.patchStatus()},
-        });
-    });
-    connect(m_cube, &CubeWidget::glInitialized, this, [this] {
-        publishEvent(QStringLiteral("render.glInitialized"), QJsonObject{
-            {QStringLiteral("vendor"), m_cube->glVendor()},
-            {QStringLiteral("renderer"), m_cube->glRenderer()},
-            {QStringLiteral("version"), m_cube->glVersion()},
-        });
-    });
-    connect(m_cube, &CubeWidget::glMessage, this,
-            [this](const QString& message,
-                   const int severity,
-                   const int source,
-                   const int type,
-                   const quint32 id) {
-                publishEvent(QStringLiteral("render.glMessage"), QJsonObject{
-                    {QStringLiteral("message"), message},
-                    {QStringLiteral("severity"), severity},
-                    {QStringLiteral("source"), source},
-                    {QStringLiteral("type"), type},
-                    {QStringLiteral("id"), static_cast<qint64>(id)},
-                });
-            });
 
     connect(m_window, &MainWindow::demoJobStarted, this,
             [this](const qulonglong id, const QString& name) {
@@ -212,9 +169,6 @@ RuntimeAgent::~RuntimeAgent()
     // Qt drops a destroyed receiver's connections in ~QObject, which runs after
     // these members are gone. Anything the members emit on the way out would
     // still reach the lambdas installed in the constructor, so cut those first.
-    if (m_cube != nullptr) {
-        disconnect(m_cube, nullptr, this, nullptr);
-    }
     if (m_window != nullptr) {
         disconnect(m_window, nullptr, this, nullptr);
     }
@@ -378,50 +332,101 @@ void RuntimeAgent::handleLine(QLocalSocket* socket, const QByteArray& line)
     dispatchRequest(socket, requestId, command, parameters);
 }
 
-// One entry per command, and the only place the set is written down. help
-// enumerates this table instead of restating it, so a command cannot be
-// reachable but undiscoverable, or listed with no handler behind it.
-const std::vector<RuntimeAgent::CommandEntry>& RuntimeAgent::commands()
+// One entry per command the core answers itself, and the only place that set is
+// written down. help enumerates the table instead of restating it, so a command
+// cannot be reachable but undiscoverable, or listed with no handler behind it.
+//
+// An application's commands land in the same table through registerCommand, so
+// they answer to the same dispatch and the same two refusals, and help lists
+// them beside these.
+void RuntimeAgent::registerCoreCommands()
 {
-    static const std::vector<CommandEntry> table{
-        {"hello", &RuntimeAgent::handleHello, {}},
-        {"help", &RuntimeAgent::handleHelp, {}},
-        {"cube.state", &RuntimeAgent::handleCubeState, {}},
-        {"cube.pause", &RuntimeAgent::handleCubePause, {}},
-        {"cube.resume", &RuntimeAgent::handleCubeResume, {}},
-        {"cube.reset", &RuntimeAgent::handleCubeReset, {}},
-        {"cube.speed", &RuntimeAgent::handleCubeSpeed, {"degreesPerSecond"}},
-        {"cube.wireframe", &RuntimeAgent::handleCubeWireframe, {"enabled"}},
-        {"cube.capture", &RuntimeAgent::handleCubeCapture, {"path"}},
-        {"object.tree", &RuntimeAgent::handleObjectTree, {"objectName", "id", "maxDepth"}},
-        {"object.list", &RuntimeAgent::handleObjectList, {}},
-        {"object.describe", &RuntimeAgent::handleObjectDescribe, {"objectName", "id", "includeValues"}},
-        {"object.get", &RuntimeAgent::handleObjectGet, {"objectName", "id", "property"}},
-        {"object.set", &RuntimeAgent::handleObjectSet, {"objectName", "id", "property", "value"}},
-        {"object.invoke", &RuntimeAgent::handleObjectInvoke, {"objectName", "id", "method"}},
-        {"action.trigger", &RuntimeAgent::handleActionTrigger, {"objectName", "id"}},
-        {"widget.click", &RuntimeAgent::handleWidgetClick, {"objectName", "id"}},
-        {"event.subscribe", &RuntimeAgent::handleEventSubscribe, {"all", "prefixes"}},
-        {"event.history", &RuntimeAgent::handleEventHistory, {"afterSequence", "limit", "prefixes"}},
-        {"module.list", &RuntimeAgent::handleModuleList, {}},
-        {"snippet.load", &RuntimeAgent::handleSnippetLoad, {"path"}},
-        {"snippet.run", &RuntimeAgent::handleSnippetRun, {"moduleId", "executor", "objectName", "id", "target", "request"}},
-        {"snippet.release", &RuntimeAgent::handleSnippetRelease, {"moduleId", "executor", "objectName", "id", "target", "request"}},
-        {"stash.list", &RuntimeAgent::handleStashList, {}},
-        {"stash.get", &RuntimeAgent::handleStashGet, {"key"}},
-        {"stash.drop", &RuntimeAgent::handleStashDrop, {"key"}},
-        {"patch.load", &RuntimeAgent::handlePatchLoad, {"path"}},
-        {"patch.activate", &RuntimeAgent::handlePatchActivate, {"moduleId", "acceptIncompleteCoverage"}},
-        {"patch.rollback", &RuntimeAgent::handlePatchRollback, {}},
-        {"patch.status", &RuntimeAgent::handlePatchStatus, {}},
-        {"symbol.resolve", &RuntimeAgent::handleSymbolResolve, {"name"}},
-        {"unsafe.status", &RuntimeAgent::handleUnsafeStatus, {}},
-        {"unsafe.memory.read", &RuntimeAgent::handleUnsafeMemoryRead, {"address", "size"}},
-        {"unsafe.memory.write", &RuntimeAgent::handleUnsafeMemoryWrite, {"address", "base64"}},
-        {"unsafe.crash", &RuntimeAgent::handleUnsafeCrash, {}},
-        {"process.quit", &RuntimeAgent::handleProcessQuit, {}},
+    const auto add = [this](const char* name,
+                            QStringList parameters,
+                            void (RuntimeAgent::*handler)(QLocalSocket*,
+                                                          const QJsonValue&,
+                                                          const QJsonObject&)) {
+        const bool added = registerCommand(
+            QString::fromLatin1(name), std::move(parameters),
+            [this, handler](QLocalSocket* socket,
+                            const QJsonValue& requestId,
+                            const QJsonObject& parameters) {
+                (this->*handler)(socket, requestId, parameters);
+            });
+        Q_ASSERT_X(added, "registerCoreCommands", name);
+        Q_UNUSED(added);
     };
-    return table;
+
+    add("hello", {}, &RuntimeAgent::handleHello);
+    add("help", {}, &RuntimeAgent::handleHelp);
+    add("object.tree", {"objectName", "id", "maxDepth"}, &RuntimeAgent::handleObjectTree);
+    add("object.list", {}, &RuntimeAgent::handleObjectList);
+    add("object.describe", {"objectName", "id", "includeValues"}, &RuntimeAgent::handleObjectDescribe);
+    add("object.get", {"objectName", "id", "property"}, &RuntimeAgent::handleObjectGet);
+    add("object.set", {"objectName", "id", "property", "value"}, &RuntimeAgent::handleObjectSet);
+    add("object.invoke", {"objectName", "id", "method"}, &RuntimeAgent::handleObjectInvoke);
+    add("action.trigger", {"objectName", "id"}, &RuntimeAgent::handleActionTrigger);
+    add("widget.click", {"objectName", "id"}, &RuntimeAgent::handleWidgetClick);
+    add("event.subscribe", {"all", "prefixes"}, &RuntimeAgent::handleEventSubscribe);
+    add("event.history", {"afterSequence", "limit", "prefixes"}, &RuntimeAgent::handleEventHistory);
+    add("module.list", {}, &RuntimeAgent::handleModuleList);
+    add("snippet.load", {"path"}, &RuntimeAgent::handleSnippetLoad);
+    add("snippet.run", {"moduleId", "executor", "objectName", "id", "target", "request"}, &RuntimeAgent::handleSnippetRun);
+    add("snippet.release", {"moduleId", "executor", "objectName", "id", "target", "request"}, &RuntimeAgent::handleSnippetRelease);
+    add("stash.list", {}, &RuntimeAgent::handleStashList);
+    add("stash.get", {"key"}, &RuntimeAgent::handleStashGet);
+    add("stash.drop", {"key"}, &RuntimeAgent::handleStashDrop);
+    add("patch.load", {"path"}, &RuntimeAgent::handlePatchLoad);
+    add("patch.activate", {"moduleId", "acceptIncompleteCoverage"}, &RuntimeAgent::handlePatchActivate);
+    add("patch.rollback", {}, &RuntimeAgent::handlePatchRollback);
+    add("patch.status", {}, &RuntimeAgent::handlePatchStatus);
+    add("symbol.resolve", {"name"}, &RuntimeAgent::handleSymbolResolve);
+    add("unsafe.status", {}, &RuntimeAgent::handleUnsafeStatus);
+    add("unsafe.memory.read", {"address", "size"}, &RuntimeAgent::handleUnsafeMemoryRead);
+    add("unsafe.memory.write", {"address", "base64"}, &RuntimeAgent::handleUnsafeMemoryWrite);
+    add("unsafe.crash", {}, &RuntimeAgent::handleUnsafeCrash);
+    add("process.quit", {}, &RuntimeAgent::handleProcessQuit);
+}
+
+bool RuntimeAgent::registerCommand(QString name,
+                                   QStringList parameters,
+                                   CommandHandler handler)
+{
+    if (name.isEmpty() || !handler) {
+        return false;
+    }
+    const bool taken = std::any_of(m_commands.begin(), m_commands.end(),
+                                   [&name](const CommandEntry& entry) {
+                                       return entry.name == name;
+                                   });
+    if (taken) {
+        return false;
+    }
+    m_commands.push_back(
+        CommandEntry{std::move(name), std::move(parameters), std::move(handler)});
+    return true;
+}
+
+bool RuntimeAgent::registerExecutor(QString name, SnippetExecutor executor)
+{
+    // "object" is the core's own, and the empty name is what a request that
+    // says nothing falls back to, so neither is an application's to take.
+    if (name.isEmpty() || !executor || name == QStringLiteral("object")
+        || m_executors.contains(name)) {
+        return false;
+    }
+    m_executors.insert(std::move(name), std::move(executor));
+    return true;
+}
+
+bool RuntimeAgent::registerHelloField(QString name, std::function<QJsonValue()> value)
+{
+    if (name.isEmpty() || !value || m_helloFields.contains(name)
+        || coreHello().contains(name)) {
+        return false;
+    }
+    m_helloFields.insert(std::move(name), std::move(value));
+    return true;
 }
 
 void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
@@ -429,8 +434,8 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
                                    const QString& command,
                                    const QJsonObject& parameters)
 {
-    for (const CommandEntry& entry : commands()) {
-        if (command != QLatin1String(entry.name)) {
+    for (const CommandEntry& entry : m_commands) {
+        if (command != entry.name) {
             continue;
         }
         // A parameter nobody reads makes a request that succeeds and does
@@ -438,23 +443,17 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
         // worked. Refusing turns that into a failure the first time it is
         // sent.
         for (auto it = parameters.begin(); it != parameters.end(); ++it) {
-            const bool known = std::any_of(
-                entry.parameters.begin(), entry.parameters.end(),
-                [&it](const char* accepted) { return it.key() == QLatin1String(accepted); });
-            if (!known) {
-                QStringList accepted;
-                for (const char* name : entry.parameters) {
-                    accepted.append(QString::fromLatin1(name));
-                }
+            if (!entry.parameters.contains(it.key())) {
                 sendError(socket, requestId, QStringLiteral("unknown_parameter"),
                           QStringLiteral("%1 does not read %2; it reads %3")
                               .arg(command, it.key(),
-                                   accepted.isEmpty() ? QStringLiteral("nothing")
-                                                      : accepted.join(QStringLiteral(", "))));
+                                   entry.parameters.isEmpty()
+                                       ? QStringLiteral("nothing")
+                                       : entry.parameters.join(QStringLiteral(", "))));
                 return;
             }
         }
-        (this->*entry.handler)(socket, requestId, parameters);
+        entry.handler(socket, requestId, parameters);
         return;
     }
     sendError(socket, requestId, QStringLiteral("unknown_command"), command);
@@ -473,97 +472,6 @@ void RuntimeAgent::handleHelp(QLocalSocket* socket,
                                  const QJsonObject&)
 {
     sendSuccess(socket, requestId, commandList());
-    return;
-}
-
-void RuntimeAgent::handleCubeState(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject&)
-{
-    sendSuccess(socket, requestId, cubeState());
-    return;
-}
-
-void RuntimeAgent::handleCubePause(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject&)
-{
-    m_cube->setRunning(false);
-    sendSuccess(socket, requestId, cubeState());
-    return;
-}
-
-void RuntimeAgent::handleCubeResume(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject&)
-{
-    m_cube->setRunning(true);
-    sendSuccess(socket, requestId, cubeState());
-    return;
-}
-
-void RuntimeAgent::handleCubeReset(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject&)
-{
-    m_cube->resetCube();
-    sendSuccess(socket, requestId, cubeState());
-    return;
-}
-
-void RuntimeAgent::handleCubeSpeed(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject& parameters)
-{
-    if (!parameters.contains(QStringLiteral("degreesPerSecond"))) {
-        sendError(socket, requestId, QStringLiteral("missing_parameter"),
-                  QStringLiteral("degreesPerSecond is required"));
-        return;
-    }
-    m_cube->setAngularVelocity(
-        static_cast<float>(parameters.value(QStringLiteral("degreesPerSecond")).toDouble()));
-    sendSuccess(socket, requestId, cubeState());
-    return;
-}
-
-void RuntimeAgent::handleCubeWireframe(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject& parameters)
-{
-    m_cube->setWireframe(parameters.value(QStringLiteral("enabled")).toBool());
-    sendSuccess(socket, requestId, cubeState());
-    return;
-}
-
-void RuntimeAgent::handleCubeCapture(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject& parameters)
-{
-    QString path = parameters.value(QStringLiteral("path")).toString();
-    if (path.isEmpty()) {
-        path = QDir::temp().filePath(
-            QStringLiteral("qt-runtime-cube-%1-%2.png")
-                .arg(QCoreApplication::applicationPid())
-                .arg(m_eventSequence + 1));
-    }
-    path = QFileInfo(path).absoluteFilePath();
-    QString error;
-    if (!m_cube->captureFramebuffer(path, &error)) {
-        sendError(socket, requestId, QStringLiteral("capture_failed"), error);
-        return;
-    }
-    QFile file(path);
-    QByteArray digest;
-    if (file.open(QIODevice::ReadOnly)) {
-        digest = QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256).toHex();
-    }
-    const QJsonObject result{
-        {QStringLiteral("path"), path},
-        {QStringLiteral("bytes"), QFileInfo(path).size()},
-        {QStringLiteral("sha256"), QString::fromLatin1(digest)},
-    };
-    publishEvent(QStringLiteral("cube.capture.finished"), result);
-    sendSuccess(socket, requestId, result);
     return;
 }
 
@@ -1061,7 +969,7 @@ void RuntimeAgent::handlePatchLoad(QLocalSocket* socket,
                                  const QJsonObject& parameters)
 {
     QString error;
-    ModuleManager::LoadedModule* module = m_modules.loadCubePatch(
+    ModuleManager::LoadedModule* module = m_modules.loadEntryPatch(
         parameters.value(QStringLiteral("path")).toString(), error);
     if (module == nullptr) {
         sendError(socket, requestId, QStringLiteral("load_failed"), error);
@@ -1313,23 +1221,7 @@ QObject* RuntimeAgent::resolveObject(const QJsonObject& parameters, QString& err
     return nullptr;
 }
 
-QJsonObject RuntimeAgent::cubeState() const
-{
-    return QJsonObject{
-        {QStringLiteral("angleDegrees"), m_cube->angleDegrees()},
-        {QStringLiteral("angularVelocity"), m_cube->angularVelocity()},
-        {QStringLiteral("running"), m_cube->isRunning()},
-        {QStringLiteral("wireframe"), m_cube->isWireframe()},
-        {QStringLiteral("frameIndex"), QString::number(m_cube->frameIndex())},
-        {QStringLiteral("activePatch"), m_cube->activePatch()},
-        {QStringLiteral("glVendor"), m_cube->glVendor()},
-        {QStringLiteral("glRenderer"), m_cube->glRenderer()},
-        {QStringLiteral("glVersion"), m_cube->glVersion()},
-        {QStringLiteral("address"), pointerString(m_cube)},
-    };
-}
-
-QJsonObject RuntimeAgent::hello()
+QJsonObject RuntimeAgent::coreHello()
 {
 #ifdef NDEBUG
     constexpr bool optimizedBuild = true;
@@ -1340,7 +1232,6 @@ QJsonObject RuntimeAgent::hello()
         {QStringLiteral("name"), QStringLiteral("qt-runtime-agent-demo")},
         {QStringLiteral("protocolVersion"), 1},
         {QStringLiteral("agentAbi"), QStringLiteral("0x%1").arg(RUNTIME_AGENT_ABI, 8, 16, QLatin1Char('0'))},
-        {QStringLiteral("cubePatchAbi"), QStringLiteral("0x%1").arg(CUBE_STEP_ABI, 8, 16, QLatin1Char('0'))},
         {QStringLiteral("pid"), QCoreApplication::applicationPid()},
         {QStringLiteral("uid"), static_cast<int>(::getuid())},
         {QStringLiteral("socket"), m_socketName},
@@ -1354,16 +1245,24 @@ QJsonObject RuntimeAgent::hello()
         // The build a module has to have been compiled against for the loader
         // to accept it, readable without loading anything.
         {QStringLiteral("buildId"), runtime_agent::hostBuildId()},
-        {QStringLiteral("cube"), cubeState()},
         {QStringLiteral("patch"), m_modules.patchStatus()},
     };
+}
+
+QJsonObject RuntimeAgent::hello()
+{
+    QJsonObject result = coreHello();
+    for (auto it = m_helloFields.cbegin(); it != m_helloFields.cend(); ++it) {
+        result.insert(it.key(), it.value()());
+    }
+    return result;
 }
 
 QJsonArray RuntimeAgent::commandList() const
 {
     QJsonArray result;
-    for (const CommandEntry& entry : commands()) {
-        result.append(QString::fromLatin1(entry.name));
+    for (const CommandEntry& entry : m_commands) {
+        result.append(entry.name);
     }
     return result;
 }
@@ -1449,8 +1348,9 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
     };
 
     bool scheduled = true;
-    if (executor == QStringLiteral("render")) {
-        m_cube->enqueueRenderCallback(std::move(callback));
+    if (const auto registered = m_executors.constFind(executor);
+        registered != m_executors.cend()) {
+        scheduled = (*registered)(std::move(callback));
     } else if (executor == QStringLiteral("object") && target != nullptr) {
         scheduled = QMetaObject::invokeMethod(target, std::move(callback), Qt::QueuedConnection);
     } else {

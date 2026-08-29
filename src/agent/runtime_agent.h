@@ -15,11 +15,11 @@
 #include <QQueue>
 #include <QStringList>
 
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <vector>
 
-class CubeWidget;
 class MainWindow;
 class QLocalSocket;
 
@@ -28,7 +28,7 @@ class RuntimeAgent final : public QObject {
 
 public:
     explicit RuntimeAgent(MainWindow* window,
-                          CubeWidget* cube,
+                          ModuleManager& modules,
                           QString socketName,
                           QObject* parent = nullptr);
     ~RuntimeAgent() override;
@@ -39,6 +39,54 @@ public:
 
     [[nodiscard]] QObject* findObject(const QString& objectName) const;
     void publishEvent(const QString& name, const QJsonObject& data = {});
+
+    // What an application adds to the protocol.
+    //
+    // The table, dispatch, the two refusals, event sequence numbers, history
+    // and subscription are all here. What is being controlled is not, so the
+    // application writes the commands that reach it and connects its own
+    // signals to publishEvent.
+
+    using CommandHandler = std::function<void(QLocalSocket* socket,
+                                              const QJsonValue& requestId,
+                                              const QJsonObject& parameters)>;
+
+    // Adds one command. parameters lists every key the handler reads, and a
+    // request naming anything else is refused before the handler runs, so the
+    // list is what the refusal quotes back. The handler answers with
+    // sendSuccess or sendError, once, and may do it later than it is called.
+    //
+    // Returns false and registers nothing if the name is taken, because a
+    // second entry under one name is unreachable and help would list the name
+    // twice.
+    [[nodiscard]] bool registerCommand(QString name,
+                                       QStringList parameters,
+                                       CommandHandler handler);
+
+    // Somewhere a snippet can run. Answers false when it could not schedule
+    // the call, and the run is then reported as having failed.
+    using SnippetExecutor = std::function<bool(std::function<void()> call)>;
+
+    // Adds one under the name a request asks for it by. The core knows two
+    // places already, the thread owning the object a request names and the
+    // window's, and an application adds any other place it can run one, such
+    // as the thread holding its render context.
+    //
+    // Returns false and registers nothing if the name is taken.
+    [[nodiscard]] bool registerExecutor(QString name, SnippetExecutor executor);
+
+    // What this application adds to hello. Read on every hello, so it reports
+    // the state at that moment. Returns false if the core or another
+    // registration already writes that field.
+    [[nodiscard]] bool registerHelloField(QString name, std::function<QJsonValue()> value);
+
+    void sendSuccess(QLocalSocket* socket,
+                     const QJsonValue& requestId,
+                     const QJsonValue& result = {});
+    void sendError(QLocalSocket* socket,
+                   const QJsonValue& requestId,
+                   const QString& code,
+                   const QString& message);
 
 private:
     struct ClientState {
@@ -100,20 +148,12 @@ private:
                          const QString& command,
                          const QJsonObject& parameters);
 
-    void sendSuccess(QLocalSocket* socket,
-                     const QJsonValue& requestId,
-                     const QJsonValue& result = {});
-    void sendError(QLocalSocket* socket,
-                   const QJsonValue& requestId,
-                   const QString& code,
-                   const QString& message);
     static void sendObject(QLocalSocket* socket, const QJsonObject& object);
 
-    // One command handler each, named for the command. dispatchRequest looks
-    // the name up in commands() and calls through; nothing else selects on it.
+    // One entry per command. dispatchRequest looks the name up in m_commands
+    // and calls through; nothing else selects on a command name.
     struct CommandEntry {
-        const char* name;
-        void (RuntimeAgent::*handler)(QLocalSocket*, const QJsonValue&, const QJsonObject&);
+        QString name;
 
         // Every parameter this command reads. A request naming anything else is
         // refused, because a parameter the host drops is a request that
@@ -124,9 +164,14 @@ private:
         // succeeded, so nothing ever said the option had stopped meaning
         // anything. Object selectors are why the empty list means no
         // parameters at all and not "anything goes".
-        std::vector<const char*> parameters;
+        QStringList parameters;
+
+        CommandHandler handler;
     };
-    [[nodiscard]] static const std::vector<CommandEntry>& commands();
+
+    // Every command the core answers itself, and the only place that set is
+    // written down. Called from the constructor, before anything can dispatch.
+    void registerCoreCommands();
 
     void handleHello(QLocalSocket* socket,
                     const QJsonValue& requestId,
@@ -134,27 +179,6 @@ private:
     void handleHelp(QLocalSocket* socket,
                    const QJsonValue& requestId,
                    const QJsonObject& parameters);
-    void handleCubeState(QLocalSocket* socket,
-                        const QJsonValue& requestId,
-                        const QJsonObject& parameters);
-    void handleCubePause(QLocalSocket* socket,
-                        const QJsonValue& requestId,
-                        const QJsonObject& parameters);
-    void handleCubeResume(QLocalSocket* socket,
-                         const QJsonValue& requestId,
-                         const QJsonObject& parameters);
-    void handleCubeReset(QLocalSocket* socket,
-                        const QJsonValue& requestId,
-                        const QJsonObject& parameters);
-    void handleCubeSpeed(QLocalSocket* socket,
-                        const QJsonValue& requestId,
-                        const QJsonObject& parameters);
-    void handleCubeWireframe(QLocalSocket* socket,
-                            const QJsonValue& requestId,
-                            const QJsonObject& parameters);
-    void handleCubeCapture(QLocalSocket* socket,
-                          const QJsonValue& requestId,
-                          const QJsonObject& parameters);
     void handleObjectTree(QLocalSocket* socket,
                          const QJsonValue& requestId,
                          const QJsonObject& parameters);
@@ -239,7 +263,10 @@ private:
 
     [[nodiscard]] QObject* resolveObject(const QJsonObject& parameters,
                                          QString& error) const;
-    [[nodiscard]] QJsonObject cubeState() const;
+    // What the core knows about itself, without what applications have
+    // registered. Split out so registerHelloField can refuse a field the core
+    // already writes instead of silently losing to it.
+    [[nodiscard]] QJsonObject coreHello();
     [[nodiscard]] QJsonObject hello();
     [[nodiscard]] QJsonArray commandList() const;
 
@@ -291,10 +318,19 @@ private:
     [[nodiscard]] bool stashDrop(const QString& key);
 
     QPointer<MainWindow> m_window;
-    QPointer<CubeWidget> m_cube;
+
+    // Owned by whoever built the application, because rolling the active patch
+    // back on the way out makes the patched thing emit, and an application's
+    // event connections are still live while this object's members go away.
+    // Outliving the agent is what keeps that emission from reaching them.
+    ModuleManager& m_modules;
+
     QString m_socketName;
     QLocalServer m_server;
     QHash<QLocalSocket*, ClientState> m_clients;
+    std::vector<CommandEntry> m_commands;
+    QMap<QString, SnippetExecutor> m_executors;
+    QMap<QString, std::function<QJsonValue()>> m_helloFields;
     ObjectRegistry m_registry;
     QElapsedTimer m_monotonicClock;
     quint64 m_eventSequence = 0;
@@ -310,9 +346,4 @@ private:
     // callback as easily as from the GUI thread.
     mutable QMutex m_stashMutex;
     QMap<QString, StashEntry> m_stash;
-
-    // Declared last so it is destroyed first. ~ModuleManager rolls the active
-    // patch back, which makes CubeWidget emit stateChanged, and the handler for
-    // that signal reads m_eventHistory and m_monotonicClock above.
-    ModuleManager m_modules;
 };

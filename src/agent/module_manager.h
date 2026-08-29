@@ -37,7 +37,7 @@ public:
     {
         return m_registry.loadSnippet(path, error);
     }
-    [[nodiscard]] LoadedModule* loadCubePatch(const QString& path, QString& error);
+    [[nodiscard]] LoadedModule* loadEntryPatch(const QString& path, QString& error);
     [[nodiscard]] LoadedModule* module(const quint64 id) const { return m_registry.module(id); }
     [[nodiscard]] QJsonArray list() const { return m_registry.list(); }
 

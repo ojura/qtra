@@ -189,6 +189,8 @@ qt_add_executable(qt_runtime_cube
     src/main_window.cpp
     src/cube_widget.h
     src/cube_widget.cpp
+    src/cube_protocol.h
+    src/cube_protocol.cpp
     src/cube_step.cpp
     src/agent/errno_text.h
     src/agent/entry_hotpatch.h
