@@ -150,10 +150,14 @@ bool PatchManager::installGateway(const PatchSite& site,
     // parked every thread cannot be held across a return into ordinary code:
     // the next allocation or log line can wait on a lock a parked thread holds.
     if (!quiescer.leaseMaySurviveTheWrite()) {
+        // Threads go first, and nothing else happens until they have. They are
+        // parked wherever they were, holding whatever they held, so appending
+        // to a string or allocating a record here can wait on a lock only a
+        // parked thread can release.
+        lease.reset();
         error += "; the entry is rewritten and this policy's lease cannot be held while "
-                 "anything else runs, so execution is being let go with the entry in that "
-                 "state. It runs the original through the gateway, and rollback is still "
-                 "required";
+                 "anything else runs, so execution was let go with the entry in that state. "
+                 "It runs the original through the gateway, and rollback is still required";
         m_record = std::move(record);
         m_recovery = std::make_unique<Recovery>(std::move(original), nullptr, admission,
                                                 m_write);
@@ -290,6 +294,12 @@ bool PatchManager::recover(Quiescer& quiescer, std::string& error)
         error = write.error;
         return false;
     }
+
+    // The entry's own bytes are back, so nothing is standing over a half
+    // state and the threads can go. They go before anything here frees
+    // storage: a parked thread may hold the allocator's lock, and destroying
+    // the record and the saved bytes is where that would be waited on.
+    lease.reset();
 
     m_state = PatchState::NoGateway;
     m_record.reset();
