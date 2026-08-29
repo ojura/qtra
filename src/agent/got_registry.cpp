@@ -116,12 +116,33 @@ bool GotRegistry::unbind(const std::uint64_t id, const std::uint64_t owner, std:
                 error = "this binding was already released";
                 return false;
             }
+            // What the slot names now, against what it should name once this
+            // generation is gone. Releasing a buried binding leaves that answer
+            // the same, and a slot that already names the right address needs no
+            // write, so such a release succeeds whatever the page permissions
+            // are.
+            const Generation* const selected = slot->newestLive();
+            void* const naming = selected != nullptr ? selected->replacement : slot->original;
+
             generation.released = true;
-            // Recomputed from what is still live, so releasing something that
-            // was not selected leaves the slot alone, and releasing what was
-            // selected falls back to the newest predecessor and only then to
-            // the original.
-            return publish(*slot, error);
+
+            const Generation* const remaining = slot->newestLive();
+            void* const wanted =
+                remaining != nullptr ? remaining->replacement : slot->original;
+            if (wanted == naming) {
+                return true;
+            }
+
+            if (!publish(*slot, error)) {
+                // The slot still names this generation's replacement, so this
+                // generation is still what runs. Recording it as released would
+                // leave status describing a predecessor the process never
+                // reaches, and a second attempt refusing as already released
+                // with the slot still pointing here.
+                generation.released = false;
+                return false;
+            }
+            return true;
         }
     }
     error = "no such binding";

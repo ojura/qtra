@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -103,6 +104,23 @@ int failRestoreProtect(void* address, std::size_t length, int protection)
     }
     errno = EACCES;
     return -1;
+}
+
+// Refuses to make the page writable while refusingWrites is set.
+//
+// A registry keeps its permission call for life, so the switch lives here: the
+// binding is made while this behaves, and the release is attempted while it does
+// not, which is the order that leaves a slot naming a replacement the registry
+// has been asked to let go of.
+std::atomic<bool> refusingWrites{false};
+
+int switchableProtect(void* address, std::size_t length, int protection)
+{
+    if ((protection & PROT_WRITE) != 0 && refusingWrites.load(std::memory_order_acquire)) {
+        errno = EACCES;
+        return -1;
+    }
+    return ::mprotect(address, length, protection);
 }
 
 const runtime_agent::CallerQuery qtCore =
@@ -373,6 +391,53 @@ int main()
         } else {
             std::printf("  skip  this slot's page is already writable, so there is no "
                         "permission to fail to put back\n");
+        }
+    }
+
+    std::printf("a release that cannot be published leaves the binding live\n");
+    {
+        // The slot has to name the replacement for the release to need a store
+        // at all, so it is bound with a working permission call and released
+        // through a registry that cannot make the page writable.
+        runtime_agent::GotSite site4;
+        std::string why;
+        if (runtime_agent::resolveGotSlot(qtCore, "malloc", site4, why)
+            && (site4.pageProtection & PROT_WRITE) == 0) {
+            runtime_agent::GotRegistry stubborn(&switchableProtect);
+            runtime_agent::GotBinding held;
+            check(stubborn.bind(site4, reinterpret_cast<void*>(&countingMalloc), 11,
+                                runtime_agent::LandingPadRule::Required, held, why),
+                  why.empty() ? "a binding is made through a working permission call"
+                              : why.c_str());
+            check(*site4.slot == reinterpret_cast<void*>(&countingMalloc),
+                  "and the slot names it");
+
+            refusingWrites.store(true, std::memory_order_release);
+            why.clear();
+            check(!stubborn.unbind(held.id, 11, why),
+                  "releasing it is refused when the page cannot be made writable");
+            check(*site4.slot == reinterpret_cast<void*>(&countingMalloc),
+                  "and the slot still names the replacement, which is what runs");
+
+            runtime_agent::GotSlotStatus after;
+            check(stubborn.statusOf(site4.slot, after), "the slot is still known");
+            check(after.selected == reinterpret_cast<void*>(&countingMalloc),
+                  "and status names what the process actually reaches");
+            check(after.selectedBinding == held.id,
+                  "under the binding that still owns it");
+
+            // The point of not committing the release: it can be asked for
+            // again once the permission call works.
+            refusingWrites.store(false, std::memory_order_release);
+            why.clear();
+            check(stubborn.unbind(held.id, 11, why),
+                  why.empty() ? "and the same release succeeds once it can be published"
+                              : why.c_str());
+            check(*site4.slot == site4.resolved,
+                  "putting the loader's own value back");
+        } else {
+            std::printf("  skip  this slot's page is already writable, so a store into it "
+                        "cannot be made to fail\n");
         }
     }
 
