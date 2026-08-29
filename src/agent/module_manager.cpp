@@ -589,8 +589,15 @@ bool ModuleManager::resetActivePatch(QString& error)
         // taken when they were written is the one that governs restoring them.
         // Only the write question. Recovery puts the target's own bytes back,
         // so there is no replacement whose reach anyone could ask about.
-        const runtime_agent::CoverageDecision& decision =
-            m_admitted.has_value() ? *m_admitted : m_admitted.emplace(readDecision());
+        //
+        // m_admitted holds what authorized the install, which is the only way
+        // into this state. Reading the file is what is left if it is somehow
+        // absent, and that read is not kept: a manifest missing or unreadable
+        // at this instant would otherwise become the answer for the rest of the
+        // process, and a retry after putting it back would find the stored
+        // refusal and never look again.
+        const runtime_agent::CoverageDecision decision =
+            m_admitted.has_value() ? *m_admitted : readDecision();
         if (!runtime_agent::authorizesLiveTextWrite(decision, error)) {
             return false;
         }
