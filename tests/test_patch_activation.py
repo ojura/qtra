@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -40,7 +41,84 @@ MANIFEST = BUILD / "coverage-manifest.json"
 PATCH_MODULE = BUILD / "cube_patch_wobble.so"
 BINDER = BUILD / "agent_snippet_bind_probe.so"
 
-HAS_DISPLAY = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+# Asked at import, before the display exists, so this is whether one can be had.
+CAN_DRAW = bool(
+    os.environ.get("DISPLAY")
+    or os.environ.get("WAYLAND_DISPLAY")
+    or (os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") != "host"
+        and shutil.which("Xvfb") is not None)
+)
+
+# Where the demo is shown.
+#
+# On a display of its own by default, so running these does not put windows on
+# somebody's screen while they are working. Set RUNTIME_AGENT_TEST_DISPLAY=host
+# to use the display this shell already has, which is what to do when watching
+# the cube is the point.
+#
+# The server is started here and stopped here, and the demo is launched directly
+# against it. Wrapping each launch in xvfb-run instead would leave a wrapper
+# between this and the process it has to stop, and killing the wrapper leaves
+# the demo and the server behind.
+class OwnDisplay:
+    def __init__(self) -> None:
+        self.number: str | None = None
+        self.server: subprocess.Popen | None = None
+
+    def start(self) -> str | None:
+        if os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host":
+            return None
+        if shutil.which("Xvfb") is None:
+            return None
+        for candidate in range(90, 130):
+            if Path(f"/tmp/.X11-unix/X{candidate}").exists():
+                continue
+            self.server = subprocess.Popen(
+                ["Xvfb", f":{candidate}", "-screen", "0", "1280x800x24",
+                 "+extension", "GLX", "+render", "-noreset"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if Path(f"/tmp/.X11-unix/X{candidate}").exists():
+                    self.number = f":{candidate}"
+                    return self.number
+                if self.server.poll() is not None:
+                    break
+                time.sleep(0.05)
+            self.stop()
+        return None
+
+    def stop(self) -> None:
+        if self.server is not None:
+            self.server.terminate()
+            try:
+                self.server.wait(10)
+            except subprocess.TimeoutExpired:
+                self.server.kill()
+                self.server.wait(5)
+            self.server = None
+        self.number = None
+
+
+DISPLAY_FOR_TESTS = OwnDisplay()
+
+
+def setUpModule() -> None:
+    DISPLAY_FOR_TESTS.start()
+
+
+def tearDownModule() -> None:
+    DISPLAY_FOR_TESTS.stop()
+
+
+def has_somewhere_to_draw() -> bool:
+    return bool(
+        DISPLAY_FOR_TESTS.number
+        or os.environ.get("DISPLAY")
+        or os.environ.get("WAYLAND_DISPLAY")
+    )
 
 
 class Agent:
@@ -51,8 +129,14 @@ class Agent:
         # A real display, because the cube is a QOpenGLWidget and Qt's offscreen
         # platform has no support for one: it reports that, fails to compile the
         # shaders, and dies before the socket is useful.
+        environment = dict(os.environ)
+        if DISPLAY_FOR_TESTS.number is not None:
+            environment["DISPLAY"] = DISPLAY_FOR_TESTS.number
+            # A virtual display has no GPU behind it.
+            environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
         self.process = subprocess.Popen(
             [str(BINARY), "--agent-socket", str(socket_path)],
+            env=environment,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -104,7 +188,7 @@ class Agent:
 
 
 @unittest.skipUnless(
-    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and HAS_DISPLAY,
+    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and CAN_DRAW,
     f"needs a display and a built, manifest-bearing {BUILD}",
 )
 class PatchActivation(unittest.TestCase):
@@ -171,7 +255,7 @@ class PatchActivation(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and HAS_DISPLAY,
+    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and CAN_DRAW,
     f"needs a display and a built, manifest-bearing {BUILD}",
 )
 class MixedGenerations(unittest.TestCase):

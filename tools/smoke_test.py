@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -68,10 +69,13 @@ def main(argv: list[str] | None = None) -> int:
     capture_path = runtime / "cube.png"
     log_path = runtime / "app.log"
 
+    # A display of its own by default, so a validation run does not put a window
+    # on somebody's screen while they are working. Set
+    # RUNTIME_AGENT_TEST_DISPLAY=host to watch it happen on the display this
+    # shell already has.
     command: list[str]
-    if os.environ.get("DISPLAY"):
-        command = [str(app)]
-    elif shutil.which("xvfb-run"):
+    on_host = os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host"
+    if not on_host and shutil.which("xvfb-run"):
         command = [
             "xvfb-run",
             "-a",
@@ -79,15 +83,20 @@ def main(argv: list[str] | None = None) -> int:
             "-screen 0 1280x800x24 +extension GLX +render -noreset",
             str(app),
         ]
+    elif os.environ.get("DISPLAY"):
+        command = [str(app)]
     else:
-        print("DISPLAY is unset and xvfb-run is unavailable", file=sys.stderr)
+        print("there is no display and xvfb-run is unavailable", file=sys.stderr)
         return 2
     command += ["--agent-socket", str(socket_path)]
 
     environment = os.environ.copy()
     environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
     log = log_path.open("wb")
-    process = subprocess.Popen(command, env=environment, stdout=log, stderr=subprocess.STDOUT)
+    # Its own process group, so shutting down reaches the application and the
+    # display server xvfb-run started, and not only the wrapper.
+    process = subprocess.Popen(command, env=environment, stdout=log,
+                               stderr=subprocess.STDOUT, start_new_session=True)
 
     transcript: dict[str, Any] = {}
     try:
@@ -173,11 +182,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         if process.poll() is None:
-            process.terminate()
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                process.terminate()
             try:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                process.kill()
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    process.kill()
                 process.wait()
         log.close()
         if not args.keep_runtime and process.returncode == 0:
