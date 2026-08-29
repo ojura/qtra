@@ -153,13 +153,74 @@ void PatchManager::publishSelection() noexcept
     }
     const Generation* live = newestLive();
     void* target = live != nullptr ? live->replacement : m_record->continuation;
-    m_record->slot.store(target, std::memory_order_release);
+    m_record->selected().store(target, std::memory_order_release);
     m_state = live != nullptr ? PatchState::GatewayReplacement : PatchState::GatewayOriginal;
 }
 
 void* PatchManager::continuation() const noexcept
 {
     return m_record != nullptr ? m_record->continuation : nullptr;
+}
+
+bool PatchManager::installRelocatedGateway(const ProloguePlan& plan,
+                                           const LiveTextWriteAdmission& admission,
+                                           Quiescer& quiescer,
+                                           std::string& error)
+{
+    error.clear();
+    if (!plan.valid()) {
+        error = "a planned site is required to relocate a prologue";
+        return false;
+    }
+    if (m_state != PatchState::NoGateway) {
+        error = "this entry already has a gateway; selecting what it reaches is a store and "
+                "needs no further write";
+        return false;
+    }
+    if (!attributable(admission, error)) {
+        return false;
+    }
+
+    m_threadsAtInstall = observedThreadCount();
+
+    // The copy is what runs when nothing is selected, so it is what the word
+    // holds to begin with. Installing with the copy as the destination means
+    // the entry reaches the original function from the first instruction after
+    // the write, and binding a replacement afterwards is a store.
+    RelocatedPrologue installed;
+    const bool wrote = installRelocatedPrologue(plan, nullptr, quiescer, *m_write, installed,
+                                                error);
+    if (!wrote && installed.selection == nullptr) {
+        return false;
+    }
+
+    auto record = std::make_unique<GatewayRecord>();
+    record->site = PatchSite{};
+    record->site.entry = plan.entry;
+    record->site.patchAddress = plan.patchAddress;
+    record->site.availableBytes = plan.takenBytes;
+    // The jump written here reads its destination from a word, which is an
+    // indirect branch, so where the build asks for landing pads whatever it
+    // reaches has to begin with one. The plan keeping the function's own pad is
+    // what says this build asks for them, and bind checks each replacement
+    // against this.
+    record->site.requiresEndbr64 = plan.keepsLandingPad;
+    record->continuation = installed.original;
+    // Installing already left the word naming the copy, so nothing is stored
+    // here. Writing it again would give one fact two owners that could drift.
+    record->selection = installed.selection;
+
+    m_record = std::move(record);
+    m_relocated = std::move(installed);
+    m_installedUnder = admission;
+    m_state = PatchState::GatewayOriginal;
+
+    if (!wrote) {
+        // The bytes changed and the mapping could not be put back. The entry
+        // works and reaches the original; a permission needs restoring.
+        m_mappingLeftWritable = true;
+    }
+    return true;
 }
 
 bool PatchManager::bind(void* replacement,
@@ -231,7 +292,7 @@ PatchStatus PatchManager::status() const
     status.mappingLeftWritable = m_mappingLeftWritable;
     if (m_record != nullptr) {
         status.site = m_record->site;
-        status.slotAddress = &m_record->slot;
+        status.slotAddress = &m_record->selected();
         if (const Generation* live = newestLive(); live != nullptr) {
             status.replacement = live->replacement;
             status.selectedBinding = live->id;

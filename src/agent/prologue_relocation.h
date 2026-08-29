@@ -54,6 +54,7 @@
 #include "agent/quiescence.h"
 
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -153,6 +154,22 @@ struct DecodedInstruction {
                                      DecodedInstruction& decoded,
                                      std::string& error);
 
+// What the jump written at the entry occupies, which is the least a plan can
+// take.
+//
+// jmp qword ptr [rip+disp32]: two bytes of opcode and four naming, as a
+// distance from the end of the jump, a word the destination is read out of. So
+// the word has to sit within two gigabytes of the entry and the destination
+// itself can be anywhere. A jump that named the destination directly would fit
+// in five bytes and confine a replacement to two gigabytes of the function,
+// which rules out a module the loader placed: those land terabytes away, and
+// they are the case this backend exists for.
+//
+// It clobbers no register either. There is none free here: the instructions
+// being moved are the function's own, and one may have left something in a
+// register the rest of the function reads.
+inline constexpr std::size_t entryJumpBytes = 6;
+
 // What was found at a function's entry, and where a jump can go.
 //
 // Planning writes nothing. Every refusal is available before any byte changes,
@@ -217,8 +234,21 @@ struct RelocatedPrologue {
     // pointer is an indirect branch.
     void* original = nullptr;
 
+    // The word the entry's jump reads, which is what chooses between the
+    // replacement and the copy. Near the entry, because the jump names it as a
+    // distance from itself.
+    //
+    // This is the same arrangement the prepared backend has, so what owns
+    // generations there owns them here: installing writes the entry once,
+    // choosing is one aligned store into this word, and a replacement chains by
+    // calling what the word held before it.
+    std::atomic<void*>* selection = nullptr;
+
     void* trampoline = nullptr;
     std::size_t trampolineBytes = 0;
+
+    // The whole mapping, which is the copy's pages and the word's page.
+    std::size_t mappedBytes = 0;
 
     // What the entry held, so restoring is a copy and not a reconstruction.
     std::vector<std::uint8_t> savedBytes;
@@ -242,6 +272,9 @@ struct RelocatedPrologue {
 // bytes change and a thread standing inside them would execute the join of what
 // was there and what is arriving. The range being written is the range that
 // matters, and a policy that can account for threads should be told it.
+// A null replacement installs and selects the copy, so the entry reaches the
+// original function and something can be chosen afterwards with a store. That
+// is what an owner of generations asks for.
 [[nodiscard]] bool installRelocatedPrologue(const ProloguePlan& plan,
                                             void* replacement,
                                             Quiescer& quiescer,

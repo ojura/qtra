@@ -27,12 +27,28 @@
 namespace runtime_agent {
 
 struct GatewayRecord {
-    // The word the gateway loads its destination from. The gateway holds this
-    // address as an immediate, so the object must not move.
+    // The word the gateway loads its destination from, where the gateway can
+    // reach this one. A gateway written into a prepared area loads it through a
+    // register, which reaches anywhere, so it uses this.
     //
     // Lock-free and pointer-aligned, which is what makes selecting a
     // replacement a single atomic store instead of a code write.
     alignas(sizeof(void*)) std::atomic<void*> slot{nullptr};
+
+    // Where the selection is actually published.
+    //
+    // Normally this word. An entry with no prepared area is rewritten to a jump
+    // that reads its destination from a place named as a distance from itself,
+    // which reaches two gigabytes, and this record is wherever the allocator
+    // put it. So that install provides a word near the entry and points this at
+    // it. Everything that chooses what runs stores through this and does not
+    // care which arrangement it is.
+    std::atomic<void*>* selection = nullptr;
+
+    [[nodiscard]] std::atomic<void*>& selected() noexcept
+    {
+        return selection != nullptr ? *selection : slot;
+    }
 
     // Inside the prepared area, immediately after the jump. An ENDBR64 followed
     // by the remaining NOPs, falling through into the function's own

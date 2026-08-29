@@ -7,6 +7,7 @@
 #include "agent/entry_hotpatch.h"
 #include "agent/gateway_record.h"
 #include "agent/patch_site.h"
+#include "agent/prologue_relocation.h"
 #include "agent/quiescence.h"
 #include "agent/write_admission.h"
 
@@ -123,6 +124,24 @@ public:
                                       Quiescer& quiescer,
                                       std::string& error);
 
+    // Installs at an entry that reserved no space, by moving its opening
+    // instructions and writing a jump that reads its destination from a word
+    // placed near it.
+    //
+    // The same arrangement installGateway leaves behind, reached a different
+    // way. Afterwards nothing here can tell them apart: choosing what runs is
+    // one aligned store into a word, releasing falls back to what ran before,
+    // and a replacement chains by calling what the word held. So bind, unbind
+    // and the generation rules are shared and not repeated.
+    //
+    // What differs is what the original is. A prepared entry continues into the
+    // rest of its own function; this one continues into a copy of the
+    // instructions that were moved, which then continues into the rest.
+    [[nodiscard]] bool installRelocatedGateway(const ProloguePlan& plan,
+                                               const LiveTextWriteAdmission& admission,
+                                               Quiescer& quiescer,
+                                               std::string& error);
+
     // Selects which code the entry reaches, and records who asked.
     //
     // Requires a gateway, and writes no bytes: one aligned store into the slot,
@@ -176,6 +195,11 @@ private:
 
     // What the gateway was written under, kept for reporting.
     std::optional<LiveTextWriteAdmission> m_installedUnder;
+
+    // What a relocated install left behind, when the entry was reached that
+    // way. Kept because the copy stays mapped and its address is what a
+    // replacement chains to.
+    std::optional<RelocatedPrologue> m_relocated;
 
     // Whether the page the gateway sits on is still writable, because putting
     // its permissions back failed after the bytes were copied. The gateway

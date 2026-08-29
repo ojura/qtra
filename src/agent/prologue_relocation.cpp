@@ -1,5 +1,7 @@
 #include "agent/prologue_relocation.h"
 
+#include <atomic>
+#include <new>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -14,10 +16,10 @@
 namespace runtime_agent {
 namespace {
 
-// jmp rel32. Five bytes is the shortest jump reaching anywhere within two
-// gigabytes, and taking five bytes of a prologue is possible where taking the
-// thirteen an absolute jump needs is not.
-constexpr std::size_t jumpBytes = 5;
+// The jump written at the entry, described where it is declared. Named here so
+// the code that writes it and the callers that ask what a plan must take read
+// one number.
+using runtime_agent::entryJumpBytes;
 
 // endbr64, which a function begins with on a build asking for landing pads.
 constexpr std::uint8_t landingPad[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
@@ -727,7 +729,7 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
 
     // Whole instructions, until there is room for the jump.
     std::size_t taken = 0;
-    while (taken < jumpBytes) {
+    while (taken < entryJumpBytes) {
         const std::size_t reached = static_cast<std::size_t>(patchAt - entry) + taken;
         if (reached >= functionBytes) {
             error = "this function's body ends before enough whole instructions have been "
@@ -872,33 +874,34 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         error = "a planned site is required";
         return false;
     }
-    if (replacement == nullptr) {
-        error = "a replacement is required";
-        return false;
-    }
 
     auto* const patchAt = static_cast<std::uint8_t*>(plan.patchAddress);
 
-    // The jump names its destination as a distance, so the replacement has to
-    // be within reach of it.
-    const auto from = reinterpret_cast<std::intptr_t>(patchAt + jumpBytes);
-    const auto to = reinterpret_cast<std::intptr_t>(replacement);
-    const std::intptr_t delta = to - from;
-    if (delta > std::numeric_limits<std::int32_t>::max()
-        || delta < std::numeric_limits<std::int32_t>::min()) {
-        error = "the replacement sits further from this entry than a five-byte jump reaches. "
-                "A longer jump would need more of the prologue than is being taken";
+    // Where the replacement is does not matter, because the entry reads its
+    // destination from a word instead of naming it. What has to be near is that
+    // word, and it is placed here.
+    //
+    // Two pages from one mapping, so both are near the entry. The first holds
+    // the copy and is made executable; the second holds the word and stays
+    // writable, because choosing what runs is a store into it. They cannot
+    // share a page: a page that is both executable and writable is one this
+    // does not need and should not ask for.
+    const auto pageSize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    const std::size_t trampolineBytes =
+        sizeof(landingPad) + plan.takenBytes + relativeJumpBytes;
+    const std::size_t codeBytes = (trampolineBytes + pageSize - 1U) / pageSize * pageSize;
+    const std::size_t mappedBytes = codeBytes + pageSize;
+    void* const trampoline = allocateNear(patchAt, mappedBytes);
+    if (trampoline == nullptr) {
+        error = "no memory could be mapped near this entry for the copy of its prologue and "
+                "the word its jump reads";
         return false;
     }
 
-    // The copy, its landing pad, and the jump back.
-    const std::size_t trampolineBytes =
-        sizeof(landingPad) + plan.takenBytes + relativeJumpBytes;
-    void* const trampoline = allocateNear(patchAt, trampolineBytes);
-    if (trampoline == nullptr) {
-        error = "no memory could be mapped for the copy of this prologue";
-        return false;
-    }
+    // The word the entry will read, at the start of the second page and
+    // therefore aligned.
+    auto* const selection = new (static_cast<std::uint8_t*>(trampoline) + codeBytes)
+        std::atomic<void*>(nullptr);
 
     auto* const copy = static_cast<std::uint8_t*>(trampoline);
     // Reached through a pointer, which is an indirect branch, so it begins with
@@ -919,12 +922,12 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         DecodedInstruction decoded;
         std::string why;
         if (!decodeInstruction(plannedAt, plan.takenBytes - offset, decoded, why)) {
-            (void)::munmap(trampoline, trampolineBytes);
+            (void)::munmap(trampoline, mappedBytes);
             error = "the recorded prologue cannot be decoded while building its copy: " + why;
             return false;
         }
         if (!decoded.movable) {
-            (void)::munmap(trampoline, trampolineBytes);
+            (void)::munmap(trampoline, mappedBytes);
             error = "the recorded prologue contains an instruction that is not approved for "
                     "relocation";
             return false;
@@ -943,7 +946,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
                 static_cast<std::intptr_t>(displacement) + originalEnd - copiedEnd;
             if (corrected > std::numeric_limits<std::int32_t>::max()
                 || corrected < std::numeric_limits<std::int32_t>::min()) {
-                (void)::munmap(trampoline, trampolineBytes);
+                (void)::munmap(trampoline, mappedBytes);
                 error = "the copy landed too far from the original for an operand naming its "
                         "address as a distance to still reach what it named";
                 return false;
@@ -956,13 +959,13 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
 
     if (!writeRelativeJump(copy + sizeof(landingPad) + plan.takenBytes,
                            patchAt + plan.takenBytes, error)) {
-        (void)::munmap(trampoline, trampolineBytes);
+        (void)::munmap(trampoline, mappedBytes);
         return false;
     }
 
-    if (::mprotect(trampoline, trampolineBytes, PROT_READ | PROT_EXEC) != 0) {
+    if (::mprotect(trampoline, codeBytes, PROT_READ | PROT_EXEC) != 0) {
         const std::string reason = std::strerror(errno);
-        (void)::munmap(trampoline, trampolineBytes);
+        (void)::munmap(trampoline, mappedBytes);
         error = "the copy could not be made executable: " + reason;
         return false;
     }
@@ -977,7 +980,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     std::unique_ptr<QuiescenceLease> lease =
         quiescer.acquire(WriteRegion{plan.patchAddress, plan.takenBytes}, error);
     if (lease == nullptr) {
-        (void)::munmap(trampoline, trampolineBytes);
+        (void)::munmap(trampoline, mappedBytes);
         return false;
     }
 
@@ -1000,7 +1003,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         // Threads first: formatting the refusal can wait on a lock a parked
         // thread is holding.
         lease.reset();
-        (void)::munmap(trampoline, trampolineBytes);
+        (void)::munmap(trampoline, mappedBytes);
         error = openingMatches
             ? "this function's opening bytes are unchanged, and something wrote elsewhere in "
               "its body since it was planned. The sweep that found nothing branching into "
@@ -1013,15 +1016,35 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     }
 
     std::vector<std::uint8_t> written(plan.takenBytes, 0x90U);
-    written[0] = 0xE9U;
-    const auto narrowed = static_cast<std::int32_t>(delta);
-    std::memcpy(written.data() + 1, &narrowed, sizeof(narrowed));
+    // jmp qword ptr [rip+disp32]. The distance is from the end of this
+    // instruction to the word, and the word holds where to go.
+    const auto fromEnd = reinterpret_cast<std::intptr_t>(patchAt + entryJumpBytes);
+    const auto toSlot = reinterpret_cast<std::intptr_t>(selection);
+    const std::intptr_t reach = toSlot - fromEnd;
+    if (reach > std::numeric_limits<std::int32_t>::max()
+        || reach < std::numeric_limits<std::int32_t>::min()) {
+        (void)::munmap(trampoline, mappedBytes);
+        error = "the word this entry's jump has to read was mapped further away than the "
+                "jump can name";
+        return false;
+    }
+    written[0] = 0xFFU;
+    written[1] = 0x25U;
+    const auto narrowed = static_cast<std::int32_t>(reach);
+    std::memcpy(written.data() + 2, &narrowed, sizeof(narrowed));
+
+    // What the entry reaches from its first call, in the word before the jump
+    // that reads it exists. A caller with nothing to select yet asks for the
+    // copy, which runs the original: installing early is a write and nothing
+    // else, and choosing comes afterwards.
+    selection->store(replacement != nullptr ? replacement : copy,
+                     std::memory_order_release);
 
     installed.savedBytes.assign(patchAt, patchAt + plan.takenBytes);
 
     const TextWriteResult result = writer.write(patchAt, written.data(), written.size());
     if (!result.changedBytes()) {
-        (void)::munmap(trampoline, trampolineBytes);
+        (void)::munmap(trampoline, mappedBytes);
         installed = RelocatedPrologue{};
         error = result.error;
         return false;
@@ -1030,6 +1053,8 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     installed.plan = plan;
     installed.trampoline = trampoline;
     installed.trampolineBytes = trampolineBytes;
+    installed.mappedBytes = mappedBytes;
+    installed.selection = selection;
     installed.original = copy;
 
     if (!result.complete()) {

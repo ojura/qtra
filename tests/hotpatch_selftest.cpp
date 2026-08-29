@@ -513,7 +513,7 @@ int main(int argc, char** argv)
             std::cerr << "a plain prologue could not be planned: " << why << '\n';
             return 53;
         }
-        if (plan.takenBytes < 5) {
+        if (plan.takenBytes < runtime_agent::entryJumpBytes) {
             std::cerr << "the plan takes fewer bytes than a jump needs\n";
             return 54;
         }
@@ -606,6 +606,210 @@ int main(int argc, char** argv)
             std::cerr << "restoring the counter did not put the original bytes back\n";
             return 68;
         }
+
+        // A replacement in a module the loader placed, which is the case this
+        // backend exists for.
+        //
+        // The old entry jump named its destination as a thirty-two bit
+        // distance, so a module mapped terabytes away could not be reached and
+        // the request was refused for its distance. The entry now reads its
+        // destination from a word placed near itself, so where the replacement
+        // sits stops mattering.
+#if defined(FAR_REPLACEMENT_MODULE)
+        {
+            void* const far = ::dlopen(FAR_REPLACEMENT_MODULE, RTLD_NOW | RTLD_LOCAL);
+            if (far == nullptr) {
+                std::cerr << "the far module would not load: " << ::dlerror() << '\n';
+                return 80;
+            }
+            auto* const farAddsOne =
+                reinterpret_cast<int (*)(int)>(::dlsym(far, "farAddsOne"));
+            auto* const farCalls = static_cast<int*>(::dlsym(far, "farReplacementCalls"));
+            if (farAddsOne == nullptr || farCalls == nullptr) {
+                std::cerr << "the far module does not export what this test needs\n";
+                return 81;
+            }
+
+            // The distance is the reason this test exists, so it is measured
+            // and not assumed. A module close enough to reach would make
+            // everything below pass without exercising anything.
+            const auto entryAt =
+                reinterpret_cast<std::intptr_t>(&fixtureAddsOne);
+            const auto replacementAt = reinterpret_cast<std::intptr_t>(farAddsOne);
+            const std::intptr_t distance = replacementAt - entryAt;
+            const std::intptr_t reach = 0x7FFFFFFF;
+            if (distance <= reach && distance >= -reach) {
+                std::cerr << "the far module landed within a thirty-two bit jump of the "
+                             "target, so this test would prove nothing\n";
+                return 82;
+            }
+
+            why.clear();
+            runtime_agent::ProloguePlan farPlan;
+            if (!runtime_agent::planPrologueRelocation(
+                    reinterpret_cast<void*>(&fixtureAddsOne), farPlan, why)) {
+                std::cerr << "planning for the far replacement failed: " << why << '\n';
+                return 83;
+            }
+            runtime_agent::RelocatedPrologue farMoved;
+            if (!runtime_agent::installRelocatedPrologue(
+                    farPlan, reinterpret_cast<void*>(farAddsOne), quiet, *writer, farMoved,
+                    why)) {
+                std::cerr << "a replacement in a loaded module was refused: " << why << '\n';
+                return 84;
+            }
+
+            const int before = *farCalls;
+            if (fixtureAddsOne(10) != 1010) {
+                std::cerr << "the entry did not reach the replacement in the loaded "
+                             "module\n";
+                return 85;
+            }
+            if (*farCalls != before + 1) {
+                std::cerr << "the answer was right and the module's own counter did not "
+                             "move, so something else produced it\n";
+                return 86;
+            }
+
+            const auto farOriginal = reinterpret_cast<int (*)(int)>(farMoved.original);
+            if (farOriginal(10) != 11) {
+                std::cerr << "the copy does not run what the function did\n";
+                return 87;
+            }
+
+            if (!runtime_agent::restoreRelocatedPrologue(farMoved, quiet, *writer, why)) {
+                std::cerr << "putting the entry back after a far install failed: " << why
+                          << '\n';
+                return 88;
+            }
+            const int after = *farCalls;
+            if (fixtureAddsOne(10) != 11 || *farCalls != after) {
+                std::cerr << "restoring did not stop the entry reaching the module\n";
+                return 89;
+            }
+
+            // The same entry driven by PatchManager, which is what owns
+            // generations, checks who releases what, and allows a release out
+            // of order. An entry with no prepared area now leaves the same
+            // arrangement a prepared one does, so all of that is the same code
+            // and this proves it runs.
+            auto* const farCounter = reinterpret_cast<int (*)(void)>(::dlsym(far, "farCounter"));
+            auto* const farChained =
+                reinterpret_cast<int (*)(void)>(::dlsym(far, "farCounterChained"));
+            auto** const farChainTo =
+                static_cast<int (**)(void)>(::dlsym(far, "farChainTo"));
+            if (farCounter == nullptr || farChained == nullptr || farChainTo == nullptr) {
+                std::cerr << "the far module does not export what the ownership test "
+                             "needs\n";
+                return 90;
+            }
+
+            why.clear();
+            runtime_agent::ProloguePlan counterPlan;
+            if (!runtime_agent::planPrologueRelocation(
+                    reinterpret_cast<void*>(&fixtureCounter), counterPlan, why)) {
+                std::cerr << "planning the counter fixture failed: " << why << '\n';
+                return 91;
+            }
+
+            runtime_agent::PatchManager relocated;
+            const runtime_agent::LiveTextWriteAdmission admission(
+                runtime_agent::WriteAdmissionBasis::AlreadyQuiescent,
+                quiet.name(),
+                "fixtureCounter",
+                "the self-test writes before anything can reach the target");
+            if (!relocated.installRelocatedGateway(counterPlan, admission, quiet, why)) {
+                std::cerr << "installing a gateway on an entry with no prepared area "
+                             "failed: " << why << '\n';
+                return 92;
+            }
+            if (relocated.state() != runtime_agent::PatchState::GatewayOriginal) {
+                std::cerr << "installing selected something other than the original\n";
+                return 93;
+            }
+            if (fixtureCounter() != 42) {
+                std::cerr << "the entry does not reach the original after installing\n";
+                return 94;
+            }
+
+            // The jump written at the entry reads its destination from a
+            // word, so it is an indirect branch. Where the build asks for
+            // landing pads, a replacement that does not begin with one faults
+            // on a machine enforcing them, and refusing is the only way to say
+            // so before it runs.
+            if (counterPlan.keepsLandingPad) {
+                runtime_agent::PatchBinding padless;
+                std::string padError;
+                auto* const notAFunction =
+                    reinterpret_cast<void*>(&fixtureCounterStorage);
+                if (relocated.bind(notAFunction, 7, padless, padError)
+                    || padError.empty()) {
+                    std::cerr << "a replacement with no landing pad was accepted for an "
+                                 "entry reached indirectly\n";
+                    return 105;
+                }
+            }
+
+            // Selecting is a store into the word the entry reads.
+            runtime_agent::PatchBinding farBinding;
+            if (!relocated.bind(reinterpret_cast<void*>(farCounter), 7, farBinding, why)) {
+                std::cerr << "binding a replacement in a loaded module failed: " << why
+                          << '\n';
+                return 95;
+            }
+            if (fixtureCounter() != 4200) {
+                std::cerr << "the entry did not reach the bound replacement\n";
+                return 96;
+            }
+
+            // What a binding reports as the original is the copy of the moved
+            // instructions, which runs what the function did.
+            if (reinterpret_cast<int (*)(void)>(farBinding.original)() != 42) {
+                std::cerr << "the original a binding names does not run the function\n";
+                return 104;
+            }
+
+            // A replacement bound over another chains by calling what it
+            // displaced, which is the one underneath it and not the copy.
+            runtime_agent::PatchBinding chainedBinding;
+            if (!relocated.bind(reinterpret_cast<void*>(farChained), 8, chainedBinding, why)) {
+                std::cerr << "binding over an existing replacement failed: " << why << '\n';
+                return 97;
+            }
+            *farChainTo = reinterpret_cast<int (*)(void)>(chainedBinding.previous);
+            if (fixtureCounter() != 4300) {
+                std::cerr << "the newest replacement did not reach the one underneath "
+                             "it\n";
+                return 98;
+            }
+
+            // Released in the order they were not bound, and by owners that do
+            // not hold them.
+            if (relocated.unbind(chainedBinding.id, 7, why) || why.empty()) {
+                std::cerr << "an owner released a binding it does not hold\n";
+                return 99;
+            }
+            why.clear();
+            if (!relocated.unbind(farBinding.id, 7, why)) {
+                std::cerr << "releasing a binding underneath the selected one failed: "
+                          << why << '\n';
+                return 100;
+            }
+            if (fixtureCounter() != 4300) {
+                std::cerr << "releasing an unselected binding changed what runs\n";
+                return 101;
+            }
+            if (!relocated.unbind(chainedBinding.id, 8, why)) {
+                std::cerr << "releasing the last binding failed: " << why << '\n';
+                return 102;
+            }
+            if (relocated.state() != runtime_agent::PatchState::GatewayOriginal
+                || fixtureCounter() != 42) {
+                std::cerr << "releasing every binding did not return to the original\n";
+                return 103;
+            }
+        }
+#endif
     }
 
     // A replacement that cannot be reached must leave the entry as it was. The

@@ -98,6 +98,12 @@ configure_file(
     "${CMAKE_BINARY_DIR}/generated/agent/patch_area.h"
     @ONLY)
 
+# Loaded at run time, so its code sits where the loader puts it, which is far
+# enough from the executable that a jump naming a thirty-two bit distance cannot
+# reach it. That distance is the whole point of the file.
+add_library(far_replacement MODULE tests/far_replacement.cpp)
+set_target_properties(far_replacement PROPERTIES PREFIX "" OUTPUT_NAME "far_replacement")
+
 add_library(cube_patch_wobble MODULE patches/wobble_patch.cpp)
 target_include_directories(cube_patch_wobble PRIVATE include)
 set_target_properties(cube_patch_wobble PROPERTIES PREFIX "" OUTPUT_NAME "cube_patch_wobble")
@@ -150,6 +156,7 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.cpp
         src/agent/patch_manager.cpp
+        src/agent/prologue_relocation.cpp
         src/agent/patch_registry.cpp
         src/agent/write_admission.cpp
         src/agent/quiescence_providers.cpp
@@ -160,6 +167,10 @@ if(BUILD_HOTPATCH_SELFTEST)
     target_link_libraries(writable_page_selftest PRIVATE ${CMAKE_DL_LIBS})
     target_compile_options(writable_page_selftest PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME writable-page COMMAND writable_page_selftest)
+
+    add_dependencies(hotpatch_selftest far_replacement)
+    target_compile_definitions(hotpatch_selftest PRIVATE
+        FAR_REPLACEMENT_MODULE="$<TARGET_FILE:far_replacement>")
 
     add_test(NAME raw-entry-hotpatch-wobble
              COMMAND hotpatch_selftest $<TARGET_FILE:cube_patch_wobble>)
@@ -437,6 +448,7 @@ if(BUILD_TESTING)
         src/agent/patch_site.cpp
         src/agent/got_site.cpp
         src/agent/patch_manager.cpp
+        src/agent/prologue_relocation.cpp
         src/agent/patch_registry.cpp
         src/agent/write_admission.cpp
         src/agent/quiescence_providers.cpp
