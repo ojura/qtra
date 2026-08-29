@@ -11,6 +11,7 @@
 // need a display for something none of these questions involve.
 
 #include "agent/module_manager.h"
+#include "agent/build_id.h"
 #include "agent/module_registry.h"
 #include "agent/patch_registry.h"
 #include "agent/patch_area.h"
@@ -109,6 +110,25 @@ int main(int argc, char** argv)
             check(described.value(QStringLiteral("stamped")).toBool() == record->stamped,
                   "with the wire saying the same as the record");
         }
+    }
+
+    std::printf("a module built against a different host\n");
+    {
+        // The other side of the comparison. This binary carries its own build
+        // id and the module carries the application's, so two ids are present
+        // and disagree, which is the case the check exists for: the offsets the
+        // module holds describe a different executable.
+        //
+        // Refusing is the whole point, so nothing here is registered and the
+        // reason has to name both builds rather than say the load failed.
+        QString mismatchError;
+        runtime_agent::ModuleRegistry::LoadedModule* refused =
+            registry.loadSnippet(QStringLiteral(STAMPED_MODULE_PATH), mismatchError);
+        check(refused == nullptr, "a module stamped for another build is refused");
+        check(mismatchError.contains(QLatin1String("was compiled against host build")),
+              mismatchError.isEmpty() ? "with a reason" : "and the reason names both builds");
+        check(mismatchError.contains(runtime_agent::hostBuildId()),
+              "including this process's own");
     }
 
     std::printf("one loaded object has one identity\n");

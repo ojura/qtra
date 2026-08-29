@@ -482,6 +482,12 @@ if(BUILD_TESTING)
     # The probe module calls cube_step_builtin, which lives here, so this has to
     # offer its own symbols the way the application does.
     target_link_options(module_teardown_selftest PRIVATE -Wl,--export-dynamic)
+    # The stamped twin is what the mismatch check loads: it carries the
+    # application's build id, and this test binary carries its own, so two ids
+    # are present and disagree.
+    add_dependencies(module_teardown_selftest stamped_module)
+    target_compile_definitions(module_teardown_selftest PRIVATE
+        STAMPED_MODULE_PATH="$<TARGET_FILE:stamped_module>")
     add_test(NAME module-teardown
              COMMAND module_teardown_selftest $<TARGET_FILE:teardown_module>)
 
