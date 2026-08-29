@@ -1065,8 +1065,10 @@ void RuntimeAgent::handlePatchActivate(QLocalSocket* socket,
                   QStringLiteral("moduleId must be an unsigned integer"));
         return;
     }
+    const bool acceptIncomplete =
+        parameters.value(QStringLiteral("acceptIncompleteCoverage")).toBool(false);
     QString error;
-    if (!m_modules.activateEntryPatch(moduleId, error)) {
+    if (!m_modules.activateEntryPatch(moduleId, acceptIncomplete, error)) {
         sendError(socket, requestId, QStringLiteral("patch_failed"), error);
         return;
     }

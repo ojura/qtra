@@ -155,6 +155,8 @@ if(BUILD_QT_APP)
         src/agent/object_registry.cpp
         src/agent/module_manager.h
         src/agent/module_manager.cpp
+        src/agent/coverage_manifest.h
+        src/agent/coverage_manifest.cpp
         src/agent/build_id.h
         src/agent/build_id.cpp
         src/agent/runtime_agent.h

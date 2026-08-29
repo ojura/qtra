@@ -2,6 +2,7 @@
 
 #include "agent/build_id.h"
 #include "agent/patch_area.h"
+#include "agent/coverage_manifest.h"
 #include "agent/quiescence_providers.h"
 #include "agent/patch_site.h"
 #include "cube_widget.h"
@@ -272,7 +273,33 @@ QJsonArray ModuleManager::list() const
     return result;
 }
 
-bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
+namespace {
+
+// Where the build left its decision, beside the artifacts it describes.
+QString manifestPath()
+{
+    return QStringLiteral("%1/coverage-manifest.json").arg(QStringLiteral(DEMO_BUILD_DIR));
+}
+
+} // namespace
+
+QJsonObject ModuleManager::coverage() const
+{
+    const runtime_agent::CoverageDecision decision = runtime_agent::readCoverageManifest(
+        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
+    return QJsonObject{
+        {QStringLiteral("coverage"), decision.present() ? QJsonValue(decision.coverage)
+                                                        : QJsonValue()},
+        {QStringLiteral("allow"), decision.allow},
+        {QStringLiteral("reason"), decision.reason},
+        {QStringLiteral("manifestBuildId"), decision.manifestBuildId.isEmpty()
+            ? QJsonValue() : QJsonValue(decision.manifestBuildId)},
+    };
+}
+
+bool ModuleManager::activateEntryPatch(const quint64 id,
+                                       const bool acceptIncompleteCoverage,
+                                       QString& error)
 {
     LoadedModule* loaded = module(id);
     if (loaded == nullptr || loaded->kind != Kind::CubePatch || loaded->cubePatch == nullptr) {
@@ -289,6 +316,19 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
 #else
     if (QThread::currentThread() != m_cube->thread()) {
         error = QStringLiteral("entry patches must be installed from the cube's owning thread");
+        return false;
+    }
+
+    // What the build established about replacing this function. Refused by
+    // default: a build that recorded nothing has not been asked whether the
+    // replacement reaches every call, and treating silence as approval is the
+    // thing the manifest exists to prevent.
+    const runtime_agent::CoverageDecision decided = runtime_agent::readCoverageManifest(
+        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
+    if (!decided.allow && !acceptIncompleteCoverage) {
+        error = QStringLiteral("%1. Pass acceptIncompleteCoverage to proceed anyway, "
+                               "which activates a replacement that may not reach every "
+                               "caller").arg(decided.reason);
         return false;
     }
 
@@ -442,6 +482,7 @@ QJsonObject ModuleManager::patchStatus() const
         // original function, so the entry can be rewritten while mode is
         // builtin. One field rather than several booleans, because most
         // combinations of those would describe nothing that can happen.
+        {QStringLiteral("coverage"), coverage()},
         {QStringLiteral("entryState"),
          QString::fromLatin1(runtime_agent::describe(patch.state))},
         {QStringLiteral("gatewaySlot"), patch.slotAddress != nullptr

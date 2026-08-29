@@ -99,7 +99,13 @@ public:
     [[nodiscard]] LoadedModule* module(quint64 id) const;
     [[nodiscard]] QJsonArray list() const;
 
-    [[nodiscard]] bool activateEntryPatch(quint64 id, QString& error);
+    // acceptIncompleteCoverage proceeds when the build could not establish that
+    // replacing the target reaches every call. It is a request a caller has to
+    // make, because the default is to refuse what nobody has shown to be safe.
+    [[nodiscard]] bool activateEntryPatch(quint64 id,
+                                          bool acceptIncompleteCoverage,
+                                          QString& error);
+    [[nodiscard]] QJsonObject coverage() const;
     [[nodiscard]] bool rollback(QString& error);
 
     // Binding a replacement on behalf of a loaded module. Returns 0, or the
