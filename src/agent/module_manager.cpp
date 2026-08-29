@@ -342,6 +342,20 @@ int ModuleManager::bindReplacement(void* target,
                                    runtime_agent::PatchBinding& binding,
                                    QString& error)
 {
+    // A module keeps a copy of the host struct and may call this from anywhere,
+    // including a worker. Everything below reaches the widget: the quiescence
+    // provider stops its timer and the result relabels it, and Qt forbids both
+    // from another thread. Refusing is the answer, because doing the work on the
+    // wrong thread fails as a race inside the process instead of as an error
+    // anyone can see.
+    if (QThread::currentThread() != m_cube->thread()) {
+        error = QStringLiteral(
+            "patch_bind reaches the target's own widget, so it has to be called from "
+            "the thread that owns it. A snippet should bind from the executor its "
+            "target runs on");
+        return -3;
+    }
+
     if (target != reinterpret_cast<void*>(&cube_step_builtin)) {
         error = QStringLiteral(
             "this runtime resolves one target so far, cube_step_builtin at %1. The host "
@@ -379,6 +393,15 @@ int ModuleManager::releaseBinding(const std::uint64_t bindingId,
                                   const quint64 owner,
                                   QString& error)
 {
+    // Same reason as binding: this relabels the widget when the last binding
+    // goes, and that is not a cross-thread operation.
+    if (QThread::currentThread() != m_cube->thread()) {
+        error = QStringLiteral(
+            "patch_unbind reaches the target's own widget, so it has to be called from "
+            "the thread that owns it");
+        return -3;
+    }
+
     std::string nativeError;
     if (!m_patches.unbind(bindingId, owner, nativeError)) {
         error = QString::fromStdString(nativeError);

@@ -222,9 +222,11 @@ if(BUILD_QT_APP)
  CubeWidget::advanceAnimation, connected to a QTimer owned by the widget, and the\
  agent's own request handler runs on that same thread"
                         --caller-domain-strength declared
-                        --caller-domain-caveat "a nested event loop. QMessageBox::about\
- in the Help menu runs one, so during a modal dialog the GUI thread is inside a second\
- loop and a request boundary is no longer a moment when the target is provably idle"
+                        --caller-domain-caveat "reentrancy that leaves this target on\
+ the stack. A nested event loop only matters if a patch request can be admitted while a\
+ frame of the target, or of something holding the patch region, is still active. This\
+ target is arithmetic that returns before any modal path runs, so a dialog does not\
+ reach it; a target that pumps events would need this restated"
                         --output ${RUNTIME_AGENT_COVERAGE_MANIFEST}
                 DEPENDS qt_runtime_cube ${CMAKE_SOURCE_DIR}/tools/analyze_coverage.py
                 COMMENT "Deciding whether replacing the target can be complete"

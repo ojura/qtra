@@ -208,9 +208,15 @@ struct RuntimeAgentHost {
     // Nothing is ever unloaded, so a bound replacement stays reachable for the
     // life of the process even after its binding is released.
 
+    // Call from the executor the target runs on. A binding reaches the object
+    // that owns the target, and a host is free to refuse a call from anywhere
+    // else, because doing that work on the wrong thread fails as a race rather
+    // than as an error.
+    //
     // Returns 0 on success, filling *out. Negative on failure: -1 for a target
     // that cannot be patched, -2 for a replacement the target cannot reach, and
-    // -3 when the host refused for a reason of its own.
+    // -3 when the host refused for a reason of its own, including being called
+    // from the wrong thread.
     std::int32_t (*patch_bind)(void* agent_context,
                                void* target,
                                void* replacement,
