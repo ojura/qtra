@@ -176,6 +176,16 @@ bool siteAcceptsGateway(const PatchSite& site, std::string& error)
     return true;
 }
 
+bool processRequiresLandingPads() noexcept
+{
+    // GCC and Clang set bit 1 of __CET__ for -fcf-protection=branch and =full.
+#if defined(__CET__) && ((__CET__ & 2) != 0)
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool replacementIsReachable(const PatchSite& site, const void* replacement, std::string& error)
 {
     error.clear();
@@ -184,10 +194,29 @@ bool replacementIsReachable(const PatchSite& site, const void* replacement, std:
         return false;
     }
 
-    if (site.requiresEndbr64
+    // Two reasons to require a landing pad, and either one is enough.
+    //
+    // site.requiresEndbr64 says the target function begins with one, which is a
+    // fact about how that function was compiled. The process is the thing that
+    // enforces branch tracking, and a function carrying nocf_check has no pad
+    // while tracking is still on around it, so the site alone admits a
+    // replacement that faults on the first call through the gateway.
+    //
+    // What the build asked for answers the process question. __CET__ carries
+    // bit 1 where -fcf-protection turned branch tracking on, and it is the same
+    // build that writes the indirect jump this rule is about. Where the loader
+    // has switched tracking off because some object lacks the property, this
+    // asks for a pad that nothing checks, which costs a replacement that would
+    // have worked and never admits one that faults.
+    const bool processTracksBranches = processRequiresLandingPads();
+    if ((site.requiresEndbr64 || processTracksBranches)
         && std::memcmp(replacement, endbr64Bytes, sizeof(endbr64Bytes)) != 0) {
-        error = "this entry sits behind a CET landing pad, so the jump to it is indirect "
-                "and anything it reaches has to begin with ENDBR64";
+        error = processTracksBranches
+            ? "this build turned on indirect branch tracking, and the gateway reaches a "
+              "replacement through an indirect jump, so the replacement has to begin with "
+              "ENDBR64"
+            : "this entry sits behind a CET landing pad, so the jump to it is indirect "
+              "and anything it reaches has to begin with ENDBR64";
         return false;
     }
     return true;

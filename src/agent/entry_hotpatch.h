@@ -161,6 +161,14 @@ struct GatewayLayout {
 [[nodiscard]] bool siteAcceptsGateway(const PatchSite& site) noexcept;
 [[nodiscard]] bool siteAcceptsGateway(const PatchSite& site, std::string& error);
 
+// Whether this process enforces indirect branch tracking, which decides whether
+// anything the gateway jumps to needs a landing pad.
+//
+// Asked of the build rather than of the target's bytes. A function's own
+// prologue says how that function was compiled, and nocf_check leaves a
+// function without a pad in a process that still tracks branches.
+[[nodiscard]] bool processRequiresLandingPads() noexcept;
+
 // Whether the gateway's indirect jump may land on this address. Under CET an
 // indirect branch is only allowed to reach an ENDBR64.
 [[nodiscard]] bool replacementIsReachable(const PatchSite& site,

@@ -243,6 +243,28 @@ int main(int argc, char** argv)
         return 11;
     }
 
+    // A site whose own function has no landing pad, which nocf_check produces,
+    // in a build that tracks indirect branches. The gateway still reaches the
+    // replacement through an indirect jump, so the requirement comes from the
+    // build and not from the target's first four bytes.
+    runtime_agent::PatchSite padlessSite = cetSite;
+    padlessSite.requiresEndbr64 = false;
+    refusal.clear();
+    const bool reachable =
+        runtime_agent::replacementIsReachable(padlessSite, notALandingPad.data(), refusal);
+    if (runtime_agent::processRequiresLandingPads()) {
+        if (reachable || refusal.find("indirect branch tracking") == std::string::npos) {
+            std::cerr << "a build that tracks indirect branches accepted a replacement "
+                         "without ENDBR64 at a site that has no landing pad of its own: "
+                      << refusal << '\n';
+            return 116;
+        }
+    } else if (!reachable) {
+        std::cerr << "a build that does not track indirect branches refused a replacement "
+                     "for want of a landing pad: " << refusal << '\n';
+        return 117;
+    }
+
     // A call into a library this build does not produce, redirected without a
     // prepared area and without writing anyone's code.
     //
