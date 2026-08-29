@@ -109,19 +109,27 @@ set_target_properties(cube_patch_reverse PROPERTIES PREFIX "" OUTPUT_NAME "cube_
 if(BUILD_HOTPATCH_SELFTEST)
     add_executable(hotpatch_selftest
         tests/hotpatch_selftest.cpp
+        tests/prologue_fixtures.cpp
         src/cube_step.cpp
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.cpp
     src/agent/got_site.h
     src/agent/got_site.cpp
         src/agent/got_site.cpp
+        src/agent/prologue_relocation.cpp
         src/agent/patch_manager.cpp
         src/agent/patch_registry.cpp
         src/agent/write_admission.cpp
         src/agent/quiescence_providers.cpp
     )
-    target_include_directories(hotpatch_selftest PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
+    target_include_directories(hotpatch_selftest
+        PRIVATE include src ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/generated)
     target_link_libraries(hotpatch_selftest PRIVATE ${CMAKE_DL_LIBS})
+    # Relocating a prologue needs the function's extent, which comes from the
+    # dynamic symbol table. Without exported symbols the loader cannot name
+    # anything in this binary and every plan refuses for a reason that is about
+    # the link and not about the function.
+    target_link_options(hotpatch_selftest PRIVATE -Wl,--export-dynamic)
     target_compile_options(hotpatch_selftest PRIVATE
         -Wall -Wextra -Wpedantic
         $<$<CONFIG:Release>:-O3>
@@ -148,6 +156,8 @@ qt_add_executable(qt_runtime_cube
     src/agent/entry_hotpatch.cpp
     src/agent/patch_site.h
     src/agent/patch_site.cpp
+    src/agent/prologue_relocation.h
+    src/agent/prologue_relocation.cpp
     src/agent/gateway_record.h
     src/agent/quiescence.h
     src/agent/quiescence_providers.h
