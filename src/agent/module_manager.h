@@ -2,7 +2,7 @@
 
 #include "agent/agent_abi.h"
 #include "agent/coverage_manifest.h"
-#include "agent/patch_manager.h"
+#include "agent/patch_registry.h"
 #include "demo/cube_step_abi.h"
 
 #include <QJsonArray>
@@ -137,7 +137,11 @@ private:
     CubeWidget* m_cube = nullptr;
     quint64 m_nextId = 1;
     std::unordered_map<quint64, std::unique_ptr<LoadedModule>> m_modules;
-    runtime_agent::PatchManager m_patches;
+    // Borrowed from the registry, which outlives this. What a gateway leaves
+    // behind is referred to by the process's own text, so destroying this must
+    // not take it: an agent torn down and built again finds the same manager
+    // with the same gateway and the same recovery state.
+    runtime_agent::PatchManager& m_patches;
     quint64 m_activeEntryModule = 0;
     // The protocol's own binding, so releasing it goes through the same
     // generation rule a snippet's binding does.

@@ -25,9 +25,17 @@ std::string errnoMessage(const char* operation)
 
 } // namespace
 
-TextWriteResult writeMappedText(void* address, const std::uint8_t* bytes, const std::size_t size)
+TextWriteResult MappedTextWriter::write(void* address,
+                                        const std::uint8_t* bytes,
+                                        const std::size_t size)
 {
     return writeText(address, bytes, size, nullptr);
+}
+
+std::shared_ptr<TextWriter> processTextWriter()
+{
+    static const std::shared_ptr<TextWriter> writer = std::make_shared<MappedTextWriter>();
+    return writer;
 }
 
 TextWriteResult writeText(void* address,

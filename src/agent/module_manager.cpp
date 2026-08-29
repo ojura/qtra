@@ -129,6 +129,8 @@ bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
 
 ModuleManager::ModuleManager(CubeWidget* cube)
     : m_cube(cube)
+    , m_patches(runtime_agent::PatchRegistry::instance().forEntry(
+          reinterpret_cast<void*>(&cube_step_builtin)))
 {
 }
 

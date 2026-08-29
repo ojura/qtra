@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -56,15 +57,42 @@ using ProtectFunction = int (*)(void* address, std::size_t length, int protectio
 // could not be restored, because it is the only one that leaves the process
 // changed while the caller is told nothing worked. A real mprotect does not
 // fail on demand, so reaching it means supplying a writer that reports it.
-using TextWriter = TextWriteResult (*)(void* address,
-                                       const std::uint8_t* bytes,
-                                       std::size_t size);
+//
+// An object and not a function pointer, so a writer owns whatever it needs to
+// answer differently on different calls. A test that counts its own writes then
+// keeps that count to itself, and two tests running against one process do not
+// share it.
+//
+// Held by shared_ptr, because what a writer writes into outlives most of what
+// asks for a write. A gateway's storage is never reclaimed and an install that
+// could not finish keeps its saved bytes until something recovers them, so the
+// writer that recovery will use has to still be there when whoever installed
+// the gateway is long gone. Sharing ownership is what makes that a fact instead
+// of a rule somebody has to follow.
+class TextWriter {
+public:
+    TextWriter() = default;
+    TextWriter(const TextWriter&) = delete;
+    TextWriter& operator=(const TextWriter&) = delete;
+    virtual ~TextWriter() = default;
 
-// Writes into this process's own mapped text, which is what an owner that was
-// given no writer of its own uses.
-[[nodiscard]] TextWriteResult writeMappedText(void* address,
-                                              const std::uint8_t* bytes,
-                                              std::size_t size);
+    // The writer is fixed for its owner's life; what it answers is per call.
+    [[nodiscard]] virtual TextWriteResult write(void* address,
+                                                const std::uint8_t* bytes,
+                                                std::size_t size) = 0;
+};
+
+// Writes into this process's own mapped text, which is what an owner given no
+// writer of its own uses.
+class MappedTextWriter final : public TextWriter {
+public:
+    [[nodiscard]] TextWriteResult write(void* address,
+                                        const std::uint8_t* bytes,
+                                        std::size_t size) override;
+};
+
+// The one every owner shares unless it was given another.
+[[nodiscard]] std::shared_ptr<TextWriter> processTextWriter();
 
 
 // How a gateway is laid out inside a prepared area.

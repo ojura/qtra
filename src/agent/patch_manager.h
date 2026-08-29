@@ -9,6 +9,7 @@
 #include "agent/patch_site.h"
 #include "agent/quiescence.h"
 
+#include <cassert>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -73,9 +74,13 @@ public:
     // What does the writing is given, so a test can reach the state where the
     // copy has happened and the mapping has not been put back without the
     // product carrying a way to ask for that.
-    explicit PatchManager(TextWriter writer = &writeMappedText) noexcept
-        : m_write(writer)
+    // Shares ownership of its writer, so the writer cannot go before the
+    // manager does. Recovery is a write, and what needs recovering can outlast
+    // everything that asked for the install.
+    explicit PatchManager(std::shared_ptr<TextWriter> writer = processTextWriter())
+        : m_write(std::move(writer))
     {
+        assert(m_write != nullptr && "a patch manager needs something to write with");
     }
 
     PatchManager(const PatchManager&) = delete;
@@ -148,7 +153,7 @@ private:
     void publishSelection() noexcept;
 
     PatchState m_state = PatchState::NoGateway;
-    TextWriter m_write = nullptr;
+    std::shared_ptr<TextWriter> m_write;
 
     std::unique_ptr<GatewayRecord> m_record;
     std::vector<std::uint8_t> m_original;

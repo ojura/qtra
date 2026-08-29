@@ -1,5 +1,5 @@
 #include "agent/entry_hotpatch.h"
-#include "agent/patch_manager.h"
+#include "agent/patch_registry.h"
 #include "agent/quiescence_providers.h"
 #include "agent/patch_area.h"
 #include "agent/patch_site.h"
@@ -44,21 +44,27 @@ int failRestoreProtect(void* address, std::size_t length, int protection)
     return -1;
 }
 
-// Fails the restore on the first write and behaves normally afterwards, so one
-// manager can be driven into recovery and then back out of it. A manager is
-// given its writer once, and recovery is itself a write.
-bool restoreFailsOnce = true;
-
-runtime_agent::TextWriteResult writeFailingFirstRestore(void* address,
-                                                        const std::uint8_t* bytes,
-                                                        const std::size_t size)
-{
-    if (restoreFailsOnce) {
-        restoreFailsOnce = false;
-        return runtime_agent::writeText(address, bytes, size, &failRestoreProtect);
+// Fails the restore on its first write and behaves normally afterwards, so one
+// manager can be driven into recovery and then back out of it: a manager is
+// given its writer once, and recovery is itself a write. The count belongs to
+// the writer, so another one made here starts again from the beginning.
+class FailFirstRestoreWriter final : public runtime_agent::TextWriter {
+public:
+    [[nodiscard]] runtime_agent::TextWriteResult write(void* address,
+                                                       const std::uint8_t* bytes,
+                                                       const std::size_t size) override
+    {
+        if (m_pending) {
+            m_pending = false;
+            return runtime_agent::writeText(address, bytes, size, &failRestoreProtect);
+        }
+        return m_mapped.write(address, bytes, size);
     }
-    return runtime_agent::writeMappedText(address, bytes, size);
-}
+
+private:
+    bool m_pending = true;
+    runtime_agent::MappedTextWriter m_mapped;
+};
 #endif
 
 } // namespace
@@ -166,7 +172,8 @@ int main(int argc, char** argv)
     // slot already names the continuation at that point, so the original still
     // runs, and the saved bytes are the only way back to a pristine entry.
     {
-        runtime_agent::PatchManager faulted(&writeFailingFirstRestore);
+        runtime_agent::PatchRegistry registry(std::make_shared<FailFirstRestoreWriter>());
+        runtime_agent::PatchManager& faulted = registry.forEntry(site.entry);
         runtime_agent::PatchBinding binding;
         std::string faultError;
         if (faulted.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, binding, faultError)) {
@@ -183,13 +190,47 @@ int main(int argc, char** argv)
             return 14;
         }
 
-        if (!faulted.recover(faultError)) {
-            std::cerr << "recovery failed: " << faultError << '\n';
+        // What a later caller finds. The registry owns the manager, so asking
+        // for this entry again reaches the same one, still holding the saved
+        // bytes and the lease the failed write left. Whoever asked first is
+        // irrelevant to that, which is the point: recovery does not depend on
+        // the caller that caused the damage still being around.
+        runtime_agent::PatchManager& successor = registry.forEntry(site.entry);
+        if (&successor != &faulted) {
+            std::cerr << "asking for one entry twice gave two managers\n";
             return 15;
+        }
+        if (successor.state() != runtime_agent::PatchState::RecoveryRequired) {
+            std::cerr << "the registry did not keep what the failed write left\n";
+            return 16;
+        }
+        if (successor.status().slotAddress != faulted.status().slotAddress) {
+            std::cerr << "the gateway slot moved between two asks for one entry\n";
+            return 17;
+        }
+
+        // A different entry is a different manager, so one site's trouble is
+        // not another's.
+        int elsewhere = 0;
+        runtime_agent::PatchManager& other = registry.forEntry(&elsewhere);
+        if (&other == &faulted) {
+            std::cerr << "two entries shared one manager\n";
+            return 18;
+        }
+        if (!registry.knows(site.entry) || registry.entries().size() != 2) {
+            std::cerr << "the registry lost track of what it made\n";
+            return 19;
+        }
+
+        // Recovering through the second reference proves it is the same state
+        // and not a copy that merely reports the same thing.
+        if (!successor.recover(faultError)) {
+            std::cerr << "recovery failed: " << faultError << '\n';
+            return 20;
         }
         if (faulted.state() != runtime_agent::PatchState::NoGateway) {
             std::cerr << "recovery did not return the entry to its own bytes\n";
-            return 16;
+            return 21;
         }
     }
 
