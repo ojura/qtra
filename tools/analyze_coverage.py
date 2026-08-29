@@ -32,8 +32,22 @@ declaration, so there is nothing for them to have inlined.
 
 Knowing every call site is not knowing when they run. A complete call graph
 says who calls a function and never on which thread, so the execution domain of
-the callers is recorded as its own field and is declared by whoever embeds the
-agent rather than derived here. Nothing in an ELF file answers it.
+the callers is recorded as its own field. Nothing in an ELF file answers it.
+
+How well it is known matters as much as what is claimed, so the field carries a
+strength:
+
+  proved     every caller is enumerated and each one's thread is established
+  declared   the embedding states it and takes responsibility for the claim
+  observed   only this was seen happening, which is not the same as this being
+             all that can happen
+  unknown    nobody has said
+
+Only proved and declared may stand in for stopping execution at a request
+boundary. Observed cannot: watching a function and seeing one thread reach it
+does not rule out a worker that reaches it under a condition nobody exercised,
+so it selects stop-all or refusal unless a caller has explicitly asked for
+best effort.
 """
 
 from __future__ import annotations
@@ -172,6 +186,7 @@ def analyze(binary: pathlib.Path,
             target: str,
             source_hint: str,
             caller_domain: str | None,
+            domain_strength: str,
             domain_caveat: str | None) -> dict[str, object]:
     prepared = preparation(compile_db, source_hint)
     found_aliases = aliases_at(binary, target)
@@ -209,9 +224,14 @@ def analyze(binary: pathlib.Path,
     # folded into the coverage verdict: it answers whether the target can be
     # written safely at a given moment, which is a different question from
     # whether replacing it reaches everything.
+    # Only a claim somebody takes responsibility for, or one established over
+    # every caller, may stand in for stopping execution. Having watched a
+    # function and seen one thread reach it is a different and weaker thing.
+    strength = domain_strength if caller_domain else "unknown"
     domain = {
-        "declared": caller_domain,
-        "provenance": "declared by the embedding, not derived from the binary",
+        "strength": strength,
+        "claim": caller_domain,
+        "authorizesRequestBoundary": strength in ("proved", "declared"),
         "caveat": domain_caveat,
     }
 
@@ -252,6 +272,11 @@ def main() -> int:
     parser.add_argument("--caller-domain",
                         help="which threads the callers of this target run on, if the "
                              "embedding knows. Recorded as a claim, never derived")
+    parser.add_argument("--caller-domain-strength",
+                        choices=("proved", "declared", "observed", "unknown"),
+                        default="unknown",
+                        help="how well that is known. Only proved and declared may "
+                             "stand in for stopping execution")
     parser.add_argument("--caller-domain-caveat",
                         help="what would make the declaration untrue")
     parser.add_argument("--output", type=pathlib.Path)
@@ -259,7 +284,8 @@ def main() -> int:
 
     compile_db = args.compile_db or (args.build_dir / "compile_commands.json")
     report = analyze(args.binary, args.build_dir, compile_db, args.target,
-                     args.source_hint, args.caller_domain, args.caller_domain_caveat)
+                     args.source_hint, args.caller_domain,
+                     args.caller_domain_strength, args.caller_domain_caveat)
     if report["buildId"] is None:
         print("the binary carries no build id, so a manifest could not be tied to it",
               file=sys.stderr)

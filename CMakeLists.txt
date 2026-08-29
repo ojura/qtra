@@ -221,6 +221,7 @@ if(BUILD_QT_APP)
                         --caller-domain "the GUI thread only: the sole caller is\
  CubeWidget::advanceAnimation, connected to a QTimer owned by the widget, and the\
  agent's own request handler runs on that same thread"
+                        --caller-domain-strength declared
                         --caller-domain-caveat "a nested event loop. QMessageBox::about\
  in the Help menu runs one, so during a modal dialog the GUI thread is inside a second\
  loop and a request boundary is no longer a moment when the target is provably idle"
