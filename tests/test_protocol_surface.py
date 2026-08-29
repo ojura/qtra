@@ -162,6 +162,35 @@ class LiveDispatch(unittest.TestCase):
         self.assertIn("object.list", listed, "a command the agent answers itself is missing")
         self.assertIn("cube.state", listed, "a command the application registered is missing")
 
+    def test_a_non_string_event_prefix_is_refused(self) -> None:
+        """A prefix that is not a string used to match everything.
+
+        Coercing it gave the empty string, and every event name starts with
+        that, so a subscription meant to be narrow delivered the lot.
+        """
+        for prefixes in ([42], [None], [{}], [""]):
+            with self.subTest(prefixes=prefixes):
+                answer = self.agent.call("event.subscribe", prefixes=prefixes)
+                self.assertFalse(answer["ok"], f"{prefixes!r} was accepted")
+                self.assertIn("prefix", answer["error"]["message"].lower())
+
+    def test_event_history_refuses_the_same_prefixes(self) -> None:
+        """The same rule, at the other place that reads prefixes."""
+        answer = self.agent.call("event.history", prefixes=[7], limit=4)
+        self.assertFalse(answer["ok"])
+        self.assertIn("prefix", answer["error"]["message"].lower())
+
+    def test_snippet_run_refuses_a_selector_it_never_reads(self) -> None:
+        """objectName and id were declared and read by nothing.
+
+        A parameter the command admits and ignores is worse than one it
+        refuses: the caller believes it selected something.
+        """
+        answer = self.agent.call("snippet.run", moduleId="1", executor="gui",
+                                 request={}, objectName="mainWindow")
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["error"]["code"], "unknown_parameter")
+
     def test_a_command_the_application_registered_answers(self) -> None:
         """Listed is not the same as reachable, so ask one and read the answer."""
         state = self.agent.ok("cube.state")

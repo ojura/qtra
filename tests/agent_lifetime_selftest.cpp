@@ -13,6 +13,7 @@
 #include "agent/runtime_agent.h"
 
 #include <QCoreApplication>
+#include <QFile>
 #include <QLocalSocket>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -182,6 +183,40 @@ int main(int argc, char** argv)
         check(called, "the saved host is still callable");
         check(logLinesAfterTeardown.load(std::memory_order_acquire) > 0,
               "and its log reaches the process log, which needs no live agent");
+    }
+
+    std::printf("something already at the socket path\n");
+    {
+        // Starting used to clear whatever was in the way. A socket path is
+        // ordinary filesystem namespace, so what is in the way can be a file
+        // somebody wants, and an agent that deletes it to get its own listener
+        // has destroyed data to start faster.
+        const QString occupied =
+            QStringLiteral("/tmp/agent-lifetime-occupied-%1").arg(::getpid());
+        {
+            QFile file(occupied);
+            check(file.open(QIODevice::WriteOnly), "a regular file exists at the path");
+            file.write("not a socket, and not the agent's to remove\n");
+        }
+        const QByteArray before = [&] {
+            QFile file(occupied);
+            return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        }();
+        check(!before.isEmpty(), "with contents to compare against");
+
+        QObject anotherRoot;
+        RuntimeAgent blocked(&anotherRoot, occupied);
+        QString why;
+        check(!blocked.start(why), "starting there is refused");
+        check(!why.isEmpty(), why.isEmpty() ? "with a reason" : qPrintable(why));
+
+        QFile after(occupied);
+        check(after.exists(), "and the file is still there");
+        if (after.open(QIODevice::ReadOnly)) {
+            check(after.readAll() == before, "with its contents unchanged");
+            after.close();
+        }
+        QFile::remove(occupied);
     }
 
     qInstallMessageHandler(previousHandler);
