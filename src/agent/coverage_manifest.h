@@ -16,6 +16,13 @@
 namespace runtime_agent {
 
 struct CoverageDecision {
+    // Whether this verdict is about this build and this function. False for a
+    // missing or unreadable manifest, a different build id, and a different
+    // target. Separate from allow, because those are refusals no caller may
+    // accept its way past: they mean nothing was decided about the entry that
+    // is about to be written.
+    bool describesThisTarget = false;
+
     // complete, incomplete or unknown, as the build found it. Empty when no
     // manifest was found at all, which is its own answer.
     QString coverage;
@@ -50,5 +57,20 @@ struct CoverageDecision {
 [[nodiscard]] CoverageDecision readCoverageManifest(const QString& manifestPath,
                                                     const QString& hostBuildId,
                                                     const QString& target);
+
+// Whether the entry may be written, given what the build decided.
+//
+// The order matters and the questions are not interchangeable. Whether the
+// manifest is about this binary and this function, and whether the recorded
+// claim about which threads reach it is strong enough to write while the
+// process runs, are settled first and cannot be accepted past. Only then may a
+// caller take a replacement that some callers will not reach, which is the one
+// thing acceptIncompleteCoverage means.
+//
+// Putting the flag first would let it wave through a manifest for another
+// build, which is the case with the least evidence behind it.
+[[nodiscard]] bool admitsEntryWrite(const CoverageDecision& decision,
+                                    bool acceptIncompleteCoverage,
+                                    QString& error);
 
 } // namespace runtime_agent

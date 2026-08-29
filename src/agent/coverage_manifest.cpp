@@ -59,6 +59,10 @@ CoverageDecision readCoverageManifest(const QString& manifestPath,
         return decision;
     }
 
+    // Past this point the verdict is about this binary and this function, so
+    // what it says about them can be read.
+    decision.describesThisTarget = true;
+
     const QJsonObject domain =
         report.value(QStringLiteral("callerExecutionDomain")).toObject();
     decision.domainStrength = domain.value(QStringLiteral("strength")).toString();
@@ -89,6 +93,41 @@ CoverageDecision readCoverageManifest(const QString& manifestPath,
     decision.reason = QStringLiteral("coverage is complete for %1 in build %2")
                           .arg(decision.target, decision.manifestBuildId);
     return decision;
+}
+
+bool admitsEntryWrite(const CoverageDecision& decision,
+                      const bool acceptIncompleteCoverage,
+                      QString& error)
+{
+    if (!decision.describesThisTarget) {
+        error = decision.reason;
+        return false;
+    }
+
+    // The write happens because this thread is the only one that reaches the
+    // target, and that claim comes from the manifest. A claim that was only
+    // observed does not support it: having seen one thread arrive says nothing
+    // about one that arrives under a condition nobody exercised.
+    if (!decision.authorizesRequestBoundary) {
+        error = QStringLiteral(
+            "the recorded claim about which threads reach this function is %1, which "
+            "does not support writing its entry while the process runs. Only a proved "
+            "or declared claim does")
+            .arg(decision.domainStrength.isEmpty() ? QStringLiteral("absent")
+                                                   : decision.domainStrength);
+        return false;
+    }
+
+    if (!decision.allow) {
+        if (acceptIncompleteCoverage) {
+            return true;
+        }
+        error = QStringLiteral("%1. Accept incomplete coverage to proceed anyway, which "
+                               "installs a replacement that may not reach every caller")
+                    .arg(decision.reason);
+        return false;
+    }
+    return true;
 }
 
 } // namespace runtime_agent

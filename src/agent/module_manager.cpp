@@ -273,7 +273,6 @@ QJsonArray ModuleManager::list() const
 namespace {
 
 // Where the build left its decision, beside the artifacts it describes.
-// Where the build left its decision, beside the artifacts it describes.
 //
 // Baked in at compile time, so moving the executable away from its build tree
 // leaves this pointing at nothing and every activation refuses. A generic
@@ -306,37 +305,10 @@ bool ModuleManager::admits(const bool acceptIncompleteCoverage, QString& error) 
     // default: a build that recorded nothing has not been asked whether the
     // replacement reaches every call, and treating silence as approval is the
     // thing the manifest exists to prevent.
-    const runtime_agent::CoverageDecision decided = runtime_agent::readCoverageManifest(
-        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
-
-    if (!decided.allow) {
-        if (acceptIncompleteCoverage) {
-            return true;
-        }
-        error = QStringLiteral("%1. Accept incomplete coverage to proceed anyway, which "
-                               "installs a replacement that may not reach every caller")
-                    .arg(decided.reason);
-        return false;
-    }
-
-    // The write happens because this thread is the only one that reaches the
-    // target, and that claim comes from the manifest. A claim that was only
-    // observed does not support it: having seen one thread arrive says nothing
-    // about one that arrives under a condition nobody exercised.
-    // Not overridable. Accepting incomplete coverage accepts that some callers
-    // keep running the original, which is a wrong effect. This is a different
-    // question: whether writing the bytes at all is safe while the process
-    // runs. Nobody can consent to that on the strength of not knowing.
-    if (!decided.authorizesRequestBoundary) {
-        error = QStringLiteral(
-            "the recorded claim about which threads reach this function is %1, which "
-            "does not support writing its entry while the process runs. Only a proved "
-            "or declared claim does")
-            .arg(decided.domainStrength.isEmpty() ? QStringLiteral("absent")
-                                                  : decided.domainStrength);
-        return false;
-    }
-    return true;
+    return runtime_agent::admitsEntryWrite(
+        runtime_agent::readCoverageManifest(manifestPath(), runtime_agent::hostBuildId(),
+                                            QStringLiteral("cube_step_builtin")),
+        acceptIncompleteCoverage, error);
 }
 
 bool ModuleManager::activateEntryPatch(const quint64 id,
