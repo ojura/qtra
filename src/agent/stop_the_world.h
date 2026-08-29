@@ -54,7 +54,8 @@ public:
     // The signal used to park threads, and how long to wait for all of them.
     //
     // A real-time signal by default, because those are not used by the C
-    // library for anything of its own and are queued rather than merged. An
+    // library for anything of its own, and because they queue: two sent to one
+    // thread arrive twice, where two of a standard signal can arrive once. An
     // application already using one for its own purposes should say so.
     explicit StopTheWorldQuiescer(int signalNumber = 0,
                                   std::chrono::milliseconds deadline
