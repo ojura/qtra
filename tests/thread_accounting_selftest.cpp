@@ -11,6 +11,8 @@
 #include <atomic>
 #include <csignal>
 #include <chrono>
+#include <pthread.h>
+#include <sys/stat.h>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -60,6 +62,65 @@ __attribute__((noinline)) void tightSpin()
     while (keepTight.load(std::memory_order_acquire)) {
         // Nothing. A call here would put the thread in the callee.
     }
+}
+
+std::atomic<bool> keepBlocking{true};
+std::atomic<int> blocking{0};
+
+// Blocks the parking signal and then waits. A signal sent to this thread would
+// sit in its queue until it unblocks, which is what the policy refuses to do.
+void blockAndWait()
+{
+    sigset_t mask;
+    ::sigemptyset(&mask);
+    ::sigaddset(&mask, SIGRTMIN + 3);
+    ::pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+
+    blocking.fetch_add(1, std::memory_order_release);
+    while (keepBlocking.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
+
+// The inode of a task's own directory under /proc.
+//
+// The same number the policy pairs with a thread id. Read here separately, so
+// the test is asking the kernel and not believing the policy.
+unsigned long long taskInodeOf(const int tid)
+{
+    char path[64] = {};
+    std::snprintf(path, sizeof(path), "/proc/self/task/%d", tid);
+    struct stat about {};
+    if (::stat(path, &about) != 0) {
+        return 0;
+    }
+    return static_cast<unsigned long long>(about.st_ino);
+}
+
+// Whether a signal is sitting in a thread's own queue, asked of the kernel.
+//
+// The test asks this directly instead of believing the policy about it, since
+// what is being checked is whether the policy queued anything at all.
+bool signalIsQueued(const int tid, const int signalNumber)
+{
+    char path[64] = {};
+    std::snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
+    std::FILE* status = std::fopen(path, "re");
+    if (status == nullptr) {
+        return false;
+    }
+    const unsigned long long bit = 1ULL << (signalNumber - 1);
+    char line[256];
+    bool queued = false;
+    while (std::fgets(line, sizeof(line), status) != nullptr) {
+        unsigned long long mask = 0;
+        if (std::sscanf(line, "SigPnd: %llx", &mask) == 1) {
+            queued = (mask & bit) != 0ULL;
+            break;
+        }
+    }
+    (void)std::fclose(status);
+    return queued;
 }
 
 } // namespace
@@ -235,11 +296,170 @@ int main()
         worker.join();
     }
 
-    std::printf("a stop that is abandoned does not disturb the next one\n");
+    std::printf("what makes two readings of the thread list comparable\n");
     {
-        // A signal sent to a thread that never took it stays pending. If a
-        // later stop counted it, or the handler ran with the old disposition
-        // restored, this is where it would show.
+        // A thread id is a number the kernel reuses, so the list is compared by
+        // id and by the inode of the task's own directory. If that inode came
+        // back the same for every thread, the comparison would be looking at
+        // the ids alone and saying nothing.
+        //
+        // The moment a task started is the other obvious candidate and does not
+        // work: the kernel reports it in clock ticks, and threads created one
+        // after another here all report the same one. That is why the inode is
+        // the thing paired.
+        keepSpinning.store(true, std::memory_order_release);
+        spinning.store(0, std::memory_order_release);
+        std::thread first(&spin);
+        while (spinning.load(std::memory_order_acquire) < 1) {
+            std::this_thread::yield();
+        }
+        std::thread second(&spin);
+        while (spinning.load(std::memory_order_acquire) < 2) {
+            std::this_thread::yield();
+        }
+
+        std::vector<int> tids;
+        std::string listing;
+        check(runtime_agent::currentThreadIds(tids, listing), "the threads can be listed");
+
+        std::vector<unsigned long long> inodes;
+        for (const int tid : tids) {
+            inodes.push_back(taskInodeOf(tid));
+        }
+        bool everyoneHasOne = !inodes.empty();
+        for (const unsigned long long inode : inodes) {
+            if (inode == 0) {
+                everyoneHasOne = false;
+            }
+        }
+        check(everyoneHasOne, "and each one has a task inode");
+
+        bool allDistinct = true;
+        for (std::size_t i = 0; i < inodes.size() && allDistinct; ++i) {
+            for (std::size_t j = i + 1; j < inodes.size() && allDistinct; ++j) {
+                allDistinct = inodes[i] != inodes[j];
+            }
+        }
+        check(allDistinct, "and no two threads share one, so a reused id is still told apart");
+
+        if (!tids.empty()) {
+            check(taskInodeOf(tids.front()) == inodes.front(),
+                  "and the same thread reads the same both times");
+        }
+
+        keepSpinning.store(false, std::memory_order_release);
+        first.join();
+        second.join();
+    }
+
+    std::printf("a thread that blocks the signal\n");
+    {
+        // Nothing is sent. A signal queued to a thread that blocks it waits
+        // there until that thread unblocks, and every attempt would add another
+        // against a limit this user's other processes share.
+        keepBlocking.store(true, std::memory_order_release);
+        blocking.store(0, std::memory_order_release);
+        std::thread worker(&blockAndWait);
+        while (blocking.load(std::memory_order_acquire) < 1) {
+            std::this_thread::yield();
+        }
+
+        std::vector<int> tids;
+        std::string listing;
+        (void)runtime_agent::currentThreadIds(tids, listing);
+
+        runtime_agent::StopTheWorldQuiescer quiescer;
+        std::string refusal;
+        auto denied = quiescer.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, refusal);
+        check(denied == nullptr, "is refused");
+        check(refusal.find("has this signal blocked") != std::string::npos,
+              refusal.empty() ? "with a reason" : refusal.c_str());
+
+        // And nothing was queued to anyone, which is the point of refusing
+        // before sending instead of timing out afterwards.
+        bool anythingQueued = false;
+        for (const int tid : tids) {
+            if (signalIsQueued(tid, SIGRTMIN + 3)) {
+                anythingQueued = true;
+            }
+        }
+        check(!anythingQueued, "with nothing left sitting in anybody's queue");
+
+        keepBlocking.store(false, std::memory_order_release);
+        worker.join();
+    }
+
+    std::printf("a deadline that expires, and what it leaves behind\n");
+    {
+        // Threads that will arrive given any time at all, and a deadline that
+        // gives them none. What is tested is the giving up and the state it
+        // leaves, not the waiting.
+        constexpr int workers = 8;
+        keepSpinning.store(true, std::memory_order_release);
+        spinning.store(0, std::memory_order_release);
+        std::vector<std::thread> threads;
+        threads.reserve(workers);
+        for (int i = 0; i < workers; ++i) {
+            threads.emplace_back(&spin);
+        }
+        while (spinning.load(std::memory_order_acquire) < workers) {
+            std::this_thread::yield();
+        }
+
+        // Observed and not assumed. A deadline of nothing times out unless
+        // every thread arrives between the last signal being sent and the first
+        // look at the clock, which is a few microseconds; several attempts are
+        // allowed so a scheduler that manages it once does not fail this.
+        bool sawTimeout = false;
+        std::string refusal;
+        for (int attempt = 0; attempt < 50 && !sawTimeout; ++attempt) {
+            runtime_agent::StopTheWorldQuiescer impatient(0, std::chrono::milliseconds{0});
+            std::string why;
+            auto denied = impatient.acquire(
+                runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, why);
+            if (denied == nullptr && why.find("before the deadline") != std::string::npos) {
+                sawTimeout = true;
+                refusal = why;
+            }
+        }
+        check(sawTimeout, sawTimeout ? refusal.c_str()
+                                     : "no attempt with no time at all ever gave up");
+
+        // The mechanism still works afterwards. An abandoned stop leaves its
+        // signals queued, and the next one refuses while they are still there
+        // and succeeds once they have drained, so a timeout costs a delay and
+        // not the ability to stop anything again.
+        bool recovered = false;
+        std::string lastWhy;
+        for (int attempt = 0; attempt < 500 && !recovered; ++attempt) {
+            runtime_agent::StopTheWorldQuiescer quiescer;
+            std::string why;
+            auto lease = quiescer.acquire(
+                runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, why);
+            if (lease != nullptr) {
+                recovered = quiescer.parked().size() == workers;
+                lease.reset();
+            } else {
+                lastWhy = why;
+                std::this_thread::yield();
+            }
+        }
+        check(recovered, recovered
+                  ? "and a later stop accounts for every thread again"
+                  : (lastWhy.empty() ? "the mechanism never recovered" : lastWhy.c_str()));
+
+        keepSpinning.store(false, std::memory_order_release);
+        for (std::thread& thread : threads) {
+            thread.join();
+        }
+    }
+
+    std::printf("two stops at once\n");
+    {
+        // One at a time. A second would advance the generation and reset the
+        // counters under the first, and the first's handlers would then be
+        // counted by a stop they were never sent for.
         keepSpinning.store(true, std::memory_order_release);
         spinning.store(0, std::memory_order_release);
         std::thread worker(&spin);
@@ -247,18 +467,32 @@ int main()
             std::this_thread::yield();
         }
 
-        for (int round = 0; round < 20; ++round) {
-            runtime_agent::StopTheWorldQuiescer quiescer;
-            std::string error;
-            auto lease = quiescer.acquire(
-                runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, error);
-            if (lease == nullptr || quiescer.parked().size() != 1) {
-                check(false, error.empty() ? "a round stopped the wrong number of threads"
-                                           : error.c_str());
-                break;
-            }
-        }
-        check(true, "twenty stops in a row each account for exactly one thread");
+        runtime_agent::StopTheWorldQuiescer first;
+        std::string error;
+        auto held = first.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, error);
+        check(held != nullptr, error.empty() ? "the first stop holds" : error.c_str());
+
+        runtime_agent::StopTheWorldQuiescer second;
+        std::string refusal;
+        auto denied = second.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, refusal);
+        check(denied == nullptr, "and a second while it is held is refused");
+        check(refusal.find("already arranged") != std::string::npos,
+              refusal.empty() ? "with a reason" : refusal.c_str());
+
+        held.reset();
+
+        // The refusal was about the first still holding and not about anything
+        // it broke: once released, a stop works again.
+        runtime_agent::StopTheWorldQuiescer third;
+        std::string after;
+        auto again = third.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, after);
+        check(again != nullptr, after.empty() ? "and the next one after it succeeds"
+                                              : after.c_str());
+        check(third.parked().size() == 1, "accounting for the worker again");
+        again.reset();
 
         keepSpinning.store(false, std::memory_order_release);
         worker.join();
@@ -285,6 +519,25 @@ int main()
         std::string error;
         auto lease = quiescer.acquire(runtime_agent::WriteRegion{}, error);
         check(lease == nullptr, "a policy that checks a region refuses to be asked without one");
+    }
+
+    std::printf("something installed over the parking handler\n");
+    {
+        // Last, because this leaves the signal reaching somebody else's handler
+        // and the policy refusing from then on. That is the correct answer and
+        // there is nothing here that could put the parking handler back.
+        struct sigaction intruder {};
+        intruder.sa_handler = [](int) {};
+        ::sigemptyset(&intruder.sa_mask);
+        (void)::sigaction(SIGRTMIN + 3, &intruder, nullptr);
+
+        runtime_agent::StopTheWorldQuiescer quiescer;
+        std::string refusal;
+        auto denied = quiescer.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, refusal);
+        check(denied == nullptr, "is refused instead of signalling into it");
+        check(refusal.find("installed over the parking handler") != std::string::npos,
+              refusal.empty() ? "with a reason" : refusal.c_str());
     }
 
     std::printf("%s\n",

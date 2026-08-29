@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -109,12 +110,34 @@ void parkHandler(int signalNumber, siginfo_t* info, void* contextPointer)
     inside.fetch_sub(1, std::memory_order_acq_rel);
 }
 
+// A thread, and something that stays true about it for as long as it exists.
+//
+// A thread id on its own is a number the kernel reuses. One thread exiting and
+// another starting can be given the same one, and a list compared by id alone
+// then says two readings describe the same threads when they describe different
+// ones.
+//
+// The number paired here is the inode of the task's own directory under /proc.
+// Two tasks alive at the same time never share one, and the kernel hands it out
+// from a counter and not from the id, so a reused id comes back with a
+// different inode. The listing already carries it, so pairing costs nothing.
+//
+// The moment a task started is the other obvious candidate and does not work:
+// the kernel reports it in clock ticks, so threads created within the same tick
+// share a value. Five threads created one after another in a test all reported
+// the same one.
+struct ThreadIdentity {
+    int tid = 0;
+    unsigned long long inode = 0;
+};
+
 // The thread ids this process has, read into storage the caller already owns.
 //
 // Read with system calls only, because this runs while other threads are
 // parked and one of them may be holding the allocator's lock or the loader's.
 // opendir and readdir take both.
-bool readThreadIds(int* into, std::size_t capacity, std::size_t& count, int& failure) noexcept
+bool readThreadIds(ThreadIdentity* into, std::size_t capacity, std::size_t& count,
+                   int& failure) noexcept
 {
     count = 0;
     failure = 0;
@@ -157,7 +180,8 @@ bool readThreadIds(int* into, std::size_t capacity, std::size_t& count, int& fai
                 value = value * 10 + (*digit - '0');
             }
             if (count < capacity) {
-                into[count] = value;
+                into[count].tid = value;
+                into[count].inode = entry->inode;
             }
             ++count;
         }
@@ -166,54 +190,91 @@ bool readThreadIds(int* into, std::size_t capacity, std::size_t& count, int& fai
     return ok && count <= capacity;
 }
 
-// Whether a thread has this signal blocked, from what the kernel reports.
+// What a thread does with this signal right now: whether it is blocking it, and
+// whether one is already sitting in its queue.
 //
-// Asked before anything is sent, because a signal queued to a thread that
-// blocks it stays queued until that thread unblocks it. The stop then times
-// out, and every retry queues another, against a limit shared by every process
-// this user is running.
+// Blocked matters because a signal queued to a thread that blocks it stays
+// queued until that thread unblocks it, which may be never. The stop then times
+// out, and every retry queues another against a limit this user's other
+// processes share.
 //
-// Read with ordinary file calls, which is safe here: nothing is parked yet.
-bool blocksSignal(const int tid, const int signalNumber, bool& blocked) noexcept
+// Pending matters for the same resource, one step later. A stop that timed out
+// leaves its signals queued on whichever threads never took them, and those
+// entries are spent until delivery. Sending more before they drain is how a few
+// timeouts turn into a process that cannot signal anything.
+//
+// Read with ordinary file calls, which is safe here: this is asked before
+// anything is sent, so nothing is parked.
+bool readSignalState(const int tid, const int signalNumber, bool& blocked,
+                     bool& pending) noexcept
 {
+    blocked = false;
+    pending = false;
+
     char path[64] = {};
     std::snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
     std::FILE* status = std::fopen(path, "re");
     if (status == nullptr) {
         // Gone between listing and asking, which the second reading of the list
-        // answers. Any other failure means the mask is simply unknown, and
-        // guessing it is not answering the question.
-        if (errno == ENOENT || errno == ESRCH) {
-            blocked = false;
-            return true;
-        }
-        return false;
+        // answers, and a thread that has gone is holding nothing queued. Any
+        // other failure means the masks are simply unknown, and guessing them
+        // is not answering the question.
+        return errno == ENOENT || errno == ESRCH;
     }
+
+    const unsigned long long bit = 1ULL << (signalNumber - 1);
     char line[256];
-    bool answered = false;
+    bool sawBlocked = false;
+    bool sawPending = false;
     while (std::fgets(line, sizeof(line), status) != nullptr) {
         unsigned long long mask = 0;
         if (std::sscanf(line, "SigBlk: %llx", &mask) == 1) {
-            blocked = (mask >> (signalNumber - 1)) & 1ULL;
-            answered = true;
+            blocked = (mask & bit) != 0ULL;
+            sawBlocked = true;
+        } else if (std::sscanf(line, "SigPnd: %llx", &mask) == 1) {
+            pending = (mask & bit) != 0ULL;
+            sawPending = true;
+        }
+        if (sawBlocked && sawPending) {
             break;
         }
     }
     (void)std::fclose(status);
-    return answered;
+    return sawBlocked && sawPending;
 }
 
-bool sameThreads(const int* a, std::size_t aCount, const int* b, std::size_t bCount) noexcept
+// Threads a stop signalled and then abandoned.
+//
+// Each of those signals is still queued until the thread it went to becomes
+// interruptible and the handler recognises it as belonging to a stop that has
+// finished. Until then the queue entry is spent, so the next stop asks whether
+// they have drained before adding more.
+std::atomic<int> outstanding[maxParked];
+std::atomic<unsigned> outstandingCount{0};
+
+void rememberOutstanding(const int* tids, const unsigned count) noexcept
+{
+    const unsigned kept = count < maxParked ? count : maxParked;
+    for (unsigned i = 0; i < kept; ++i) {
+        outstanding[i].store(tids[i], std::memory_order_relaxed);
+    }
+    outstandingCount.store(kept, std::memory_order_release);
+}
+
+bool sameThreads(const ThreadIdentity* a, std::size_t aCount,
+                 const ThreadIdentity* b, std::size_t bCount) noexcept
 {
     if (aCount != bCount) {
         return false;
     }
-    // Membership, not order: the kernel lists them in whatever order it likes,
-    // and one thread exiting while another starts keeps the count identical.
+    // Membership, not order: the kernel lists them in whatever order it likes.
+    // Both halves have to match, because one thread exiting and another being
+    // given its number keeps the count and the number identical while
+    // describing a task nobody asked anything of.
     for (std::size_t i = 0; i < aCount; ++i) {
         bool found = false;
         for (std::size_t j = 0; j < bCount && !found; ++j) {
-            found = a[i] == b[j];
+            found = a[i].tid == b[j].tid && a[i].inode == b[j].inode;
         }
         if (!found) {
             return false;
@@ -250,7 +311,7 @@ public:
 
 bool currentThreadIds(std::vector<int>& tids, std::string& error)
 {
-    int storage[maxParked + 1];
+    static ThreadIdentity storage[maxParked + 1];
     std::size_t count = 0;
     int failure = 0;
     if (!readThreadIds(storage, maxParked + 1, count, failure)) {
@@ -258,7 +319,11 @@ bool currentThreadIds(std::vector<int>& tids, std::string& error)
             + std::strerror(failure);
         return false;
     }
-    tids.assign(storage, storage + count);
+    tids.clear();
+    tids.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        tids.push_back(storage[i].tid);
+    }
     return true;
 }
 
@@ -356,8 +421,9 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     // parked thread may hold the allocator's lock, so allocating after that is
     // a deadlock waiting for a thread that is waiting for this one.
     m_parked.reserve(maxParked);
-    int before[maxParked + 1];
-    int after[maxParked + 1];
+    static ThreadIdentity before[maxParked + 1];
+    static ThreadIdentity after[maxParked + 1];
+    static int signalled[maxParked];
     std::size_t beforeCount = 0;
     std::size_t afterCount = 0;
     int failure = 0;
@@ -373,15 +439,39 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         return nullptr;
     };
 
+    // What an earlier stop abandoned, before adding to it. Those signals are
+    // still queued until the threads they went to take them.
+    const unsigned stillOut = outstandingCount.load(std::memory_order_acquire);
+    for (unsigned i = 0; i < stillOut; ++i) {
+        const int tid = outstanding[i].load(std::memory_order_relaxed);
+        bool blocked = false;
+        bool pending = false;
+        if (!readSignalState(tid, m_signal, blocked, pending)) {
+            return giveUp("a stop was abandoned with a signal queued to thread "
+                          + std::to_string(tid)
+                          + ", and whether it has been taken since cannot be read, so "
+                            "sending more would be adding to a queue of unknown depth");
+        }
+        if (pending) {
+            return giveUp("a stop was abandoned with a signal queued to thread "
+                          + std::to_string(tid)
+                          + ", and it is still there. Sending another would spend a second "
+                            "entry against a limit this user's other processes share, and "
+                            "every retry would spend one more. It drains when that thread "
+                            "next takes a signal");
+        }
+    }
+    outstandingCount.store(0, std::memory_order_release);
+
     if (!readThreadIds(before, maxParked + 1, beforeCount, failure)) {
-        return giveUp(std::string("could not read this process's thread list: ")
+        return giveUp(std::string("could not read this process's threads: ")
                       + std::strerror(failure));
     }
 
     const int self = currentTid();
     unsigned others = 0;
     for (std::size_t i = 0; i < beforeCount; ++i) {
-        if (before[i] != self) {
+        if (before[i].tid != self) {
             ++others;
         }
     }
@@ -391,22 +481,37 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
 
     // Before a generation exists, so a refusal here leaves nothing behind.
     for (std::size_t i = 0; i < beforeCount; ++i) {
-        if (before[i] == self) {
+        if (before[i].tid == self) {
             continue;
         }
         bool blocked = false;
-        if (!blocksSignal(before[i], m_signal, blocked)) {
-            return giveUp("could not read what thread " + std::to_string(before[i])
+        bool pending = false;
+        if (!readSignalState(before[i].tid, m_signal, blocked, pending)) {
+            return giveUp("could not read what thread " + std::to_string(before[i].tid)
                           + " does with this signal, so whether it would ever arrive is "
                             "unknown");
         }
         if (blocked) {
-            return giveUp("thread " + std::to_string(before[i])
+            return giveUp("thread " + std::to_string(before[i].tid)
                           + " has this signal blocked, so one sent to it would sit in the "
                             "queue until that thread unblocks it. Sending anyway would time "
                             "out and leave it queued, and every retry would add another "
                             "against a limit this user's other processes share");
         }
+    }
+
+    // The handler is claimed once and the process runs on. Something may have
+    // installed over it since, and sending then delivers a signal to whatever
+    // is there now.
+    struct sigaction current {};
+    if (::sigaction(m_signal, nullptr, &current) != 0) {
+        const int why = errno;
+        return giveUp(std::string("could not read what this signal currently reaches: ")
+                      + std::strerror(why));
+    }
+    if ((current.sa_flags & SA_SIGINFO) == 0 || current.sa_sigaction != &parkHandler) {
+        return giveUp("something has installed over the parking handler since it was "
+                      "claimed, so sending this signal would reach that instead");
     }
 
     const unsigned mine = generation.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -433,35 +538,65 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     // never signalled waits for a departure that cannot happen.
     unsigned sent = 0;
     for (std::size_t i = 0; i < beforeCount; ++i) {
-        if (before[i] == self) {
+        if (before[i].tid == self) {
             continue;
         }
         // Queued with the generation, so a handler can tell a signal meant for
         // this stop from one left over.
-        if (::syscall(SYS_rt_tgsigqueueinfo, pid, before[i], m_signal, &carried) != 0) {
+        if (::syscall(SYS_rt_tgsigqueueinfo, pid, before[i].tid, m_signal, &carried) != 0) {
             if (errno == ESRCH) {
                 // Gone between reading the list and signalling it. The list is
                 // read again below, which is where that is answered.
                 continue;
             }
+            rememberOutstanding(signalled, sent);
             lease.reset();
             error = "a thread could not be signalled, so not every one of them could be "
                     "asked where it stands";
             return nullptr;
         }
+        signalled[sent] = before[i].tid;
         ++sent;
     }
     others = sent;
 
-    const auto until = std::chrono::steady_clock::now() + m_deadline;
+    // Worked out before the wait, and read with the system call directly. The
+    // first ordinary clock call can need the loader, and by this point threads
+    // are parked and one of them may be holding the loader's lock.
+    struct timespec deadline {};
+    if (::syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &deadline) != 0) {
+        rememberOutstanding(signalled, sent);
+        lease.reset();
+        error = "the clock could not be read, so there is no way to give up on threads that "
+                "never arrive";
+        return nullptr;
+    }
+    deadline.tv_sec += m_deadline.count() / 1000;
+    deadline.tv_nsec += (m_deadline.count() % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
     while (arrivals.load(std::memory_order_acquire) < others) {
-        if (std::chrono::steady_clock::now() >= until) {
+        struct timespec now {};
+        const bool told =
+            ::syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &now) == 0;
+        const bool passed = !told
+            || now.tv_sec > deadline.tv_sec
+            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec);
+        if (passed) {
+            // Whoever did not arrive still has this signal queued, and the next
+            // stop asks about that before sending any more.
+            rememberOutstanding(signalled, sent);
             // The lease releases whoever did arrive and waits for them to
             // leave, so the abandoned stop does not overlap the next one.
             lease.reset();
-            error = "not every thread stopped before the deadline. A thread inside a "
-                    "blocking call arrives when the call returns, and one that never "
-                    "returns never arrives";
+            error = told
+                ? "not every thread stopped before the deadline. A thread inside a blocking "
+                  "call arrives when the call returns, and one that never returns never "
+                  "arrives"
+                : "the clock stopped answering while waiting for threads to stop";
             return nullptr;
         }
         (void)::syscall(SYS_sched_yield);
@@ -472,7 +607,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     // into whatever stop had started in the meantime.
     if (!readThreadIds(after, maxParked + 1, afterCount, failure)) {
         lease.reset();
-        error = std::string("could not read this process's thread list: ")
+        error = std::string("could not read this process's threads: ")
             + std::strerror(failure);
         return nullptr;
     }
