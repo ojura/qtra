@@ -1,5 +1,7 @@
 #pragma once
 
+#include "agent/patch_site.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -48,9 +50,9 @@ using ProtectFunction = int (*)(void* address, std::size_t length, int protectio
                                         ProtectFunction protect = nullptr);
 
 // Inactive means the target holds its own instructions. RecoveryRequired means
-// the bytes were changed and the mapping could not be put back, so what the
-// target now runs is not what either side intended and nothing may resume on
-// the assumption that it is.
+// the bytes were changed and the mapping could not be put back. The entry then
+// holds a redirect the caller was told had failed, so execution has to stay
+// stopped until a rollback puts the original bytes back.
 enum class PatchState {
     Inactive,
     Active,
@@ -65,12 +67,16 @@ public:
     EntryHotpatch() = default;
     EntryHotpatch(const EntryHotpatch&) = delete;
     EntryHotpatch& operator=(const EntryHotpatch&) = delete;
-    ~EntryHotpatch();
+    // Writes nothing. Restoring an entry needs execution stopped, and a
+    // destructor has no way to arrange that or to report that it failed. A
+    // caller that wants the original bytes back calls rollback while it still
+    // holds a lease.
+    ~EntryHotpatch() = default;
 
-    [[nodiscard]] bool apply(void* target,
-                             void* replacement,
-                             std::size_t reserved_bytes,
-                             std::string& error);
+    // Writes the redirect. The site says where and how much room there is, and
+    // both are confirmed against the bytes present before anything is written,
+    // because a site is a measurement taken earlier.
+    [[nodiscard]] bool apply(const PatchSite& site, void* replacement, std::string& error);
     [[nodiscard]] bool rollback(std::string& error);
 
     // Tests substitute the permission call to reach the path where the copy

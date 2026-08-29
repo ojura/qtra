@@ -15,6 +15,8 @@ extern const std::uint8_t __stop___patchable_function_entries[] __attribute__((w
 
 namespace {
 
+constexpr std::uint8_t endbr64[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
+
 std::string addressString(const void* address)
 {
     std::ostringstream stream;
@@ -22,25 +24,45 @@ std::string addressString(const void* address)
     return stream.str();
 }
 
-// How far past a function's own address a recorded entry may sit and still
-// belong to it. With a zero prefix count the compiler records either the
-// function address or, where a CET landing pad comes first, four bytes in.
-constexpr std::uintptr_t maxEntryOffset = 8;
+// Whether a recorded point belongs to this function.
+//
+// Proximity alone would accept the entry of whatever function follows a short
+// one. The compiler records either the function's own address, or four bytes in
+// when a CET landing pad comes first, so those are the two answers that can be
+// checked against the bytes present.
+bool associatedWith(const std::uint8_t* function,
+                    const std::uintptr_t recorded,
+                    bool& behindLandingPad)
+{
+    const auto address = reinterpret_cast<std::uintptr_t>(function);
+    if (recorded == address) {
+        behindLandingPad = false;
+        return true;
+    }
+    if (recorded == address + sizeof(endbr64)
+        && __builtin_memcmp(function, endbr64, sizeof(endbr64)) == 0) {
+        behindLandingPad = true;
+        return true;
+    }
+    return false;
+}
 
 } // namespace
 
-bool runtime_agent::resolvePatchSite(void* function, PatchSite& site, std::string& error)
+bool runtime_agent::resolvePatchSite(void* function,
+                                     const std::size_t declaredBytes,
+                                     PatchSite& site,
+                                     std::string& error)
 {
     site = PatchSite{};
-    if (function == nullptr) {
-        error = "no function to resolve";
+    if (function == nullptr || declaredBytes == 0) {
+        error = "a function and the number of bytes its build reserved are both required";
         return false;
     }
 
     // Taken as pointers before anything is compared, because the linker gives
     // these as arrays and comparing two arrays directly is deprecated in C++20.
-    // Weak, so an image that prepared nothing leaves them null rather than
-    // failing to link.
+    // Weak, so an image that prepared nothing links and leaves them null.
     const std::uint8_t* first = __start___patchable_function_entries;
     const std::uint8_t* last = __stop___patchable_function_entries;
     if (first == nullptr || last == nullptr || last <= first) {
@@ -54,49 +76,50 @@ bool runtime_agent::resolvePatchSite(void* function, PatchSite& site, std::strin
     const std::size_t count =
         static_cast<std::size_t>(last - first) / sizeof(std::uintptr_t);
 
-    const auto target = reinterpret_cast<std::uintptr_t>(function);
-    std::uintptr_t found = 0;
+    const auto* bytes = static_cast<const std::uint8_t*>(function);
+    std::uintptr_t recorded = 0;
+    bool behindLandingPad = false;
     for (std::size_t index = 0; index < count; ++index) {
-        const std::uintptr_t entry = entries[index];
-        if (entry >= target && entry - target <= maxEntryOffset) {
-            // The nearest recorded entry at or after the function address. A
-            // later one belongs to whatever function comes next.
-            if (found == 0 || entry < found) {
-                found = entry;
-            }
+        if (associatedWith(bytes, entries[index], behindLandingPad)) {
+            recorded = entries[index];
+            break;
         }
     }
 
-    if (found == 0) {
-        error = "no patchable entry is recorded for the function at " + addressString(function)
-              + ", so it was not built with -fpatchable-function-entry and has no reserved "
-                "area to write into";
+    if (recorded == 0) {
+        error = "the function at " + addressString(function)
+              + " is not among this program's prepared entries, so it was built without "
+                "-fpatchable-function-entry and has no reserved area to write into";
         return false;
     }
 
-    // Measured now, because installing anything here overwrites the evidence.
-    const auto* bytes = reinterpret_cast<const std::uint8_t*>(found);
-    std::size_t reserved = 0;
-    while (bytes[reserved] == 0x90U) {
-        ++reserved;
+    // Bounded by what the build says it reserved. Counting until the NOPs stop
+    // would run into whatever follows the area, and ordinary code and alignment
+    // padding can both begin with NOPs.
+    const auto* area = reinterpret_cast<const std::uint8_t*>(recorded);
+    std::size_t available = 0;
+    while (available < declaredBytes && area[available] == 0x90U) {
+        ++available;
     }
-    if (reserved == 0) {
-        error = "the area recorded for the function at " + addressString(function)
-              + " does not hold the expected NOPs, so either something is already installed "
-                "there or this is not the area the compiler reserved";
+    if (available < declaredBytes) {
+        error = "the area at " + addressString(area) + " holds " + std::to_string(available)
+              + " of the " + std::to_string(declaredBytes)
+              + " bytes this build reserved, so something is installed there already or "
+                "this program was built with a different reservation than the one stated";
         return false;
     }
 
-    site.function = function;
-    site.patchAddress = reinterpret_cast<void*>(found);
-    site.reservedBytes = reserved;
-    site.provenance = "__patchable_function_entries";
+    site.entry = function;
+    site.patchAddress = const_cast<std::uint8_t*>(area);
+    site.availableBytes = available;
+    site.requiresEndbr64 = behindLandingPad;
+    site.preparedBy = "__patchable_function_entries";
     return true;
 }
 
 #else
 
-bool runtime_agent::resolvePatchSite(void*, PatchSite& site, std::string& error)
+bool runtime_agent::resolvePatchSite(void*, std::size_t, PatchSite& site, std::string& error)
 {
     site = PatchSite{};
     error = "resolving patch sites is implemented only for Linux/x86-64";

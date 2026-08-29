@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <sstream>
+#include <string>
 
 #if defined(__linux__)
 #  include <sys/mman.h>
@@ -75,7 +76,7 @@ TextWriteResult writeText(void* address,
     // Past this point the bytes have changed, so every exit reports that. The
     // demo target lives in the executable's text segment; a patcher for
     // arbitrary mappings should record and restore each one's prior
-    // permissions instead of assuming these.
+    // permissions, which requires reading them first.
     if (change(mapping, mapping_size, PROT_READ | PROT_EXEC) != 0) {
         result.outcome = TextWriteOutcome::WrittenProtectionNotRestored;
         result.error = errnoMessage("mprotect(RX)");
@@ -87,29 +88,17 @@ TextWriteResult writeText(void* address,
 #endif
 }
 
-EntryHotpatch::~EntryHotpatch()
-{
-    if (active()) {
-        std::string ignored;
-        (void)rollback(ignored);
-    }
-}
-
-bool EntryHotpatch::apply(void* target,
-                          void* replacement,
-                          const std::size_t reserved_bytes,
-                          std::string& error)
+bool EntryHotpatch::apply(const PatchSite& site, void* replacement, std::string& error)
 {
     error.clear();
 #if !defined(__linux__) || !defined(__x86_64__)
-    (void)target;
+    (void)site;
     (void)replacement;
-    (void)reserved_bytes;
     error = "raw entry hotpatching is implemented only for Linux/x86-64";
     return false;
 #else
-    if (target == nullptr || replacement == nullptr) {
-        error = "target and replacement must both be non-null";
+    if (!site.valid() || replacement == nullptr) {
+        error = "a resolved site and a replacement are both required";
         return false;
     }
     if (active()) {
@@ -120,44 +109,39 @@ bool EntryHotpatch::apply(void* target,
     // movabs r11, imm64 ; jmp r11
     // r11 is caller-saved under the System V AMD64 ABI.
     constexpr std::size_t jump_size = 13;
-    if (reserved_bytes < jump_size) {
-        error = "the reserved entry area is too small; at least 13 bytes are required";
-        return false;
-    }
-    if (reserved_bytes > 4096) {
-        error = "unreasonable reserved entry size";
+    if (site.availableBytes < jump_size) {
+        error = "the prepared area holds " + std::to_string(site.availableBytes)
+              + " bytes and this encoding needs " + std::to_string(jump_size);
         return false;
     }
 
     constexpr std::uint8_t endbr64[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
-    auto* targetBytes = static_cast<std::uint8_t*>(target);
-    std::size_t patchOffset = 0;
-    if (std::memcmp(targetBytes, endbr64, sizeof(endbr64)) == 0) {
-        // Preserve Intel CET/IBT's valid indirect-branch landing pad. Calls
-        // land on ENDBR64 and then fall through into the replacement jump.
-        patchOffset = sizeof(endbr64);
-        if (std::memcmp(replacement, endbr64, sizeof(endbr64)) != 0) {
-            error = "CET/IBT target requires a replacement beginning with ENDBR64";
-            return false;
-        }
-    }
-
-    auto* patchAddress = targetBytes + patchOffset;
-    std::vector<std::uint8_t> original(reserved_bytes);
-    std::memcpy(original.data(), patchAddress, reserved_bytes);
-    if (!std::all_of(original.begin(), original.end(), [](const std::uint8_t byte) {
-            return byte == 0x90U;
-        })) {
-        error = "target entry is not the expected all-NOP patchable_function_entry area";
+    if (site.requiresEndbr64
+        && std::memcmp(replacement, endbr64, sizeof(endbr64)) != 0) {
+        error = "this entry sits behind a CET landing pad, so the branch to the replacement "
+                "is indirect and the replacement has to begin with ENDBR64";
         return false;
     }
 
-    m_target = target;
+    // Confirmed here and not at resolve time. The site was measured earlier and
+    // this is the last moment before the write, with execution stopped.
+    auto* patchAddress = static_cast<std::uint8_t*>(site.patchAddress);
+    std::vector<std::uint8_t> original(site.availableBytes);
+    std::memcpy(original.data(), patchAddress, site.availableBytes);
+    if (!std::all_of(original.begin(), original.end(), [](const std::uint8_t byte) {
+            return byte == 0x90U;
+        })) {
+        error = "the prepared area no longer holds the NOPs it was resolved with, so "
+                "something has been written there since";
+        return false;
+    }
+
+    m_target = site.entry;
     m_patchAddress = patchAddress;
     m_replacement = replacement;
     m_original = std::move(original);
 
-    std::vector<std::uint8_t> patch(reserved_bytes, 0x90U);
+    std::vector<std::uint8_t> patch(site.availableBytes, 0x90U);
     patch[0] = 0x49U;
     patch[1] = 0xBBU;
     const auto address = reinterpret_cast<std::uintptr_t>(replacement);
@@ -185,8 +169,7 @@ bool EntryHotpatch::apply(void* target,
 
     // The entry now holds the jump and the mapping could not be put back. The
     // replacement is reachable, so the saved bytes are the only route to the
-    // original and are kept. A caller that treats this as "nothing happened"
-    // resumes a target that is already redirected.
+    // original and are kept.
     m_state = PatchState::RecoveryRequired;
     error += "; the entry was already rewritten, so the replacement is live and "
              "rollback is still required";

@@ -1,4 +1,5 @@
 #include "agent/entry_hotpatch.h"
+#include "agent/patch_area.h"
 #include "agent/patch_site.h"
 #include "demo/cube_step_abi.h"
 
@@ -77,48 +78,17 @@ int main(int argc, char** argv)
         return 6;
     }
 
-    // Refuse to overwrite a normal/unknown prologue. The demo patcher only
-    // accepts the all-NOP area emitted by patchable_function_entry(16, 0).
-    std::array<std::uint8_t, 16> invalidEntry{};
-    invalidEntry.fill(0xCCU);
-    runtime_agent::EntryHotpatch rejectedPatch;
-    std::string rejectedError;
-    if (rejectedPatch.apply(invalidEntry.data(),
-                            reinterpret_cast<void*>(patch->step),
-                            invalidEntry.size(),
-                            rejectedError)
-        || rejectedError.empty()) {
-        std::cerr << "non-NOP entry was not rejected\n";
+    // Where the compiler says this function may be patched, and how much room
+    // it left. Everything below works from this rather than from its own
+    // arithmetic over the function's first bytes.
+    runtime_agent::PatchSite site;
+    std::string resolveError;
+    if (!runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&cube_step_builtin),
+                                         runtime_agent::patchAreaBytes,
+                                         site,
+                                         resolveError)) {
+        std::cerr << "resolving the recorded patch site failed: " << resolveError << '\n';
         return 7;
-    }
-
-    // A target prepared for Intel CET/IBT may only jump indirectly to another
-    // valid ENDBR64 landing pad. This test uses data buffers so the rejection
-    // path is exercised in every build, not only when -fcf-protection is on.
-    std::array<std::uint8_t, 20> cetEntry{};
-    std::copy(endbr64.begin(), endbr64.end(), cetEntry.begin());
-    std::fill(cetEntry.begin() + static_cast<std::ptrdiff_t>(endbr64.size()),
-              cetEntry.end(), 0x90U);
-    std::array<std::uint8_t, 4> nonCetReplacement{0x90U, 0x90U, 0x90U, 0x90U};
-    runtime_agent::EntryHotpatch rejectedCetPatch;
-    rejectedError.clear();
-    if (rejectedCetPatch.apply(cetEntry.data(),
-                               nonCetReplacement.data(),
-                               16,
-                               rejectedError)
-        || rejectedError.empty()) {
-        std::cerr << "CET target accepted a replacement without ENDBR64\n";
-        return 8;
-    }
-
-    runtime_agent::EntryHotpatch hotpatch;
-    std::string error;
-    if (!hotpatch.apply(reinterpret_cast<void*>(&cube_step_builtin),
-                        reinterpret_cast<void*>(patch->step),
-                        16,
-                        error)) {
-        std::cerr << "apply failed: " << error << '\n';
-        return 9;
     }
 
     const auto* targetBytes = reinterpret_cast<const std::uint8_t*>(
@@ -126,65 +96,94 @@ int main(int argc, char** argv)
     const bool cetTarget = std::equal(endbr64.begin(), endbr64.end(), targetBytes);
     const auto expectedPatchAddress = reinterpret_cast<std::uintptr_t>(targetBytes)
         + (cetTarget ? endbr64.size() : 0U);
-    if (reinterpret_cast<std::uintptr_t>(hotpatch.patchAddress()) != expectedPatchAddress
-        || (cetTarget && !std::equal(endbr64.begin(), endbr64.end(), targetBytes))) {
-        std::cerr << "patcher did not preserve/use the expected entry address\n";
+    if (reinterpret_cast<std::uintptr_t>(site.patchAddress) != expectedPatchAddress) {
+        std::cerr << "the recorded patch address disagrees with the one derived from ENDBR64\n";
+        return 8;
+    }
+    if (site.availableBytes != runtime_agent::patchAreaBytes
+        || site.requiresEndbr64 != cetTarget) {
+        std::cerr << "the resolved site does not describe the prepared area\n";
+        return 9;
+    }
+
+    // A function nothing prepared has to be refused, not patched at whatever
+    // happens to follow it.
+    runtime_agent::PatchSite unprepared;
+    std::string refusal;
+    if (runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&approximatelyEqual),
+                                        runtime_agent::patchAreaBytes,
+                                        unprepared,
+                                        refusal)
+        || refusal.empty()) {
+        std::cerr << "an unprepared function resolved to a patch site\n";
         return 10;
+    }
+
+    // Refuse an area holding anything but the reserved NOPs. The site is built
+    // by hand here so the refusal is exercised without a prepared target.
+    std::array<std::uint8_t, 16> invalidEntry{};
+    invalidEntry.fill(0xCCU);
+    runtime_agent::PatchSite invalidSite;
+    invalidSite.entry = invalidEntry.data();
+    invalidSite.patchAddress = invalidEntry.data();
+    invalidSite.availableBytes = invalidEntry.size();
+    runtime_agent::EntryHotpatch rejectedPatch;
+    std::string rejectedError;
+    if (rejectedPatch.apply(invalidSite, reinterpret_cast<void*>(patch->step), rejectedError)
+        || rejectedError.empty()) {
+        std::cerr << "non-NOP entry was not rejected\n";
+        return 11;
+    }
+
+    // A site behind a CET landing pad may only branch to another valid landing
+    // pad. Built from buffers so this runs in every configuration, not only
+    // where -fcf-protection is on.
+    std::array<std::uint8_t, 20> cetEntry{};
+    std::copy(endbr64.begin(), endbr64.end(), cetEntry.begin());
+    std::fill(cetEntry.begin() + static_cast<std::ptrdiff_t>(endbr64.size()),
+              cetEntry.end(), 0x90U);
+    std::array<std::uint8_t, 4> nonCetReplacement{0x90U, 0x90U, 0x90U, 0x90U};
+    runtime_agent::PatchSite cetSite;
+    cetSite.entry = cetEntry.data();
+    cetSite.patchAddress = cetEntry.data() + endbr64.size();
+    cetSite.availableBytes = 16;
+    cetSite.requiresEndbr64 = true;
+    runtime_agent::EntryHotpatch rejectedCetPatch;
+    rejectedError.clear();
+    if (rejectedCetPatch.apply(cetSite, nonCetReplacement.data(), rejectedError)
+        || rejectedError.empty()) {
+        std::cerr << "CET target accepted a replacement without ENDBR64\n";
+        return 12;
+    }
+
+    runtime_agent::EntryHotpatch hotpatch;
+    std::string error;
+    if (!hotpatch.apply(site, reinterpret_cast<void*>(patch->step), error)) {
+        std::cerr << "apply failed: " << error << '\n';
+        return 13;
+    }
+    if (cetTarget && !std::equal(endbr64.begin(), endbr64.end(), targetBytes)) {
+        std::cerr << "the CET landing pad was overwritten\n";
+        return 14;
     }
 
     const CubeStepOutput during = cube_step_builtin(&input);
     if (approximatelyEqual(during.angle_degrees, before.angle_degrees)
         && approximatelyEqual(during.scale, before.scale)) {
         std::cerr << "patched function still produced the builtin result\n";
-        return 11;
+        return 15;
     }
 
     if (!hotpatch.rollback(error)) {
         std::cerr << "rollback failed: " << error << '\n';
-        return 12;
+        return 16;
     }
 
     const CubeStepOutput after = cube_step_builtin(&input);
     if (!approximatelyEqual(after.angle_degrees, before.angle_degrees)
         || !approximatelyEqual(after.scale, before.scale)) {
         std::cerr << "rollback did not restore the builtin function\n";
-        return 13;
-    }
-
-    // The compiler's own record of where this function may be patched, against
-    // the address the patcher works out for itself. They have to agree, because
-    // the plan is to delete the arithmetic and keep the record.
-    {
-        runtime_agent::PatchSite site;
-        std::string resolveError;
-        if (!runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&cube_step_builtin),
-                                             site,
-                                             resolveError)) {
-            std::cerr << "resolving the recorded patch site failed: " << resolveError << '\n';
-            return 20;
-        }
-        if (reinterpret_cast<std::uintptr_t>(site.patchAddress) != expectedPatchAddress) {
-            std::cerr << "the recorded patch address disagrees with the one derived from "
-                         "ENDBR64\n";
-            return 21;
-        }
-        if (site.reservedBytes != 16) {
-            std::cerr << "the reserved area measured " << site.reservedBytes
-                      << " bytes, expected 16\n";
-            return 22;
-        }
-
-        // A function nothing prepared has to be refused rather than patched at
-        // whatever happens to follow it.
-        runtime_agent::PatchSite unprepared;
-        std::string refusal;
-        if (runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&approximatelyEqual),
-                                            unprepared,
-                                            refusal)
-            || refusal.empty()) {
-            std::cerr << "an unprepared function resolved to a patch site\n";
-            return 23;
-        }
+        return 17;
     }
 
     // A permission restore that fails after the copy is the one path that
@@ -194,10 +193,7 @@ int main(int argc, char** argv)
         runtime_agent::EntryHotpatch faulted;
         faulted.setProtectFunction(&failRestoreProtect);
         std::string faultError;
-        if (faulted.apply(reinterpret_cast<void*>(&cube_step_builtin),
-                          reinterpret_cast<void*>(patch->step),
-                          16,
-                          faultError)) {
+        if (faulted.apply(site, reinterpret_cast<void*>(patch->step), faultError)) {
             std::cerr << "apply reported success although the mapping was never restored\n";
             return 14;
         }

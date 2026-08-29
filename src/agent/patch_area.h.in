@@ -1,0 +1,10 @@
+#pragma once
+
+// Generated. The value comes from RUNTIME_AGENT_PATCH_AREA_BYTES in
+// CMakeLists.txt, which is also what -fpatchable-function-entry reserves, so
+// the amount the build sets and the amount the resolver expects are one number.
+namespace runtime_agent {
+
+inline constexpr unsigned long patchAreaBytes = @RUNTIME_AGENT_PATCH_AREA_BYTES@;
+
+} // namespace runtime_agent

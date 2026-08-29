@@ -1,6 +1,8 @@
 #include "agent/module_manager.h"
 
 #include "agent/build_id.h"
+#include "agent/patch_area.h"
+#include "agent/patch_site.h"
 #include "cube_widget.h"
 
 #include <QDebug>
@@ -11,6 +13,55 @@
 #include <dlfcn.h>
 
 namespace {
+
+// Stopping the cube long enough to write its step function's entry.
+//
+// The animation timer is the only thing that calls it, so pausing the timer is
+// this application's whole quiescence story. A general target has to account
+// for every thread, which is why the interface is separate from the manager
+// that uses it.
+class CubeTimerQuiescer final : public runtime_agent::Quiescer {
+public:
+    explicit CubeTimerQuiescer(CubeWidget* cube)
+        : m_cube(cube)
+    {
+    }
+
+    std::unique_ptr<runtime_agent::QuiescenceLease> acquire(std::string& error) override
+    {
+        if (m_cube == nullptr) {
+            error = "there is no cube widget to stop";
+            return nullptr;
+        }
+        return std::make_unique<TimerLease>(m_cube);
+    }
+
+private:
+    // Restores only what it stopped, so a timer that was already paused stays
+    // paused when the lease goes away.
+    class TimerLease final : public runtime_agent::QuiescenceLease {
+    public:
+        explicit TimerLease(CubeWidget* cube)
+            : m_cube(cube)
+            , m_wasRunning(cube->isRunning())
+        {
+            m_cube->setRunning(false);
+        }
+
+        ~TimerLease() override
+        {
+            if (m_wasRunning) {
+                m_cube->setRunning(true);
+            }
+        }
+
+    private:
+        CubeWidget* m_cube = nullptr;
+        bool m_wasRunning = false;
+    };
+
+    CubeWidget* m_cube = nullptr;
+};
 
 QString dynamicLoaderError(const QString& prefix)
 {
@@ -256,31 +307,30 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
         return false;
     }
 
-    const bool wasRunning = m_cube->isRunning();
-    m_cube->setRunning(false);
+    runtime_agent::PatchSite site;
     std::string nativeError;
-    const bool applied = m_entryHotpatch.apply(
-        reinterpret_cast<void*>(&cube_step_builtin),
-        reinterpret_cast<void*>(loaded->cubePatch->step),
-        16,
-        nativeError);
-    if (!applied && m_entryHotpatch.state() == runtime_agent::PatchState::RecoveryRequired) {
-        // The entry was rewritten and the mapping could not be restored, so the
-        // replacement is reachable. Resuming the animation here would drive the
-        // cube through code the caller has just been told is not installed, so
-        // the timer stays stopped and the module is recorded as the one whose
-        // patch is live. Rollback still has the saved bytes.
-        m_activeEntryModule = id;
-        m_cube->setActivePatchLabel(QStringLiteral("entry (recovery required): %1").arg(loaded->name));
+    if (!runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&cube_step_builtin),
+                                         runtime_agent::patchAreaBytes,
+                                         site,
+                                         nativeError)) {
         error = QString::fromStdString(nativeError);
         return false;
     }
+    site.name = QStringLiteral("cube_step_builtin").toStdString();
 
-    if (wasRunning) {
-        m_cube->setRunning(true);
-    }
-    if (!applied) {
+    CubeTimerQuiescer quiescer(m_cube);
+    if (!m_patches.activate(site,
+                            reinterpret_cast<void*>(loaded->cubePatch->step),
+                            quiescer,
+                            nativeError)) {
         error = QString::fromStdString(nativeError);
+        if (m_patches.status().state == runtime_agent::PatchState::RecoveryRequired) {
+            // The manager is holding execution stopped. Recording the module
+            // keeps rollback able to name what is installed.
+            m_activeEntryModule = id;
+            m_cube->setActivePatchLabel(
+                QStringLiteral("entry (recovery required): %1").arg(loaded->name));
+        }
         return false;
     }
 
@@ -297,6 +347,7 @@ bool ModuleManager::rollback(QString& error)
 
 QJsonObject ModuleManager::patchStatus() const
 {
+    const runtime_agent::PatchStatus patch = m_patches.status();
     QString mode = QStringLiteral("builtin");
     quint64 moduleId = 0;
     if (m_activeEntryModule != 0) {
@@ -311,16 +362,17 @@ QJsonObject ModuleManager::patchStatus() const
         {QStringLiteral("mode"), mode},
         {QStringLiteral("moduleId"), moduleId == 0 ? QJsonValue() : QJsonValue(QString::number(moduleId))},
         {QStringLiteral("target"), pointerString(reinterpret_cast<void*>(&cube_step_builtin))},
-        {QStringLiteral("patchAddress"), m_entryHotpatch.active()
-            ? QJsonValue(pointerString(m_entryHotpatch.patchAddress()))
+        {QStringLiteral("patchAddress"), patch.site.has_value()
+            ? QJsonValue(pointerString(patch.site->patchAddress))
             : QJsonValue()},
-        {QStringLiteral("reservedEntryBytes"), 16},
-        {QStringLiteral("entryPatchActive"), m_entryHotpatch.active()},
+        {QStringLiteral("reservedEntryBytes"),
+         static_cast<qint64>(runtime_agent::patchAreaBytes)},
+        {QStringLiteral("entryPatchActive"), m_patches.active()},
         // Reported separately from entryPatchActive, because a caller that sees
         // only "active" cannot tell an installed patch from one whose install
         // failed partway and left the entry rewritten.
         {QStringLiteral("recoveryRequired"),
-         m_entryHotpatch.state() == runtime_agent::PatchState::RecoveryRequired},
+         patch.state == runtime_agent::PatchState::RecoveryRequired},
     };
     if (LoadedModule* loaded = module(moduleId); loaded != nullptr) {
         result.insert(QStringLiteral("module"), moduleJson(*loaded));
@@ -338,15 +390,10 @@ ModuleManager::LoadedModule* ModuleManager::insertModule(std::unique_ptr<LoadedM
 
 bool ModuleManager::resetActivePatch(QString& error)
 {
-    const bool wasRunning = m_cube->isRunning();
-    m_cube->setRunning(false);
-
-    if (m_entryHotpatch.active()) {
+    if (m_patches.active()) {
+        CubeTimerQuiescer quiescer(m_cube);
         std::string nativeError;
-        if (!m_entryHotpatch.rollback(nativeError)) {
-            if (wasRunning) {
-                m_cube->setRunning(true);
-            }
+        if (!m_patches.rollback(quiescer, nativeError)) {
             error = QString::fromStdString(nativeError);
             return false;
         }
@@ -354,12 +401,12 @@ bool ModuleManager::resetActivePatch(QString& error)
 
     m_activeEntryModule = 0;
     m_activeDispatchModule = 0;
+    // Dispatch is the application's own seam, so putting it back is the
+    // adapter's job and not the patch manager's.
     m_cube->resetDispatchStep();
-    if (wasRunning) {
-        m_cube->setRunning(true);
-    }
     return true;
 }
+
 
 QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
 {

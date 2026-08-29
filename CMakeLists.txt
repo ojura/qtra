@@ -49,10 +49,20 @@ endif()
 # callers of its own, so the object boundary is the whole story. A target whose
 # callers share a translation unit needs a compiler plugin or a much broader
 # build profile.
+# Stated once. The flag reserves the area and the generated header tells the
+# code that resolves the site how much to expect, so the two cannot drift.
+set(RUNTIME_AGENT_PATCH_AREA_BYTES 16 CACHE STRING
+    "Bytes reserved at a patchable function entry")
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     set_source_files_properties(src/cube_step.cpp PROPERTIES COMPILE_OPTIONS
-        "-fpatchable-function-entry=16,0;-fno-lto;-fno-ipa-icf")
+        "-fpatchable-function-entry=${RUNTIME_AGENT_PATCH_AREA_BYTES},0;-fno-lto;-fno-ipa-icf")
 endif()
+
+configure_file(
+    "${CMAKE_SOURCE_DIR}/src/agent/patch_area.h.in"
+    "${CMAKE_BINARY_DIR}/generated/agent/patch_area.h"
+    @ONLY)
 
 add_library(cube_patch_wobble MODULE patches/wobble_patch.cpp)
 target_include_directories(cube_patch_wobble PRIVATE include)
@@ -69,7 +79,7 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.cpp
     )
-    target_include_directories(hotpatch_selftest PRIVATE include src)
+    target_include_directories(hotpatch_selftest PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
     target_link_libraries(hotpatch_selftest PRIVATE ${CMAKE_DL_LIBS})
     target_compile_options(hotpatch_selftest PRIVATE
         -Wall -Wextra -Wpedantic
@@ -98,6 +108,9 @@ if(BUILD_QT_APP)
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.h
         src/agent/patch_site.cpp
+        src/agent/quiescence.h
+        src/agent/patch_manager.h
+        src/agent/patch_manager.cpp
         src/agent/object_registry.h
         src/agent/object_registry.cpp
         src/agent/module_manager.h
@@ -108,7 +121,7 @@ if(BUILD_QT_APP)
         src/agent/runtime_agent.cpp
     )
 
-    target_include_directories(qt_runtime_cube PRIVATE include src)
+    target_include_directories(qt_runtime_cube PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
     target_link_libraries(qt_runtime_cube PRIVATE
         Qt6::Core
         Qt6::Gui

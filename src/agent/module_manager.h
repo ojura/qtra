@@ -1,7 +1,7 @@
 #pragma once
 
 #include "agent/agent_abi.h"
-#include "agent/entry_hotpatch.h"
+#include "agent/patch_manager.h"
 #include "demo/cube_step_abi.h"
 
 #include <QJsonArray>
@@ -112,7 +112,7 @@ private:
     CubeWidget* m_cube = nullptr;
     quint64 m_nextId = 1;
     std::unordered_map<quint64, std::unique_ptr<LoadedModule>> m_modules;
-    runtime_agent::EntryHotpatch m_entryHotpatch;
+    runtime_agent::PatchManager m_patches;
     quint64 m_activeDispatchModule = 0;
     quint64 m_activeEntryModule = 0;
 };
