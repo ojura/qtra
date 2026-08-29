@@ -37,8 +37,14 @@ constexpr std::uint8_t landingPad[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
 // none.
 //
 // The copy is placed near the function for exactly this reason, so the
-// displacement fits. Refusing when it does not is the only other answer,
-// because the register this would need is not available.
+// displacement fits, and the refusal below is what happens when it does not.
+//
+// That refusal is avoidable if it ever fires: an indirect jump reading its
+// destination from the eight bytes after it clobbers no register, and a NOTRACK
+// prefix on it means no landing pad is required at the other end, which is
+// harmless where indirect branch tracking is off. Not built, because nothing
+// has needed it and an untested encoding in place of a tested one is worth less
+// than the case it covers.
 constexpr std::size_t relativeJumpBytes = 5;
 
 std::string hex(const std::uint8_t byte)
