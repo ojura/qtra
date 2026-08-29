@@ -48,7 +48,7 @@ public:
             error = "there is no widget whose thread this could be";
             return nullptr;
         }
-        // Checked again here rather than assumed from the caller's check, since
+        // Checked again here and not assumed from the caller's check, since
         // this is the object claiming the write is safe.
         if (QThread::currentThread() != m_cube->thread()) {
             error = "this is not the thread that owns the target, so occupying it proves "
@@ -95,7 +95,7 @@ void closeFailedModule(void* handle)
 //
 // A module that reports nothing is accepted. The host cannot tell one built
 // outside this build system from a stale one, and refusing both would rule out
-// toolchains rather than answer the question, so the caller reports it instead.
+// toolchains without answering the question, so the caller reports it instead.
 bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
 {
     ::dlerror();
@@ -507,7 +507,7 @@ QJsonObject ModuleManager::patchStatus() const
         // What the entry itself holds, which is a separate question from what
         // is driving the cube. A gateway naming its continuation runs the
         // original function, so the entry can be rewritten while mode is
-        // builtin. One field rather than several booleans, because most
+        // builtin. One field, not several booleans, because most
         // combinations of those would describe nothing that can happen.
         {QStringLiteral("coverage"), coverage()},
         {QStringLiteral("entryState"),
@@ -613,7 +613,7 @@ QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
         if (module.lastAttemptedExecutor == QStringLiteral("object")) {
             // Same diagnosis the successful record offers: a release resolving
             // through this record fails when the object is gone, and a caller
-            // can see that coming rather than being told after the fact.
+            // can see that coming instead of being told after the fact.
             json.insert(QStringLiteral("lastAttemptedTargetAlive"),
                         !module.lastAttemptedTarget.isNull());
         }

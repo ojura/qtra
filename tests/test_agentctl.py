@@ -295,7 +295,7 @@ class DeferredEventTests(unittest.TestCase):
         """The socket loop must retain what it reads past, not only the drain.
 
         Both completions arrive after the wait has started, so they come off the
-        socket rather than out of the deferred queue. Waiting for the second
+        socket, not out of the deferred queue. Waiting for the second
         must leave the first available.
         """
         with tempfile.TemporaryDirectory() as temporary:
@@ -334,7 +334,7 @@ class DeferredEventTests(unittest.TestCase):
                 )
                 agent.send(connection, {"id": request["id"], "ok": True, "result": {}})
                 # Hold the connection open so the wait below reaches its
-                # timeout rather than an end of stream.
+                # timeout instead of an end of stream.
                 time.sleep(1.0)
 
             with FakeAgent(path, handler):
@@ -347,7 +347,7 @@ class HandoverTests(unittest.TestCase):
     """How reload classifies what the outgoing generation did.
 
     The distinction these cover is the whole reason reload asks a module to
-    release rather than sending it a payload and hoping: a module that cannot
+    release instead of sending it a payload and hoping: a module that cannot
     have installed anything must not read as a failure, because a handover with
     nothing to do would then stop the reload and leave a module resident on
     every retry.

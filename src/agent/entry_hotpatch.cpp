@@ -143,7 +143,7 @@ bool siteAcceptsGateway(const PatchSite& site, std::string& error)
     // text alone, of which there are four. So a target being measured does not
     // hold its reserved NOPs, and refusing here is correct: measurement ends
     // before installation begins, and a probe left in place is a reason to stop
-    // rather than something to write through.
+    // and not something to write through.
     const auto* bytes = static_cast<const std::uint8_t*>(site.patchAddress);
     for (std::size_t index = 0; index < site.availableBytes; ++index) {
         if (bytes[index] != 0x90U) {

@@ -8,8 +8,8 @@ from an optimized binary once it is built. It is all known while building.
 
 This reads what the build knows and writes a manifest keyed by the executable's
 build id. The runtime checks that the binary it is in matches the manifest and
-reports what the manifest says, rather than trying to rediscover the compiler's
-decisions from memory.
+reports what the manifest says. Nothing rediscovers the compiler's decisions
+from memory.
 
 Evidence, and what each piece rules out:
 
@@ -156,7 +156,7 @@ def clone_dump_for(build_dir: pathlib.Path, object_path: str) -> pathlib.Path | 
     """The dump GCC wrote beside that object.
 
     Named from the output path with the object suffix replaced, so it is found
-    by where it sits rather than by searching for anything that looks like one.
+    by where it sits and not by searching for anything that looks like one.
     """
     obj = build_dir / object_path
     stem = obj.with_suffix("")

@@ -211,7 +211,7 @@ bool PatchManager::unbind(const std::uint64_t id, const std::uint64_t owner, std
         generation.released = true;
         // Recomputed from what is still live, so releasing something that was
         // not selected leaves the slot alone and releasing the selected one
-        // falls back to the newest predecessor rather than to the original.
+        // falls back to the newest predecessor, not to the original.
         publishSelection();
         return true;
     }

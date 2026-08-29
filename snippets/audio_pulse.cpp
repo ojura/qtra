@@ -49,9 +49,9 @@ namespace {
 constexpr float pi = 3.14159265358979323846F;
 
 // The shockwave rings lie in the plane perpendicular to the axis the cube
-// turns about, so they read as coming off its own motion rather than being
-// pasted over the top of it. Normalized here because building that plane's
-// basis needs a unit vector, which is not something the widget owes anyone.
+// turns about, so they read as coming off its own motion, not pasted over the
+// top of it. Normalized here because building that plane's basis needs a unit
+// vector, which is not something the widget owes anyone.
 const QVector3D spinAxis = QVector3D(cubeSpinAxis[0], cubeSpinAxis[1], cubeSpinAxis[2]).normalized();
 
 constexpr int barCount = audio_analysis::bandCount;
@@ -63,8 +63,8 @@ constexpr int barCount = audio_analysis::bandCount;
 // units would instead be limited by the height and leave the sides empty.
 constexpr float ringInnerRadius = 1.42F;
 constexpr float barMaxLength = 0.74F;
-// Wide enough that the ring reads as separate bars rather than as a filled
-// annulus with a bumpy edge.
+// Wide enough that the ring reads as separate bars, not a filled annulus with
+// a bumpy edge.
 constexpr float barGapDegrees = 1.05F;
 
 // The cube is +/-1 with a half-diagonal of sqrt(3), which fills 77% of the
@@ -82,15 +82,15 @@ constexpr int maxShells = 4;
 constexpr float shellFrom = 1.06F;
 // At full inflation the shell's half-diagonal is shellTo * cubeBaseScale *
 // sqrt(3), which is 2.12 against a 2.24 half-frame, so a shell finishes inside
-// the frame. One clipped by the frame edge reads as a cage around the scene
-// rather than as a skin the cube shed.
+// the frame. One clipped by the frame edge reads as a cage around the scene,
+// not a skin the cube shed.
 constexpr float shellTo = 1.70F;
 
 constexpr int particleCount = 320;
 
 // The cube rests dimmer than the application draws it, and every onset snaps it
-// to full. A beat then lights the cube up, rather than making an already-bright
-// cube slightly brighter.
+// to full. A beat then lights the cube up. Resting at full, it could only make
+// an already-bright cube slightly brighter.
 constexpr float tintRest = 0.82F;
 constexpr float tintSleep = 0.55F;
 
@@ -113,7 +113,7 @@ std::shared_ptr<audio_analysis::Analyzer> analyzer;
 // The step function is a bare C function pointer with no user data, so what it
 // needs has to live somewhere it can reach without one.
 struct StepDrive {
-    // Scale is a spring rather than a decaying envelope. A decaying envelope
+    // Scale is a spring, not a decaying envelope. A decaying envelope
     // peaks in the same frame as the hit and only ever falls, which reads as a
     // step; a spring given a velocity overshoots, dips once below rest and
     // settles, which reads as something being struck.
@@ -158,12 +158,12 @@ struct Particle {
     float brightness = 0.0F;
     // Its own resting radius, not a shared one. A single target radius for the
     // whole field pulls the seeded volume into one thin shell within seconds,
-    // and a shell projects to a bright rim at the edges of frame rather than to
-    // dust in a room.
+    // and a shell projects to a bright rim at the edges of frame, not to dust
+    // in a room.
     float homeRadius = 2.5F;
     float phase = 0.0F;
-    // Its own rate as well as its own phase. One shared frequency reads as
-    // the whole field breathing together rather than as sparkle.
+    // Its own rate as well as its own phase. One shared frequency reads as the
+    // whole field breathing together; sparkle needs them independent.
     float twinkleRate = 2.7F;
 };
 
@@ -295,7 +295,7 @@ bool emitBeatEvents = true;
 // only real colour on screen. So nothing drawn around it gets a hue of its own:
 // everything is near-white light at one of two temperatures, warm amber for
 // low-frequency events and ice blue for high ones. The scene then reads as the
-// cube being lit rather than as more coloured objects competing with it.
+// cube being lit, not as more coloured objects competing with it.
 QVector3D lightTemperature(const float centroid)
 {
     const QVector3D amber(1.00F, 0.78F, 0.54F);
@@ -308,7 +308,7 @@ QVector3D lightTemperature(const float centroid)
 // at low alpha over near-black loses its hue: both of the pair above land on
 // grey, one warm and one cool, and the code stops being legible. Pulling the
 // dim end toward saturation restores the distinction, and it is how hot metal
-// behaves anyway, so it reads as physics rather than as a correction.
+// behaves anyway, so it reads as physics instead of a correction.
 QVector3D ambientTemperature(const float centroid)
 {
     const QVector3D amber(1.00F, 0.62F, 0.28F);
@@ -344,8 +344,8 @@ CubeStepOutput audioStep(const CubeStepInput* input) noexcept
         // is a discrete event, and a spring struck by one reads as rhythm.
         if (frame.kickCount != drive.seenKicks) {
             drive.seenKicks = frame.kickCount;
-            // Shaped so a weak hit barely registers and a strong one lands,
-            // rather than every hit arriving at much the same size.
+            // Shaped so a weak hit barely registers and a strong one lands.
+            // Unshaped, every hit arrives at much the same size.
             const float shaped = std::pow(std::clamp(frame.kickStrength / 1.5F, 0.0F, 1.0F), 1.4F);
             drive.scaleVelocity += 0.6F + 4.8F * shaped;
         }
@@ -360,7 +360,7 @@ CubeStepOutput audioStep(const CubeStepInput* input) noexcept
             drive.spinBoost = std::max(drive.spinBoost, 110.0F * std::min(amount, 1.2F) * centroidWeight);
             drive.silentSeconds = 0.0F;
         }
-        // Slow, so it reads as the piece having a colour rather than as another
+        // Slow, so it reads as the piece having a colour and not as another
         // thing flickering.
         const float target = std::clamp(frame.bass - frame.treble * 0.8F, -1.0F, 1.0F);
         drive.warmth += (target - drive.warmth) * std::min(1.0F, delta * 1.2F);
@@ -370,7 +370,7 @@ CubeStepOutput audioStep(const CubeStepInput* input) noexcept
 
     // Nothing playing for two seconds dims the cube and lets it slow down. The
     // first onset after that snaps it back, so the wake-up is a moment the
-    // scene gets for free rather than one that has to be scripted.
+    // scene gets for free, with nothing scripting it.
     const float sleepTarget = drive.silentSeconds > 2.0F ? 1.0F : 0.0F;
     drive.sleepiness += (sleepTarget - drive.sleepiness) * std::min(1.0F, delta * 1.4F);
 
@@ -455,7 +455,7 @@ void addGradientQuad(std::vector<Vertex>& out,
 // stays readable whatever depth it ends up at.
 //
 // Each line is laid down twice, a wide faint halo under a narrow bright core.
-// That pair is what makes a line look like it is glowing rather than like a
+// That pair is what makes a line look like it is glowing instead of like a
 // polygon that happens to be pale, and it costs one extra quad.
 void addGlowLine(std::vector<Vertex>& out,
                  const QVector3D& a,
@@ -522,9 +522,9 @@ void buildShells(std::vector<Vertex>& out, const VizState& state, const float pi
 
         // Two ghosts at earlier points on this shell's own inflation curve,
         // then the shell itself. Inside a single frame it is then visibly
-        // leaving the cube, rather than being a box that happens to be larger
-        // than it was last frame. The trail is evaluated from the curve that
-        // produced it, so it needs no memory of past frames and no framebuffer
+        // leaving the cube, not a box that happens to be larger than it was
+        // last frame. The trail is evaluated from the curve that produced it,
+        // so it needs no memory of past frames and no framebuffer
         // to accumulate them in.
         constexpr std::array<float, 3> ghostSecondsBack{0.050F, 0.025F, 0.0F};
         constexpr std::array<float, 3> ghostWeight{0.18F, 0.40F, 1.0F};
@@ -533,8 +533,8 @@ void buildShells(std::vector<Vertex>& out, const VizState& state, const float pi
             const float when = std::max(shell.elapsed - ghostSecondsBack[pass], 0.0F);
             const float ghostT = std::clamp(when / shell.lifespan, 0.0F, 1.0F);
             // Ease out: the shell leaps off the cube and then coasts, which is
-            // what ties the movement to the instant of the hit rather than
-            // spreading it evenly over the shell's life.
+            // what ties the movement to the instant of the hit. Spreading it
+            // evenly over the shell's life would not.
             const float eased = 1.0F - std::pow(1.0F - ghostT, 3.0F);
             const float inflate = shellFrom + (shellTo - shellFrom) * eased;
 
@@ -559,9 +559,9 @@ void buildShells(std::vector<Vertex>& out, const VizState& state, const float pi
     }
 }
 
-// A mirrored pair of arcs rather than one sweep all the way round: bass sits at
-// the bottom and the spectrum climbs both sides to meet at the top. The
-// symmetry is what makes it look arranged instead of merely circular.
+// A mirrored pair of arcs, not one sweep all the way round: bass sits at the
+// bottom and the spectrum climbs both sides to meet at the top. The symmetry is
+// what makes it look arranged instead of merely circular.
 void buildSpectrumRing(std::vector<Vertex>& out,
                        const audio_analysis::Frame& frame,
                        const float flash,
@@ -569,7 +569,7 @@ void buildSpectrumRing(std::vector<Vertex>& out,
 {
     // Each side sweeps a full half-circle: bass at the bottom, climbing both
     // ways to meet at the top. The mirroring is what makes it read as arranged
-    // rather than as a strip bent into a circle.
+    // and not as a strip bent into a circle.
     constexpr float span = 180.0F;
     constexpr float step = span / static_cast<float>(barCount);
     constexpr float halfWidth = 0.5F * step - 0.5F * barGapDegrees;
@@ -633,8 +633,8 @@ void buildShockwaves(std::vector<Vertex>& out, const VizState& state)
         if (wave.life <= 0.0F) {
             continue;
         }
-        // Thins as it grows and fades on a curve rather than linearly, so it
-        // leaves the frame instead of switching off in it.
+        // Thins as it grows and fades on a curve, not linearly, so it leaves
+        // the frame instead of switching off in it.
         const float fade = wave.life * wave.life;
         const float thickness = (0.006F + 0.022F * wave.life) * (0.5F + 0.5F * wave.strength);
         const float alpha = 1.15F * fade * std::clamp(wave.strength, 0.3F, 1.4F);
@@ -656,8 +656,8 @@ void buildShockwaves(std::vector<Vertex>& out, const VizState& state)
             // of a second ago up to the ring itself, fading to nothing at the
             // far end. A still frame cannot tell an expanding ring from a
             // painted ellipse; with the tail the direction is in the shape, and
-            // it comes from the speed already being integrated rather than from
-            // any record of past frames.
+            // it comes from the speed already being integrated, with no record
+            // of past frames.
             const float tailInner = std::max(wave.radius - wave.speed * 0.12F, 0.05F);
             addGradientQuad(out,
                             point(a0, tailInner),
@@ -706,9 +706,9 @@ void buildParticles(std::vector<PointVertex>& out,
         const float alpha = std::clamp(
             particle.brightness * twinkle * nearFade * (0.75F + 0.45F * flash), 0.0F, 1.0F);
         // A particle still carrying puff velocity is drawn as a short streak
-        // back along its own velocity rather than as a dot. The puff then reads
-        // as the field being pushed outward, which is what it is, instead of as
-        // the dots briefly getting brighter.
+        // back along its own velocity, not as a dot. The puff then reads as the
+        // field being pushed outward, which is what it is, instead of as the
+        // dots briefly getting brighter.
         const float speed = particle.velocity.length();
         if (speed > 0.55F) {
             const QVector3D from = particle.position - particle.velocity * 0.04F;
@@ -729,8 +729,8 @@ void buildParticles(std::vector<PointVertex>& out,
 
 // A radial lift of the background driven by smoothed loudness, drawn as a fan
 // at far depth so only pixels the cube did not write accept it. Nobody looks at
-// this directly; it is what makes loud and quiet feel different rather than
-// only look different, and without it the scene sits on flat black.
+// this directly; it is what makes loud and quiet feel different and not only
+// look different, and without it the scene sits on flat black.
 void buildRoomLight(std::vector<Vertex>& out, const float intensity, const float aspect)
 {
     if (intensity <= 0.002F) {
@@ -769,7 +769,7 @@ void advance(VizState& state,
     state.clock += delta;
 
     // Kicks are handled before beats, so the beat below can ask whether one has
-    // just fired rather than guessing from the spectrum.
+    // just fired, with no guessing from the spectrum.
     if (frame.kickCount != state.seenKicks) {
         state.seenKicks = frame.kickCount;
         state.lastKickAt = state.clock;
@@ -828,7 +828,7 @@ void advance(VizState& state,
         // enough at 94 hops a second.
         if (state.clock - state.lastKickAt > 0.07F) {
             // Oldest slot wins, so a dense passage replaces the shell nearest
-            // to finishing rather than refusing to show the new one.
+            // to finishing instead of refusing to show the new one.
             Shell* slot = &state.shells[0];
             for (Shell& candidate : state.shells) {
                 if (!candidate.active) {
@@ -866,7 +866,7 @@ void advance(VizState& state,
     }
 
     // Fast up, slow down, so the room swells with a loud passage and takes its
-    // time coming back rather than tracking every bar.
+    // time coming back, without tracking every bar.
     const float loudTarget = std::clamp(frame.loudness * 1.7F, 0.0F, 1.0F);
     state.roomLight += (loudTarget - state.roomLight)
         * std::min(1.0F, delta * (loudTarget > state.roomLight ? 3.3F : 0.7F));
@@ -930,7 +930,7 @@ void drawFrame(CubeWidget* cube)
     }
     advance(state, frame, delta, cube);
 
-    // Read the aspect back out of the projection rather than the widget size,
+    // Read the aspect back out of the projection instead of the widget size,
     // so a resized window keeps the ring circular on screen without this having
     // to watch for the resize.
     const float horizontalScale = cube->m_projection(0, 0);
@@ -939,9 +939,9 @@ void drawFrame(CubeWidget* cube)
 
     QOpenGLFunctions* gl = context->functions();
 
-    // World units per pixel, per unit of depth. Taking the viewport from GL
-    // rather than from the widget's size keeps this right under a device pixel
-    // ratio other than 1, where the two differ.
+    // World units per pixel, per unit of depth. Taking the viewport from GL,
+    // not from the widget's size, keeps this right under a device pixel ratio
+    // other than 1, where the two differ.
     std::array<GLint, 4> viewport{};
     gl->glGetIntegerv(GL_VIEWPORT, viewport.data());
     const float viewportHeight = viewport[3] > 0 ? static_cast<float>(viewport[3]) : 1.0F;
@@ -969,7 +969,7 @@ void drawFrame(CubeWidget* cube)
     gl->glEnable(GL_BLEND);
     // Additive. Overlapping glow accumulates toward white instead of the
     // nearest layer hiding the ones behind it, which is what makes a dense
-    // passage look bright rather than merely crowded.
+    // passage look bright and not merely crowded.
     gl->glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     // Still depth-tested against the cube, but writing no depth of its own, so
     // the cube occludes the far side of a ring while two rings never occlude
@@ -1042,7 +1042,7 @@ bool buildPrograms(VizState& state, QString& error)
 void seedParticles(VizState& state)
 {
     state.particles.resize(particleCount);
-    // A fixed pattern rather than a random one: the field should look the same
+    // A fixed pattern, not a random one: the field should look the same
     // every time this is switched on, so a screenshot is reproducible.
     for (int i = 0; i < particleCount; ++i) {
         const float index = static_cast<float>(i);
@@ -1167,7 +1167,7 @@ void remove(CubeWidget* cube)
 
     if (analyzer != nullptr) {
         analyzer->requestStop();
-        // Dropped rather than joined. The capture thread holds its own
+        // Dropped, not joined. The capture thread holds its own
         // reference and tears the stream down when it next wakes; see the note
         // in audio_analysis.h.
         analyzer.reset();
@@ -1175,7 +1175,7 @@ void remove(CubeWidget* cube)
 
     if (viz != nullptr) {
         if (viz->binding != 0 && hookHostValid) {
-            // Releasing rather than restoring a pointer. Something bound after
+            // Releasing, not restoring a pointer. Something bound after
             // this one stays selected, which a raw store would have destroyed.
             (void)hookHost.patch_unbind(hookHost.agent_context, viz->binding);
             viz->binding = 0;
@@ -1371,7 +1371,7 @@ void run(const RuntimeAgentHost* host)
     }
 
     if (viz != nullptr) {
-        // Already running. Report what it is doing rather than installing a
+        // Already running. Report what it is doing instead of installing a
         // second copy of a draw hook.
         const audio_analysis::Frame frame =
             analyzer != nullptr ? analyzer->snapshot() : audio_analysis::Frame{};

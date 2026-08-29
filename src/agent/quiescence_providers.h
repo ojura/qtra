@@ -18,11 +18,11 @@ namespace runtime_agent {
 
 // Threads this process currently has, or nothing when that cannot be read.
 //
-// Absent rather than zero: no live process has zero threads, so a count of zero
+// Absent, not zero: no live process has zero threads, so a count of zero
 // would be an error stored in a field meant for an answer, and every caller
 // would have to know that.
 //
-// Evidence rather than proof. One thread means nothing else can be inside the
+// Evidence, not proof. One thread means nothing else can be inside the
 // function; more than one only means the question is open, since those threads
 // may never touch it.
 [[nodiscard]] std::optional<std::size_t> observedThreadCount();

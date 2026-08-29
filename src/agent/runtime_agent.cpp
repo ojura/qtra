@@ -377,7 +377,7 @@ void RuntimeAgent::handleLine(QLocalSocket* socket, const QByteArray& line)
 }
 
 // One entry per command, and the only place the set is written down. help
-// enumerates this table rather than restating it, so a command cannot be
+// enumerates this table instead of restating it, so a command cannot be
 // reachable but undiscoverable, or listed with no handler behind it.
 const std::vector<RuntimeAgent::CommandEntry>& RuntimeAgent::commands()
 {
@@ -912,7 +912,7 @@ void RuntimeAgent::handleSnippetRelease(QLocalSocket* socket,
     // because a run that installs and then fails records no success while
     // leaving state behind, and its attempt is the only place that state
     // can safely be torn down from. Reported so a caller can tell which
-    // was used rather than having to assume.
+    // was used without having to assume.
     const bool executorGiven = parameters.contains(QStringLiteral("executor"));
     QString executor;
     QString executorSource;
@@ -953,8 +953,8 @@ void RuntimeAgent::handleSnippetRelease(QLocalSocket* socket,
         } else {
             // Follows whichever record supplied the executor, so an
             // attempted release carries the target that attempt used. A
-            // recorded target can be gone by now: say so rather than
-            // quietly running the release somewhere else, because where it
+            // recorded target can be gone by now: say so instead of quietly
+            // running the release somewhere else, because where it
             // runs is the caller's decision to make.
             target = executorSource == QStringLiteral("attempted")
                 ? module->lastAttemptedTarget.data()
@@ -1351,7 +1351,7 @@ RuntimeAgent::ModuleContext* RuntimeAgent::contextForModule(const quint64 module
         auto context = std::make_unique<ModuleContext>();
         context->agent = this;
         context->moduleId = moduleId;
-        // The descriptor name, taken here rather than accepted from the module
+        // The descriptor name, taken here and not accepted from the module
         // later, so a stash entry's owner is something the host observed.
         if (const ModuleManager::LoadedModule* loaded = m_modules.module(moduleId)) {
             context->moduleName = loaded->name;
@@ -1689,7 +1689,7 @@ std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
         return -1;
     }
     // Overwrite rights are the one thing identity decides. A record belongs to
-    // a snippet rather than to a load of it, so a reloaded generation may
+    // a snippet, not to a load of it, so a reloaded generation may
     // replace its predecessor's entry while an unrelated module may not. Reads
     // stay open on purpose: a repair module written after the fact has a
     // different name by construction, and shutting it out would remove the

@@ -13,7 +13,7 @@
 // every later change is free and needs no quiescence.
 //
 // A record is allocated when its gateway is installed and never moved or freed,
-// which the manager enforces by releasing rather than deleting it. Ownership
+// which the manager enforces by releasing it and never deleting it. Ownership
 // here means who allocated it, never who may reclaim it.
 // Code reached through the slot is never unloaded, and a thread can be between
 // the load and the jump at any instant, so no moment exists at which reclaiming

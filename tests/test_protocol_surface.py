@@ -8,7 +8,7 @@ went answered unknown_command.
 
 There is no second copy to compare against now, so these guard the property
 that replaced it: dispatch selects on nothing but the table, and help derives
-from the table rather than restating it. Both are the ways the duplication
+from the table instead of restating it. Both are the ways the duplication
 could come back.
 """
 

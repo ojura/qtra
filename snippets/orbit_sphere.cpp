@@ -262,14 +262,14 @@ void ensureToggleAction(CubeWidget* cube)
 }
 
 // Undo whatever run() installed. Declared in the descriptor so a caller can ask
-// whether this module can be released and get an answer, rather than sending a
+// whether this module can be released and get an answer, instead of sending a
 // payload and hoping something acted on it.
 //
 // Tearing the GL objects down needs this widget's context current, which holds
 // only inside its paint callbacks. Deferring to the next frame would report
 // completion before the scene is actually back, and a handover sequenced on
 // that completion would hand the next generation state this one still owns. So
-// this refuses rather than defers.
+// this refuses; it does not defer.
 void release(const RuntimeAgentHost* host)
 {
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {

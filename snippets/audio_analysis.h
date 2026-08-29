@@ -56,7 +56,7 @@ constexpr float bandLowHz = 30.0F;
 constexpr float bandHighHz = 16000.0F;
 
 // Everything the render side sees. Copied whole under the mutex, so a frame is
-// always internally consistent rather than half of one analysis and half of the
+// always internally consistent, never half of one analysis and half of the
 // next.
 struct Frame {
     std::array<float, bandCount> bands{};
@@ -79,7 +79,7 @@ struct Frame {
     float centroid = 0.0F;
     float beatCentroid = 0.0F;
 
-    // Counters rather than flags. The render thread runs at its own rate and
+    // Counters, not flags. The render thread runs at its own rate and
     // compares against the count it last saw, so a beat between two frames is
     // still noticed and two beats in one frame are not collapsed into one.
     std::uint64_t beatCount = 0;
@@ -169,7 +169,7 @@ public:
     }
 
     // Opens the stream on the calling thread so a bad device name is an error
-    // the caller can report, rather than a thread that starts and dies quietly.
+    // the caller can report, and not a thread that starts and dies quietly.
     bool open(const Options& options, std::string& error)
     {
         m_options = options;
@@ -264,8 +264,8 @@ private:
     {
         m_window.resize(fftSize);
         for (int i = 0; i < fftSize; ++i) {
-            // Hann. Periodic rather than symmetric, which is the right one for
-            // overlapping analysis.
+            // Hann, in its periodic form and not its symmetric one, which is
+            // the right choice for overlapping analysis.
             m_window[i] = 0.5F
                 - 0.5F * std::cos(2.0F * pi * static_cast<float>(i) / static_cast<float>(fftSize));
         }
@@ -388,7 +388,7 @@ private:
                 : (raw[band] - floorDb) / std::max(m_options.dynamicRangeDb, 1.0F);
             level = std::clamp(level, 0.0F, 1.0F);
             // Fast up, slow down. A bar that fell as fast as it rose would read
-            // as flicker rather than as a hit.
+            // as flicker and not as a hit.
             const float rate = level > m_smoothed[band] ? 0.55F : 0.12F;
             m_smoothed[band] += (level - m_smoothed[band]) * rate;
             frame.bands[band] = m_smoothed[band];

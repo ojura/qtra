@@ -7,7 +7,7 @@
 // translucent surface goes down.
 //
 // The strip has exactly one boundary curve, so the opaque rim is a single band
-// running over u in [0, 4pi) rather than two separate rims. The rim is real
+// running over u in [0, 4pi), not two separate rims. The rim is real
 // geometry, not GL_LINE_LOOP: this is a 3.3 core context, where line widths
 // above 1 are deprecated and clamp to 1 whatever GL_ALIASED_LINE_WIDTH_RANGE
 // claims.
@@ -137,7 +137,7 @@ QVector3D mobiusPoint(const float radius, const float u, const float v)
 }
 
 // Analytic normal from the cross product of the two parameter derivatives.
-// Taking it from the formula rather than accumulating face normals means the
+// Taking it from the formula instead of accumulating face normals means the
 // seam at u = 2pi matches exactly, where welded vertices would disagree by a
 // sign.
 QVector3D mobiusNormal(const float radius, const float u, const float v)
@@ -228,8 +228,8 @@ void uploadGeometry(RingState* state)
     uploadBand(state, state->surface, vertices, indices);
 
     // Two laps of u walk the near rim and then the far one, because they are
-    // the same curve. The band butts against the interior rather than
-    // overlapping it, so there is nothing to z-fight.
+    // the same curve. The band butts against the interior and does not overlap
+    // it, so there is nothing to z-fight.
     std::vector<float> edgeVertices;
     std::vector<unsigned int> edgeIndices;
     buildBand(state->radius, 4.0F * pi, 2 * longitudeSteps,
@@ -436,14 +436,14 @@ QJsonObject describe(const RingState* state)
 }
 
 // Undo whatever run() installed. Declared in the descriptor so a caller can ask
-// whether this module can be released and get an answer, rather than sending a
+// whether this module can be released and get an answer, instead of sending a
 // payload and hoping something acted on it.
 //
 // Tearing the GL objects down needs this widget's context current, which holds
 // only inside its paint callbacks. Deferring to the next frame would report
 // completion before the scene is actually back, and a handover sequenced on
 // that completion would hand the next generation state this one still owns. So
-// this refuses rather than defers.
+// this refuses; it does not defer.
 void release(const RuntimeAgentHost* host)
 {
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {

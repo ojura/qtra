@@ -52,7 +52,7 @@ class AgentClient:
         # already happened, which reads as the application hanging. The bound is
         # this client's own choice and is not tied to the agent's retained-event
         # count; dropping oldest first fails safe, because a wait for a dropped
-        # completion times out rather than matching the wrong one.
+        # completion times out instead of matching the wrong one.
         self._deferred_events: Deque[JsonObject] = deque(maxlen=1024)
         self._next_id = 1
 
@@ -387,7 +387,7 @@ def hand_over(
     The declared release is tried first because it is the only route that can
     report whether anything happened. A module declaring none falls back to a
     request payload if the caller supplied one, which is an application's own
-    convention rather than a property of the mechanism, and is reported under a
+    convention, not a property of the mechanism, and is reported under a
     different outcome so the two are never confused.
     """
     outcome, detail = release_snippet(
@@ -615,8 +615,8 @@ def main(argv: list[str] | None = None) -> int:
                 # Loading a path that is already loaded succeeds and returns a
                 # fresh module id, but dlopen() hands back the resident object,
                 # so a rebuilt file at that path runs its old code with nothing
-                # reporting a problem. Say so rather than let it look like a
-                # rebuild that did not take.
+                # reporting a problem. Say so, instead of letting it look like
+                # a rebuild that did not take.
                 if any(m.get("path") == resolved for m in loaded_snippet_modules(client)):
                     print(
                         f"agentctl: {resolved} is already loaded; dlopen() will return the "

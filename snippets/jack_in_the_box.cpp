@@ -417,7 +417,7 @@ void drawJackInTheBox(CubeWidget* cube)
         - jack->extensionVelocity * springDamping;
     jack->extensionVelocity += acceleration * frameSeconds;
     jack->extension += jack->extensionVelocity * frameSeconds;
-    // Hitting the bottom of the box ends the motion rather than reflecting it.
+    // Hitting the bottom of the box ends the motion instead of reflecting it.
     if (jack->extension < 0.0F) {
         jack->extension = 0.0F;
         jack->extensionVelocity = std::max(jack->extensionVelocity, 0.0F);
@@ -428,7 +428,7 @@ void drawJackInTheBox(CubeWidget* cube)
 
     // The coil twists as it travels and holds still once it stops travelling.
     // Driving the phase from elapsed time instead would keep it turning on the
-    // spot at full stretch, which reads as a spinning prop rather than a spring.
+    // spot at full stretch, which reads as a spinning prop and not a spring.
     const float length = retractedLength + popTravel * jack->extension;
     buildSpring(jack->springVertices, length, jack->extension * springTwistTurns * 2.0F * pi);
     jack->springBuffer.bind();
@@ -479,10 +479,10 @@ void drawJackInTheBox(CubeWidget* cube)
 
     jack->program.release();
 
-    // Report the transition rather than the value, so this stays a rare event
-    // and not a per-frame stream.
+    // Report only the transition, so this stays a rare event and not a
+    // per-frame stream.
     // Reported off the head's own position, so the event marks it arriving
-    // rather than the side merely coming around.
+    // and not the side merely coming around.
     const bool fullyOut = jack->extension > 0.97F;
     if (fullyOut && !jack->wasFullyOut && jack->emitEvent != nullptr) {
         ++jack->popCount;
@@ -789,7 +789,7 @@ void syncToggleAction()
 }
 
 // Returns false only when an install was asked for and failed. On removal the
-// message carries what became of the face rather than an error.
+// message carries what became of the face, not an error.
 bool setJackEnabled(CubeWidget* cube,
                     const bool enabled,
                     const RuntimeAgentHost* host,
@@ -813,7 +813,7 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHost* host)
     if (toggleAction != nullptr) {
         return;
     }
-    // Keep the whole host by value rather than picking fields out of it. The
+    // Keep the whole host by value instead of picking fields out of it. The
     // callbacks are the host's own functions and agent_context is documented as
     // valid for the life of the process; only invocation_context belongs to the
     // call that is ending, so that is the one field cleared. Rebuilding a
@@ -866,8 +866,7 @@ int faceIndexFromName(const QString& name, bool& recognized)
 
 // Takes the opening and everything in it back off, putting the widget's own
 // face vertices back. Declared in the descriptor so a caller can ask whether
-// this module can be released, and get an error rather than silence when it
-// cannot.
+// this module can be released, and get an error, not silence, when it cannot.
 //
 // Destroying the GL objects needs this widget's context current, which is only
 // true inside its paint callbacks. Deferring the work to the next frame would

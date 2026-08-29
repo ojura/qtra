@@ -91,8 +91,8 @@ struct RuntimeAgentHost {
     std::uint32_t struct_size;
 
     // The fields of this struct fall into two lifetimes, and the split is the
-    // rule to apply to any field added later rather than a fact about these two
-    // in particular.
+    // rule to apply to any field added later, not a fact about these two in
+    // particular.
     //
     // Process lifetime: agent_context and every function pointer below. The
     // callbacks are the host's own functions, and agent_context identifies the
@@ -109,7 +109,7 @@ struct RuntimeAgentHost {
     // field is process-lifetime. Rebuilding a partial struct by hand instead is
     // a mistake worth naming: it leaves callbacks null while struct_size claims
     // they are present, which turns a missing field into a crash inside the
-    // host rather than a refused load.
+    // host instead of a refused load.
     //
     // Anything invocation-scoped added here in future must be cleared by that
     // same copy step, and the classification above is the rule for deciding
@@ -164,8 +164,8 @@ struct RuntimeAgentHost {
     // Overwriting is opt-in because the dangerous collision is a later
     // generation saving corrupt data over its predecessor's good copy. Whose
     // entry it is gets decided by the host, which stamps the depositing
-    // module's descriptor name and compares against it; the name rather than
-    // the module id, because a reload gives the same source a new id and a
+    // module's descriptor name and compares against it; the name and not the
+    // module id, because a reload gives the same source a new id and a
     // rule keyed on the id would refuse a generation its own predecessor's
     // record. Reads are not restricted, so a module written later to repair
     // this one can still fetch what it saved.
@@ -247,11 +247,11 @@ struct RuntimeAgentSnippet {
 
     // Optional: undo whatever run() installed. It receives a host the same way
     // run() does and reports through complete_json/fail, so a failed release is
-    // an error a program can act on rather than a payload nobody checked.
+    // an error a program can act on, not a payload nobody checked.
     //
     // A null release means this module declares it has nothing to undo, and is
     // the only way to declare that: a descriptor whose version does not match is
-    // refused at load rather than read as releaseless. It is a real answer, not
+    // refused at load and never read as releaseless. It is a real answer, not
     // a placeholder: a one-shot probe genuinely installs nothing.
     //
     // It does not mean the module is safe. Nothing can distinguish "nothing to

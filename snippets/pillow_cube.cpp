@@ -1,6 +1,6 @@
 // Turns each side of the cube into a stuffed pillow panel, in the live process.
 //
-// Like the Catmull-Clark snippet, this replaces the geometry rather than
+// Like the Catmull-Clark snippet, this replaces the geometry instead of
 // deforming it: paintGL() draws with a hardcoded glDrawArrays(GL_TRIANGLES, 0,
 // 36), so a denser mesh cannot go through the widget's own buffer. The 36
 // original vertices are saved, overwritten with zeros so that draw rasterizes
@@ -210,7 +210,7 @@ QMetaObject::Connection drawConnection;
 QAction* toggleAction = nullptr;
 
 // Survives an off/on cycle, so switching the effect back on from the menu
-// returns the panels the way they were last tuned rather than resetting them.
+// returns the panels the way they were last tuned and does not reset them.
 Shape rememberedShape;
 
 QVector3D pillowPoint(const Panel& panel, const float u, const float v, const Shape& shape)
@@ -255,7 +255,7 @@ QVector3D pillowNormal(const Panel& panel, const float u, const float v, const S
 
 // Interleaved position + normal + colour + panel coordinates. Each panel keeps
 // its own vertices even where they coincide with a neighbour's, so the seam
-// gets two normals and shades as a crease rather than a smooth roll.
+// gets two normals and shades as a crease, not a smooth roll.
 void buildPillow(const Shape& shape,
                  std::vector<float>& vertices,
                  std::vector<unsigned int>& indices)
@@ -447,7 +447,7 @@ bool installPillow(CubeWidget* cube, const RuntimeAgentHost* host, QString& erro
         0, state->savedCubeVertices.data(), cubeVertexFloats * static_cast<int>(sizeof(float)));
     // All zeros means some other mesh replacement already collapsed them and
     // holds the only copy of the originals. Saving these would lose the cube on
-    // restore, so refuse rather than nest.
+    // restore, so refuse; do not nest.
     if (!readBack) {
         cube->m_vertexBuffer.release();
         state->vertexArray.destroy();
@@ -459,7 +459,7 @@ bool installPillow(CubeWidget* cube, const RuntimeAgentHost* host, QString& erro
         return false;
     }
 
-    // Ask the records rather than the vertex values. This replacement covers
+    // Ask the records, not the vertex values. This replacement covers
     // the whole mesh, so it overlaps any displacement at all, including a
     // single-face one that reading the buffer would have to inspect at exactly
     // the right granularity to notice.
@@ -541,7 +541,7 @@ void removePillow(CubeWidget* cube, const RuntimeAgentHost* host)
 
     // Replay only onto this module's own displacement. If the buffer no longer
     // holds the zeros this one wrote, something else has changed it since and
-    // writing the saved copy back would revert that change rather than undo
+    // writing the saved copy back would revert that change instead of undoing
     // ours. The jack has always done this; the two mesh replacements wrote
     // back unconditionally, which the record work claimed they did not.
     std::vector<float> current(cubeVertexFloats);
@@ -637,14 +637,14 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHost* host)
 }
 
 // Undo whatever run() installed. Declared in the descriptor so a caller can ask
-// whether this module can be released and get an answer, rather than sending a
+// whether this module can be released and get an answer, instead of sending a
 // payload and hoping something acted on it.
 //
 // Tearing the GL objects down needs this widget's context current, which holds
 // only inside its paint callbacks. Deferring to the next frame would report
 // completion before the scene is actually back, and a handover sequenced on
 // that completion would hand the next generation state this one still owns. So
-// this refuses rather than defers.
+// this refuses; it does not defer.
 void release(const RuntimeAgentHost* host)
 {
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {

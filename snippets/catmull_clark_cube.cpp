@@ -432,7 +432,7 @@ bool installSubdivision(CubeWidget* cube, const RuntimeAgentHost* host, QString&
         return false;
     }
 
-    // Ask the records rather than the vertex values. This replacement covers
+    // Ask the records, not the vertex values. This replacement covers
     // the whole mesh, so it overlaps any displacement at all, including a
     // single-face one that reading the buffer would have to inspect at exactly
     // the right granularity to notice.
@@ -514,7 +514,7 @@ void removeSubdivision(CubeWidget* cube, const RuntimeAgentHost* host)
 
     // Replay only onto this module's own displacement. If the buffer no longer
     // holds the zeros this one wrote, something else has changed it since and
-    // writing the saved copy back would revert that change rather than undo
+    // writing the saved copy back would revert that change instead of undoing
     // ours. The jack has always done this; the two mesh replacements wrote
     // back unconditionally, which the record work claimed they did not.
     std::vector<float> current(cubeVertexFloats);
@@ -609,14 +609,14 @@ void ensureToggleAction(CubeWidget* cube, const RuntimeAgentHost* host)
 }
 
 // Undo whatever run() installed. Declared in the descriptor so a caller can ask
-// whether this module can be released and get an answer, rather than sending a
+// whether this module can be released and get an answer, instead of sending a
 // payload and hoping something acted on it.
 //
 // Tearing the GL objects down needs this widget's context current, which holds
 // only inside its paint callbacks. Deferring to the next frame would report
 // completion before the scene is actually back, and a handover sequenced on
 // that completion would hand the next generation state this one still owns. So
-// this refuses rather than defers.
+// this refuses; it does not defer.
 void release(const RuntimeAgentHost* host)
 {
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {

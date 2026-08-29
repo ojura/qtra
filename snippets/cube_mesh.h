@@ -23,7 +23,7 @@
 // it asks what the buffer holds right now, and a record cannot answer that
 // because a module can be wrong about what it did. It is the guard a restore
 // runs before replaying saved bytes, so that a region something else has since
-// changed is left alone rather than reverted.
+// changed is left alone and not reverted.
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
@@ -75,7 +75,7 @@ inline bool anyFaceCollapsed(const std::vector<float>& vertices)
 // The check above reads ownership out of the vertex values, which is in-band
 // signalling: zeros are a legal vertex value, so the guard has to reason about
 // which legal data happens to look like a message. That is why it must be done
-// per face rather than per float, and why a module displacing a sub-face region
+// per face and not per float, and why a module displacing a sub-face region
 // would reopen the problem.
 //
 // The record below says it out of band instead. Two keys, because the two facts
@@ -86,7 +86,7 @@ inline bool anyFaceCollapsed(const std::vector<float>& vertices)
 //
 // The bytes persist after release, because deciding a restore actually worked
 // takes an observation no module can make about itself, and a restore that
-// corrupts rather than restores must not delete the only good copy. The claim
+// corrupts instead of restoring must not delete the only good copy. The claim
 // is dropped on release, because its whole meaning is "right now". If the bytes
 // carried both meanings, the first install would block every later one forever.
 //
@@ -121,8 +121,8 @@ struct Claim {
     QString owner;
 };
 
-// Every claim currently in the host's stash, as records rather than as a
-// pattern read out of the buffer.
+// Every claim currently in the host's stash, as records and not as a pattern
+// read out of the buffer.
 inline std::vector<Claim> currentClaims(const RuntimeAgentHost* host)
 {
     std::vector<Claim> claims;

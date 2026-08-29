@@ -55,7 +55,7 @@ public:
         // thread is forbidden. A release that faithfully undoes a worker-thread
         // install from the GUI thread breaks those rules, and nothing checks
         // thread affinity the way the scene snippets check the GL context, so
-        // it fails as a race inside the process rather than as an error anyone
+        // it fails as a race inside the process and not as an error anyone
         // can see. An attempt, by definition, is somewhere the install code
         // already ran.
         //

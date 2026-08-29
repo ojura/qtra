@@ -17,8 +17,8 @@ option(ENABLE_CET "Build x86-64 code with Intel CET/IBT landing pads" OFF)
 # Deciding that needs to know whether callers could see the body, whether the
 # entry has one name, and whether the compiler made copies. All three are known
 # at build time and unrecoverable from an optimized binary afterwards, so they
-# are kept beside the artifacts and the compile database rather than rediscovered
-# from memory later.
+# are kept beside the artifacts and the compile database, where nothing has to
+# rediscover them from memory later.
 #
 # Split DWARF keeps the debug information out of the running binary, which stays
 # optimized. The clone dumps record inlining and specialization directly, in a
@@ -79,8 +79,8 @@ endif()
 # Not a cache entry. A cached value survives a change here, so an existing build
 # directory would keep reserving the old amount while the code that resolves the
 # site expects the new one, which is the drift stating it once was meant to
-# prevent. It is a property of the encoding rather than a knob: a gateway is 13
-# bytes and its continuation is 4.
+# prevent. It is a property of the encoding, not a knob: a gateway is 13 bytes
+# and its continuation is 4.
 set(RUNTIME_AGENT_PATCH_AREA_BYTES 20)
 if(RUNTIME_AGENT_PATCH_AREA_BYTES LESS 17)
     message(FATAL_ERROR
@@ -192,9 +192,8 @@ target_compile_definitions(qt_runtime_cube PRIVATE
 #
 # The build id is a property of the linked executable, so the header that
 # carries it is written after the link and the modules are compiled with it
-# force-included. Force-included rather than included by name, so a module
-# is stamped whatever order its own includes are in and without any snippet
-# source mentioning it.
+# force-included, never named in a source, so a module is stamped whatever order
+# its own includes are in and without any snippet source mentioning it.
 #
 # The dependency runs one way. Modules depend on the executable, and the
 # executable depends on no module.
@@ -322,7 +321,7 @@ stamp_with_host_build_id(agent_snippet_pillow_cube)
 
 # Reads the system output mix through PulseAudio, so it is built only where
 # that library is present. Everything else here needs no audio stack, and a
-# missing one should cost this one target rather than the configure step.
+# missing one should cost this one target and not the configure step.
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(PULSE_SIMPLE QUIET libpulse-simple)
