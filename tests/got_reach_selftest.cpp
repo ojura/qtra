@@ -18,8 +18,10 @@
 
 #include <QByteArray>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace {
 
@@ -52,21 +54,38 @@ int main()
 {
     std::printf("a call Qt makes, redirected without rebuilding Qt\n");
 
+    // Warmed before anything is resolved. A slot the loader has not bound yet
+    // holds its resolver stub, and resolving refuses that, so asking first
+    // would skip this test for a reason that has nothing to do with whether the
+    // mechanism works.
+    QByteArray warm = QByteArray("warm the allocator").toBase64();
+    check(!warm.isEmpty(), "QtCore works before anything is touched");
+
     std::string error;
     runtime_agent::GotSite site;
     if (!runtime_agent::resolveGotSlot("libQt6Core.so.6", "malloc", site, error)) {
-        // A Qt built to allocate through something else, or a different soname,
-        // is not a failure of the mechanism.
-        std::printf("  skip  this Qt does not call malloc through its table: %s\n",
+        // Skipping is only right where this Qt does not call malloc through its
+        // table at all. Any other failure is this failing, and treating them
+        // alike is how a test reports success for never having run.
+        std::string listing;
+        const std::vector<std::string> callable =
+            runtime_agent::callableSymbols("libQt6Core.so.6", listing);
+        const bool callsMalloc =
+            std::find(callable.begin(), callable.end(), "malloc") != callable.end();
+        if (!callsMalloc && listing.empty()) {
+            std::printf("  skip  this Qt does not call malloc through its table\n");
+            return 0;
+        }
+        std::printf("  FAIL QtCore calls malloc and the slot could not be resolved: %s\n",
                     error.c_str());
-        return 0;
+        return 1;
     }
     check(site.caller.find("libQt6Core.so") != std::string::npos,
           "the slot belongs to QtCore, named as the loader knows it");
 
-    // Warmed first, so anything allocated once on the way in is already done.
-    QByteArray warm = QByteArray("warm the allocator").toBase64();
-    (void)warm;
+    // Built before the redirect, so encoding it afterwards is the only thing
+    // being measured and nothing counts the setup.
+    const QByteArray input(4096, 'x');
     const int before = replacementCalls;
 
     if (!runtime_agent::redirectGotSlot(site, reinterpret_cast<void*>(&countingMalloc),
@@ -79,13 +98,22 @@ int main()
     // touched, so it must still reach the real one. This is the limitation
     // stated as a measurement: the redirect belongs to one caller, and anyone
     // reporting it as replacing a function for the process would be wrong.
-    void* mine = std::malloc(64);
-    check(replacementCalls == before,
-          "this executable's own allocation is not redirected");
-    std::free(mine);
+    //
+    // The size is volatile and the allocation is written to, because a compiler
+    // is entitled to delete an allocation whose result nobody uses, and this
+    // would then pass without a call having happened.
+    volatile std::size_t wanted = 64;
+    auto* mine = static_cast<char*>(std::malloc(wanted));
+    check(mine != nullptr, "this executable can still allocate");
+    if (mine != nullptr) {
+        mine[0] = 'a';
+        check(mine[0] == 'a' && replacementCalls == before,
+              "and its own allocation is not redirected");
+        std::free(mine);
+    }
 
-    QByteArray during = QByteArray("bytes for QtCore to encode").toBase64();
-    check(!during.isEmpty(), "QtCore still does its work");
+    const QByteArray encoded = input.toBase64();
+    check(encoded.size() > input.size(), "QtCore still does its work");
     const int inside = replacementCalls;
     check(inside > before, "and QtCore's allocation did reach the replacement");
 
@@ -94,8 +122,8 @@ int main()
         return 1;
     }
 
-    QByteArray after = QByteArray("and more once it is back").toBase64();
-    check(!after.isEmpty(), "QtCore still works afterwards");
+    const QByteArray again = input.toBase64();
+    check(again == encoded, "QtCore gives the same answer afterwards");
     check(replacementCalls == inside, "and no longer reaches the replacement");
 
     std::printf("%s\n", failures == 0 ? "the redirect reached unrebuilt library code"

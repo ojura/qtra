@@ -105,23 +105,23 @@ DISPLAY_FOR_TESTS = OwnDisplay()
 
 
 def setUpModule() -> None:
-    DISPLAY_FOR_TESTS.start()
+    """Starts a display of this module's own, or skips.
+
+    Falling through to whatever display is around would put windows on
+    somebody's screen at the moment something has gone wrong, which is the
+    worst time for it.
+    """
+    if os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host":
+        return
+    if DISPLAY_FOR_TESTS.start() is None:
+        raise unittest.SkipTest(
+            "no display of our own could be started, and using the one this shell has "
+            "must be asked for with RUNTIME_AGENT_TEST_DISPLAY=host"
+        )
 
 
 def tearDownModule() -> None:
     DISPLAY_FOR_TESTS.stop()
-
-
-def has_somewhere_to_draw() -> bool:
-    """A private display, or the host one only because it was asked for.
-
-    Falling back to the host display when the private one fails to start puts
-    windows on somebody's screen at the moment something has gone wrong, which
-    is the worst time to do it. A failure to start one skips instead.
-    """
-    if os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host":
-        return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    return DISPLAY_FOR_TESTS.number is not None
 
 
 class Agent:
@@ -133,11 +133,22 @@ class Agent:
         # platform has no support for one: it reports that, fails to compile the
         # shaders, and dies before the socket is useful.
         environment = dict(os.environ)
-        if DISPLAY_FOR_TESTS.number is not None:
-            environment["DISPLAY"] = DISPLAY_FOR_TESTS.number
-            # Qt prefers Wayland where the environment offers it, which would
-            # be the session on somebody's screen, so the choice is made here.
+        if os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") != "host":
+            # Whatever this shell was given is removed whether or not a private
+            # display was started, so nothing can inherit its way onto
+            # somebody's screen. setUpModule has already skipped if there is no
+            # private display, and refusing here as well means a caller that
+            # bypasses it gets an error and not a window.
             environment.pop("WAYLAND_DISPLAY", None)
+            environment.pop("DISPLAY", None)
+            if DISPLAY_FOR_TESTS.number is None:
+                raise RuntimeError(
+                    "there is no display of our own to draw on, and using the one this "
+                    "shell has must be asked for"
+                )
+            environment["DISPLAY"] = DISPLAY_FOR_TESTS.number
+            # Qt prefers Wayland where the environment offers one, which would
+            # be the session on somebody's screen.
             environment["QT_QPA_PLATFORM"] = "xcb"
             # A virtual display has no GPU behind it.
             environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
