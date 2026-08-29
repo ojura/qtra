@@ -147,6 +147,10 @@ private:
     // not take it: an agent torn down and built again finds the same manager
     // with the same gateway and the same recovery state.
     runtime_agent::PatchManager& m_patches;
+    // The protocol's own binding and the module it belongs to, kept so
+    // rollback can release exactly that one and nothing else. Not what status
+    // reports: what the entry reaches is the manager's to answer, and a module
+    // binding through the host ABI never touches these.
     quint64 m_activeEntryModule = 0;
     // The protocol's own binding, so releasing it goes through the same
     // generation rule a snippet's binding does.

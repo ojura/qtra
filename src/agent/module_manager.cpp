@@ -611,12 +611,17 @@ bool ModuleManager::rollback(QString& error)
 QJsonObject ModuleManager::patchStatus() const
 {
     const runtime_agent::PatchStatus patch = m_patches.status();
-    QString mode = QStringLiteral("builtin");
-    quint64 moduleId = 0;
-    if (m_activeEntryModule != 0 && m_patches.replacementSelected()) {
-        mode = QStringLiteral("entry");
-        moduleId = m_activeEntryModule;
-    }
+
+    // Both from the manager, which is the one thing that knows what the entry
+    // reaches. Reporting used to read this side's own record of the protocol's
+    // binding, which no host patch_bind ever wrote, so a module binding through
+    // the ABI left status saying builtin while the entry held its replacement.
+    //
+    // The owner recorded with a generation is the module that bound it, on
+    // either path, so it answers this without a second copy to keep in step.
+    const bool replacing = m_patches.replacementSelected();
+    const QString mode = replacing ? QStringLiteral("entry") : QStringLiteral("builtin");
+    const quint64 moduleId = replacing ? patch.selectedOwner : 0;
 
     QJsonObject result{
         {QStringLiteral("mode"), mode},

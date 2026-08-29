@@ -138,5 +138,31 @@ class PatchActivation(unittest.TestCase):
         self.assertEqual(after["gatewaySlot"], active["gatewaySlot"])
 
 
+    def test_status_names_the_module_that_bound_through_the_host(self) -> None:
+        """A module binding through patch_bind is what status reports.
+
+        Reporting once read the adapter's own record of the protocol binding,
+        which the host ABI path never wrote, so a snippet could replace the step
+        function and leave status saying the built-in one was running.
+        """
+        snippet = BUILD / "agent_snippet_audio_pulse.so"
+        if not snippet.exists():
+            self.skipTest("built without PulseAudio, so no snippet binds through the host")
+
+        module = self.agent.ok("snippet.load", path=str(snippet))["moduleId"]
+        self.agent.ok("snippet.run", moduleId=module, executor="render", request={})
+
+        # snippet.run returns an operation id and finishes later.
+        for _ in range(100):
+            status = self.agent.ok("patch.status")
+            if status["entryState"] == "replacement":
+                break
+            time.sleep(0.05)
+
+        self.assertEqual(status["entryState"], "replacement")
+        self.assertEqual(status["mode"], "entry")
+        self.assertEqual(status["moduleId"], str(module))
+
+
 if __name__ == "__main__":
     unittest.main()
