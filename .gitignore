@@ -4,3 +4,6 @@
 __pycache__/
 *.pyc
 .runtime/
+
+# A review copy being drafted in another session, not part of the tree.
+README.proposed.md

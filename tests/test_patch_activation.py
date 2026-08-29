@@ -22,7 +22,15 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "build" / "release"
+
+# Which build to drive. ctest sets this to the configuration it is running, so
+# release-lto and release-cet exercise their own binaries and not another
+# configuration's. Direct invocation gets build/release.
+#
+# This chooses which binary the test launches and decides nothing the product
+# does. The manifest each binary reads is still the one its own build wrote,
+# beside it.
+BUILD = Path(os.environ.get("RUNTIME_AGENT_TEST_BUILD_DIR", ROOT / "build" / "release"))
 BINARY = BUILD / "qt_runtime_cube"
 MANIFEST = BUILD / "coverage-manifest.json"
 PATCH_MODULE = BUILD / "cube_patch_wobble.so"
@@ -92,10 +100,15 @@ class Agent:
 
 @unittest.skipUnless(
     BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and HAS_DISPLAY,
-    "needs a display and a built, manifest-bearing build/release",
+    f"needs a display and a built, manifest-bearing {BUILD}",
 )
 class PatchActivation(unittest.TestCase):
     def setUp(self) -> None:
+        # Named so a log says which binary ran. ctest hides this on a pass, so
+        # it shows under -V or on failure; what makes each configuration drive
+        # its own binary is RUNTIME_AGENT_TEST_BUILD_DIR above, not this line.
+        print(f"driving {BINARY.resolve()}", flush=True)
+
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.agent = Agent(Path(directory.name) / "agent.sock")

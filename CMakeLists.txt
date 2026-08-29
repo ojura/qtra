@@ -384,7 +384,11 @@ if(BUILD_TESTING)
         add_test(NAME python-tool-tests
                  COMMAND ${Python3_EXECUTABLE} -m unittest discover
                          -s ${CMAKE_SOURCE_DIR}/tests -p "test_*.py" -v)
+        # The build directory as well as the tools, so the live socket test
+        # drives this configuration's own binary. Without it every
+        # configuration would run that test against whatever build/release
+        # happened to hold.
         set_tests_properties(python-tool-tests PROPERTIES
-            ENVIRONMENT "PYTHONPATH=${CMAKE_SOURCE_DIR}/tools")
+            ENVIRONMENT "PYTHONPATH=${CMAKE_SOURCE_DIR}/tools;RUNTIME_AGENT_TEST_BUILD_DIR=${CMAKE_BINARY_DIR}")
     endif()
 endif()
