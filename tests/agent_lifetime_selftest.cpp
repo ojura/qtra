@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <dlfcn.h>
+#include <sys/stat.h>
 #include <memory>
 #include <string>
 #include <thread>
@@ -217,6 +218,58 @@ int main(int argc, char** argv)
             after.close();
         }
         QFile::remove(occupied);
+    }
+
+    std::printf("the path replaced while the agent held it\n");
+    {
+        // Teardown removes the pathname it bound. Between listen and
+        // destruction that path can be unlinked and something else put there,
+        // and removing it then deletes a file the agent never owned. Unlike the
+        // startup case there is nothing to refuse: from inside, deleting looks
+        // like cleaning up after itself.
+        const QString path =
+            QStringLiteral("/tmp/agent-lifetime-replaced-%1.sock").arg(::getpid());
+        QFile::remove(path);
+
+        QObject thirdRoot;
+        auto held = std::make_unique<RuntimeAgent>(&thirdRoot, path);
+        QString why;
+        check(held->start(why), why.isEmpty() ? "an agent binds the path" : qPrintable(why));
+
+        // Who can reach it, asked of the socket rather than of the code.
+        //
+        // The listener chmods the node before listening, to keep the promise
+        // README and docs/protocol.md both make about this being reachable only
+        // by its own user. Every test here connects as that user, so a socket
+        // opened to the world would pass all of them; the mode is the only
+        // thing that says otherwise.
+        {
+            struct stat bound {};
+            const QByteArray encoded = QFile::encodeName(path);
+            check(::lstat(encoded.constData(), &bound) == 0, "the socket node is there");
+            check(S_ISSOCK(bound.st_mode), "and is a socket");
+            check((bound.st_mode & 0777) == 0600,
+                  "reachable by its owner and nobody else");
+        }
+
+        // The socket goes, and an ordinary file takes its place.
+        check(QFile::remove(path), "its socket is unlinked out from under it");
+        const QByteArray planted = "somebody else's file, at a path the agent once used\n";
+        {
+            QFile file(path);
+            check(file.open(QIODevice::WriteOnly), "and a regular file takes that name");
+            file.write(planted);
+        }
+
+        held.reset();
+
+        QFile after(path);
+        check(after.exists(), "destroying the agent leaves the replacement alone");
+        if (after.open(QIODevice::ReadOnly)) {
+            check(after.readAll() == planted, "with its contents untouched");
+            after.close();
+        }
+        QFile::remove(path);
     }
 
     qInstallMessageHandler(previousHandler);
