@@ -210,13 +210,22 @@ bool anyThreadHoldsSignal(const int signalNumber)
 // one about a blocked signal instead, and the block expecting a thread to park
 // finding the stop refused outright. The deadline block already had a loop like
 // this of its own, which is why it was the one block that never failed this way.
+// Bounded, and a failure when the bound is reached rather than a remark.
+//
+// Everything below this point is about to assert against a state that never
+// arrived, so the checks will fail anyway and say something misleading about
+// their own subject. Saying it here first, as a failure, is what makes the run
+// report the cause rather than the symptom.
 void settle()
 {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    constexpr std::chrono::seconds limit{10};
+    const auto deadline = std::chrono::steady_clock::now() + limit;
     while (anyThreadHoldsSignal(SIGRTMIN + 3)) {
         if (std::chrono::steady_clock::now() >= deadline) {
-            std::printf("  note  something still holds the parking signal after 10 seconds; "
-                        "the checks below may refuse for that rather than their own reason\n");
+            std::printf("  FAIL something still holds the parking signal after %lld seconds, so "
+                        "the checks below would refuse for that and not for their own reason\n",
+                        static_cast<long long>(limit.count()));
+            ++failures;
             return;
         }
         std::this_thread::yield();
