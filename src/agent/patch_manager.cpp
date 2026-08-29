@@ -25,18 +25,25 @@ const char* describe(const PatchState state) noexcept
 
 PatchManager::~PatchManager()
 {
-    // In recovery the entry holds a complete gateway whose mapping could not be
-    // put back, and the lease is what keeps execution away from it. Destroying
-    // that lease would resume execution, and freeing the saved bytes would make
-    // recovery impossible, so neither happens: both are released, the same way
-    // the record is. The assert is for a developer, and it is not what makes
-    // this safe, because NDEBUG deletes it from the build that ships.
+    // Destroying a manager that is still in recovery loses the saved bytes and
+    // drops the lease, so nothing can recover afterwards and whatever the lease
+    // was holding is let go. This embedding does not do that: it recovers first,
+    // and the assert says so to whoever changes that.
+    //
+    // Leaking the lease instead would be worse. Today's lease restores nothing,
+    // so letting it go costs nothing, but a lease from a policy that actually
+    // stopped threads would leave them stopped for the life of the process with
+    // nothing able to release them.
+    //
+    // The structural answer is for the site registry to outlive any one manager
+    // and hold the recovery state, so recovery stays reachable no matter who is
+    // destroyed. That is part of splitting the registry out.
+    //
+    // What produces this state today is a gateway that was copied completely and
+    // whose mapping could not be made executable again. A half-written
+    // instruction stream cannot occur here, because the copy does not half-fail.
     assert(m_state != PatchState::RecoveryRequired
            && "recover before destroying a manager that is holding recovery state");
-    if (m_state == PatchState::RecoveryRequired) {
-        (void)m_recoveryLease.release();
-        m_original.clear();
-    }
 
     // The gateway is permanent and carries this record's slot address as an
     // immediate, so the storage has to outlive whatever installed it. Freeing it

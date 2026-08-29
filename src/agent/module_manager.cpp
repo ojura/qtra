@@ -572,6 +572,18 @@ bool ModuleManager::resetActivePatch(QString& error)
     // The one way back from an install that changed bytes and could not finish.
     // Without this the state told a caller to recover and no command could.
     if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
+        // Recovery restores the entry's own bytes, which is a code write, so it
+        // answers to what installing answers to. Reaching it from the wrong
+        // thread, or on a build whose claim about which threads run the target
+        // is not good enough to write by, is the same hazard.
+        if (QThread::currentThread() != m_cube->thread()) {
+            error = QStringLiteral("recovery writes the target's entry, so it has to run "
+                                   "on the thread that owns it");
+            return false;
+        }
+        if (!admits(true, error)) {
+            return false;
+        }
         std::string nativeError;
         if (!m_patches.recover(nativeError)) {
             error = QString::fromStdString(nativeError);
