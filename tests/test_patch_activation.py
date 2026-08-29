@@ -50,6 +50,29 @@ BINDER = BUILD / "agent_snippet_bind_probe.so"
 # Asked at import, before the display exists, so this is whether one can be had.
 CAN_DRAW = can_draw()
 
+
+def missingArtifacts() -> list[str]:
+    """The build outputs these tests drive, and which of them are absent.
+
+    Kept apart from CAN_DRAW because the two deserve opposite answers. A machine
+    with no Xvfb cannot run these and skipping is honest. A build that did not
+    produce its own binary is a broken build, and skipping there reports success
+    for a run that exercised no application at all, which is what a validation
+    is for.
+    """
+    return [str(path) for path in (BINARY, MANIFEST, PATCH_MODULE) if not path.exists()]
+
+
+def requireArtifacts() -> None:
+    """Fails when the build did not produce what these tests drive."""
+    absent = missingArtifacts()
+    if absent:
+        raise AssertionError(
+            "this build did not produce " + ", ".join(absent)
+            + ". These tests drive the application, so a build without it is a failure "
+              "and not something to skip past")
+
+
 DISPLAY_FOR_TESTS = OwnDisplay()
 
 
@@ -153,15 +176,13 @@ class Agent:
         self.process = None
 
 
-@unittest.skipUnless(
-    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and CAN_DRAW,
-    f"needs a display and a built, manifest-bearing {BUILD}",
-)
+@unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")
 class PatchActivation(unittest.TestCase):
     def setUp(self) -> None:
         # Named so a log says which binary ran. ctest hides this on a pass, so
         # it shows under -V or on failure; what makes each configuration drive
         # its own binary is RUNTIME_AGENT_TEST_BUILD_DIR above, not this line.
+        requireArtifacts()
         print(f"driving {BINARY.resolve()}", flush=True)
 
         directory = tempfile.TemporaryDirectory()
@@ -220,10 +241,7 @@ class PatchActivation(unittest.TestCase):
 
 
 
-@unittest.skipUnless(
-    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and CAN_DRAW,
-    f"needs a display and a built, manifest-bearing {BUILD}",
-)
+@unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")
 class MixedGenerations(unittest.TestCase):
     """What the entry reaches, said twice, through a stack bound both ways.
 
@@ -241,6 +259,7 @@ class MixedGenerations(unittest.TestCase):
             self.skipTest("the binding probe was not built")
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
+        requireArtifacts()
         print(f"driving {BINARY.resolve()}", flush=True)
         self.agent = Agent(Path(directory.name) / "agent.sock")
         self.addCleanup(self.agent.close)

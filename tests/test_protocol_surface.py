@@ -25,7 +25,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_patch_activation import BINARY, CAN_DRAW, DISPLAY_FOR_TESTS, Agent
+from test_patch_activation import (BINARY, CAN_DRAW, DISPLAY_FOR_TESTS, Agent,
+                                   requireArtifacts)
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_SOURCE = ROOT / "src" / "agent" / "runtime_agent.cpp"
@@ -120,8 +121,12 @@ class LiveDispatch(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        if not (BINARY.exists() and CAN_DRAW):
-            raise unittest.SkipTest(f"needs a display and a built {BINARY}")
+        # A machine with no display cannot run these, and skipping is honest.
+        # A build that produced no binary is a broken build, and skipping there
+        # reports success for a run that drove no application.
+        if not CAN_DRAW:
+            raise unittest.SkipTest("no display can be had on this machine")
+        requireArtifacts()
         # A display of this class's own, on the same policy the rest of the
         # live tests keep: falling through to whatever display is around would
         # put a window on somebody's screen.

@@ -19,16 +19,10 @@ what it started.
 from __future__ import annotations
 
 import os
+import select
 import shutil
 import subprocess
 import time
-from pathlib import Path
-
-# Well above the numbers a login session takes, so starting one of these does
-# not collide with a display somebody is using.
-FIRST_CANDIDATE = 90
-LAST_CANDIDATE = 130
-
 
 def on_host() -> bool:
     """Whether the caller asked to use the display this shell already has."""
@@ -63,27 +57,60 @@ class OwnDisplay:
             return None
         if shutil.which("Xvfb") is None:
             return None
-        for candidate in range(FIRST_CANDIDATE, LAST_CANDIDATE):
-            if Path(f"/tmp/.X11-unix/X{candidate}").exists():
-                continue
+
+        # The server chooses the display and says which one it took.
+        #
+        # Choosing here means looking for a free number and then starting a
+        # server on it, and two runs that look at the same moment pick the same
+        # number. The loser then sees a socket, reports success, and both use one
+        # server; when the winner stops it, the loser's application loses its
+        # display mid-run. Waiting for the socket to appear cannot tell them
+        # apart either, because the socket it sees may be the winner's.
+        #
+        # -displayfd hands that to Xvfb: it takes a free number itself and writes
+        # it to this pipe once it is ready to accept connections, so what comes
+        # back names a server this call started and one that is already up.
+        readable, writable = os.pipe()
+        try:
             self.server = subprocess.Popen(
-                ["Xvfb", f":{candidate}", "-screen", "0", "1280x800x24",
+                ["Xvfb", "-displayfd", str(writable), "-screen", "0", "1280x800x24",
                  "+extension", "GLX", "+render", "-noreset"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                pass_fds=(writable,),
             )
+        except OSError:
+            os.close(readable)
+            os.close(writable)
+            return None
+        finally:
+            # This end belongs to the child. Holding it open here would leave the
+            # read below waiting for a writer that is this process.
+            os.close(writable)
+
+        try:
+            reported = b""
             deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if Path(f"/tmp/.X11-unix/X{candidate}").exists():
-                    self.number = f":{candidate}"
-                    return self.number
-                if self.server.poll() is not None:
+            while b"\n" not in reported:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
-                time.sleep(0.05)
-            # Either it never came up or it died. Another caller may have taken
-            # this number between the check and the start, so stop this one and
-            # try the next rather than giving up.
-            self.stop()
+                ready, _, _ = select.select([readable], [], [], remaining)
+                if not ready:
+                    break
+                chunk = os.read(readable, 64)
+                if not chunk:
+                    break       # The server closed it without saying a number.
+                reported += chunk
+        finally:
+            os.close(readable)
+
+        number = reported.decode(errors="replace").strip()
+        if number.isdigit() and self.server.poll() is None:
+            self.number = f":{number}"
+            return self.number
+
+        self.stop()
         return None
 
     def stop(self) -> None:

@@ -20,6 +20,21 @@ from agentctl import AgentClient  # noqa: E402
 from private_display import OwnDisplay, child_environment  # noqa: E402
 
 
+def completed(finished: dict[str, Any], what: str) -> dict[str, Any]:
+    """The finished event, once it says the operation actually succeeded.
+
+    wait_for_operation answers as soon as an operation finishes, whatever it
+    finished as. A smoke run that only waits therefore passes when a snippet
+    refuses, fails to compile against the host, or throws: the event arrives,
+    the transcript records it, and the exit status says everything worked.
+    """
+    outcome = (finished.get("data") or {}).get("outcome")
+    if outcome != "completed":
+        raise RuntimeError(f"{what} finished as {outcome!r} rather than 'completed': "
+                           f"{json.dumps(finished, sort_keys=True)}")
+    return finished
+
+
 def wait_for_socket(path: Path, process: subprocess.Popen[Any], timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -74,24 +89,31 @@ def main(argv: list[str] | None = None) -> int:
     # on somebody's screen while they are working. Set
     # RUNTIME_AGENT_TEST_DISPLAY=host to watch it happen on the display this
     # shell already has.
+    #
+    # Everything that acquires something is inside the block the cleanup below
+    # protects. Starting the server, opening the log and launching the child sat
+    # outside it, so an error in any of them left the private X server running
+    # with nothing holding a handle to stop it.
     display = OwnDisplay()
-    display.start()
-    try:
-        environment = child_environment(display)
-    except RuntimeError as why:
-        print(str(why), file=sys.stderr)
-        display.stop()
-        return 2
-    command = [str(app), "--agent-socket", str(socket_path)]
-
-    log = log_path.open("wb")
-    # Its own process group, so shutting down reaches the application and
-    # anything it started, not only the process launched here.
-    process = subprocess.Popen(command, env=environment, stdout=log,
-                               stderr=subprocess.STDOUT, start_new_session=True)
-
+    log: Any = None
+    process: subprocess.Popen[Any] | None = None
     transcript: dict[str, Any] = {}
     try:
+        display.start()
+        try:
+            environment = child_environment(display)
+        except RuntimeError as why:
+            print(str(why), file=sys.stderr)
+            return 2
+
+        log = log_path.open("wb")
+        # Its own process group, so shutting down reaches the application and
+        # anything it started, not only the process launched here.
+        process = subprocess.Popen(
+            [str(app), "--agent-socket", str(socket_path)],
+            env=environment, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True)
+
         wait_for_socket(socket_path, process, args.timeout)
         with AgentClient(str(socket_path), timeout=args.timeout) as client:
             client.subscribe(all_events=True)
@@ -118,9 +140,9 @@ def main(argv: list[str] | None = None) -> int:
                     "request": {"nudgeAngle": 7.5, "setSpeed": 110.0},
                 },
             )
-            transcript["inspectSnippet"] = client.wait_for_operation(
-                started["operationId"], timeout=args.timeout
-            )
+            transcript["inspectSnippet"] = completed(
+                client.wait_for_operation(started["operationId"], timeout=args.timeout),
+                "the inspect snippet")
 
             loaded_observer = client.request(
                 "snippet.load", {"path": str(required["observer"])}
@@ -133,9 +155,9 @@ def main(argv: list[str] | None = None) -> int:
                     "request": {},
                 },
             )
-            transcript["observerSnippet"] = client.wait_for_operation(
-                started["operationId"], timeout=args.timeout
-            )
+            transcript["observerSnippet"] = completed(
+                client.wait_for_operation(started["operationId"], timeout=args.timeout),
+                "the observer snippet")
 
             loaded_render = client.request(
                 "snippet.load", {"path": str(required["render"])}
@@ -148,9 +170,9 @@ def main(argv: list[str] | None = None) -> int:
                     "request": {},
                 },
             )
-            transcript["renderSnippet"] = client.wait_for_operation(
-                started["operationId"], timeout=args.timeout
-            )
+            transcript["renderSnippet"] = completed(
+                client.wait_for_operation(started["operationId"], timeout=args.timeout),
+                "the render snippet")
 
             transcript["capture"] = client.request(
                 "cube.capture", {"path": str(capture_path)}
@@ -173,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"smoke test failed: {exc}", file=sys.stderr)
         return 1
     finally:
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
@@ -190,8 +212,9 @@ def main(argv: list[str] | None = None) -> int:
         # gone. Unconditional, because this started the server and leaving it
         # behind is how a machine ends up with a pile of them.
         display.stop()
-        log.close()
-        if not args.keep_runtime and process.returncode == 0:
+        if log is not None:
+            log.close()
+        if not args.keep_runtime and process is not None and process.returncode == 0:
             shutil.rmtree(runtime, ignore_errors=True)
         else:
             print(f"runtime artifacts: {runtime}", file=sys.stderr)
