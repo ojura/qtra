@@ -157,6 +157,8 @@ qt_add_executable(qt_runtime_cube
     src/agent/write_admission.cpp
     src/agent/object_registry.h
     src/agent/object_registry.cpp
+    src/agent/module_registry.h
+    src/agent/module_registry.cpp
     src/agent/module_manager.h
     src/agent/module_manager.cpp
     src/agent/coverage_manifest.h

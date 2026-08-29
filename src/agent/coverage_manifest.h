@@ -10,6 +10,7 @@
 // running one describes some other binary, and its verdict says nothing about
 // the offsets and entries in this one.
 
+#include <QHash>
 #include <QJsonObject>
 #include <QString>
 
@@ -92,5 +93,39 @@ struct CoverageDecision {
 // inside it, which is a different question from this one.
 [[nodiscard]] bool authorizesLiveTextWrite(const CoverageDecision& decision,
                                            QString& error);
+
+// The last verdict that described the running binary, kept for the process.
+//
+// Evidence about a process does not stop being true because the file it came
+// from was replaced. Rebuilding the tree while this one runs leaves a manifest
+// describing a different binary, and refusing on that would let an unrelated
+// build revoke what this build established about itself.
+//
+// Process-lifetime for the same reason the patched entry's owner is: a gateway
+// outlives whoever installed it, so a successor asking about the same target
+// has to find what the first admission established, and losing it would leave a
+// running gateway that nothing could bind through after a rebuild.
+//
+// Separate from what a recovery record holds, and for a different reason. This
+// is re-asked on every request and answers what may run. That is never
+// re-asked, and says what one write was made under.
+class CoverageEvidence final {
+public:
+    // The one every adapter shares, allocated once and never destroyed.
+    [[nodiscard]] static CoverageEvidence& instance();
+
+    // Records a fresh reading and answers with what now stands for this target.
+    //
+    // A reading that names this build and this function replaces what is held,
+    // whether it allows or refuses: that is the same binary speaking again, and
+    // a reread that could only ever help would be a cache dressed as evidence.
+    // A reading that names something else, or found nothing, leaves the held
+    // one standing.
+    [[nodiscard]] CoverageDecision refresh(const QString& target,
+                                           const CoverageDecision& reading);
+
+private:
+    QHash<QString, CoverageDecision> m_held;
+};
 
 } // namespace runtime_agent

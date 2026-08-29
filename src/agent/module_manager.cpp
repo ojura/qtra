@@ -18,6 +18,28 @@
 
 namespace {
 
+QString pointerString(const void* pointer)
+{
+    return QStringLiteral("0x%1").arg(reinterpret_cast<quintptr>(pointer), 0, 16);
+}
+
+// Where the build left its decision, beside the artifacts it describes.
+//
+// The path is compiled in, and the build directory being present is something
+// this assumes. An executable away from its build tree finds no manifest and
+// refuses every activation, which is the direction to fail in.
+//
+// Taking the path from whoever asks would defeat the point. The build id is
+// readable, so anyone who could name a path could write a manifest carrying
+// that id with coverage complete and a declared domain, and the decision would
+// become an input. What gives a manifest its meaning is that the build wrote it
+// and that it names this binary and this function, which is what the build id
+// and target checks establish.
+QString manifestPath()
+{
+    return QStringLiteral("%1/coverage-manifest.json").arg(QStringLiteral(DEMO_BUILD_DIR));
+}
+
 // Why writing this target's entry is safe here.
 //
 // The only thing that calls it is the widget's animation slot, and that runs on
@@ -66,85 +88,6 @@ private:
     CubeWidget* m_cube = nullptr;
 };
 
-QString dynamicLoaderError(const QString& prefix)
-{
-    const char* message = ::dlerror();
-    return message != nullptr
-        ? QStringLiteral("%1: %2").arg(prefix, QString::fromLocal8Bit(message))
-        : prefix;
-}
-
-QString pointerString(const void* pointer)
-{
-    return QStringLiteral("0x%1").arg(reinterpret_cast<quintptr>(pointer), 0, 16);
-}
-
-void closeFailedModule(void* handle)
-{
-    if (handle != nullptr) {
-        (void)::dlclose(handle);
-    }
-}
-
-// Whether the module was compiled against the build of the host that is running.
-//
-// A module compiled with -fno-access-control addresses application members at
-// offsets fixed when it was compiled. Those offsets describe the source it saw,
-// so a module built from different source describes a different object than the
-// one it is handed. The build id is the coarsest possible answer to that
-// question and the right one: any change to any translation unit produces a new
-// id, and any such change can move a member.
-//
-// A module that reports nothing is accepted. The host cannot tell one built
-// outside this build system from a stale one, and refusing both would rule out
-// toolchains without answering the question, so the caller reports it instead.
-bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
-{
-    ::dlerror();
-    auto reportBuildId = reinterpret_cast<const char* (*)()>(
-        ::dlsym(handle, "runtime_agent_target_build_id"));
-    if (reportBuildId == nullptr) {
-        moduleBuildId.clear();
-        return true;
-    }
-
-    const char* reported = reportBuildId();
-    moduleBuildId = reported != nullptr ? QString::fromLatin1(reported) : QString();
-
-    const QString hostBuildId = runtime_agent::hostBuildId();
-    if (hostBuildId.isEmpty() || moduleBuildId.isEmpty()
-        || moduleBuildId == hostBuildId) {
-        return true;
-    }
-
-    error = QStringLiteral(
-                "module was compiled against host build %1, and this process is build %2. "
-                "A module reads application types at offsets fixed when it was compiled, so "
-                "the offsets it holds do not describe this process. Rebuild the module "
-                "against this build, or restart the application from the build the module "
-                "was compiled against.")
-                .arg(moduleBuildId, hostBuildId);
-    return false;
-}
-
-} // namespace
-
-namespace {
-
-// Module ids, never reused for the life of the process.
-//
-// A binding names the module that owns it, and bindings now outlive the manager
-// that made them: the registry keeps the entry's generations whatever happens to
-// whoever installed them. A second manager numbering from one again would hand a
-// new module the identity of one whose binding is still selected, and the rule
-// that nobody can release somebody else's work would then be checking two
-// different modules against one number.
-std::uint64_t nextModuleId()
-{
-    static std::atomic<std::uint64_t> counter{1};
-    return counter.fetch_add(1, std::memory_order_relaxed);
-}
-
 } // namespace
 
 namespace {
@@ -185,94 +128,19 @@ ModuleManager::~ModuleManager()
     // machine code and static storage live in these modules.
 }
 
-ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QString& error)
-{
-    const QString absolutePath = QFileInfo(path).absoluteFilePath();
-    if (path.isEmpty() || !QFileInfo(absolutePath).isFile()) {
-        error = QStringLiteral("snippet module is not a regular file: %1").arg(absolutePath);
-        return nullptr;
-    }
-    const QByteArray encodedPath = QFile::encodeName(absolutePath);
-    ::dlerror();
-    void* handle = ::dlopen(encodedPath.constData(), RTLD_NOW | RTLD_LOCAL);
-    if (handle == nullptr) {
-        error = dynamicLoaderError(QStringLiteral("dlopen(%1) failed").arg(absolutePath));
-        return nullptr;
-    }
-
-    // Checked before the descriptor, because a module whose offsets do not
-    // describe this process should be refused on that ground and told so.
-    QString moduleBuildId;
-    if (!targetBuildMatches(handle, moduleBuildId, error)) {
-        closeFailedModule(handle);
-        return nullptr;
-    }
-
-    ::dlerror();
-    auto init = reinterpret_cast<RuntimeAgentSnippetInit>(
-        ::dlsym(handle, "runtime_agent_snippet_init"));
-    if (init == nullptr) {
-        error = dynamicLoaderError(QStringLiteral("snippet init symbol not found"));
-        closeFailedModule(handle);
-        return nullptr;
-    }
-
-    const RuntimeAgentSnippet* descriptor = init();
-    if (descriptor == nullptr
-        || descriptor->abi_version != RUNTIME_AGENT_ABI
-        || descriptor->struct_size < sizeof(RuntimeAgentSnippet)
-        || descriptor->run == nullptr) {
-        error = QStringLiteral("invalid RuntimeAgentSnippet descriptor");
-        closeFailedModule(handle);
-        return nullptr;
-    }
-
-    auto module = std::make_unique<LoadedModule>();
-    module->id = nextModuleId();
-    module->path = absolutePath;
-    module->name = QString::fromUtf8(descriptor->name_utf8 != nullptr
-                                    ? descriptor->name_utf8 : "unnamed snippet");
-    module->kind = Kind::Snippet;
-    module->handle = handle;
-    module->snippet = descriptor;
-    module->targetBuildId = moduleBuildId;
-    module->stamped = !moduleBuildId.isEmpty();
-    if (!module->stamped) {
-        qWarning().noquote()
-            << "runtime-agent: loaded unstamped module" << absolutePath
-            << "which reports no host build id, so its offsets into application types are"
-            << "unchecked against this process";
-    }
-    return insertModule(std::move(module));
-}
-
 ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, QString& error)
 {
-    const QString absolutePath = QFileInfo(path).absoluteFilePath();
-    if (path.isEmpty() || !QFileInfo(absolutePath).isFile()) {
-        error = QStringLiteral("cube patch module is not a regular file: %1").arg(absolutePath);
-        return nullptr;
-    }
-    const QByteArray encodedPath = QFile::encodeName(absolutePath);
-    ::dlerror();
-    void* handle = ::dlopen(encodedPath.constData(), RTLD_NOW | RTLD_LOCAL);
+    QString buildId;
+    void* handle = m_registry.open(path, buildId, error);
     if (handle == nullptr) {
-        error = dynamicLoaderError(QStringLiteral("dlopen(%1) failed").arg(absolutePath));
-        return nullptr;
-    }
-
-    QString moduleBuildId;
-    if (!targetBuildMatches(handle, moduleBuildId, error)) {
-        closeFailedModule(handle);
         return nullptr;
     }
 
     ::dlerror();
-    auto init = reinterpret_cast<CubeStepPatchInit>(
-        ::dlsym(handle, "cube_step_patch_init"));
+    auto init = reinterpret_cast<CubeStepPatchInit>(::dlsym(handle, "cube_step_patch_init"));
     if (init == nullptr) {
-        error = dynamicLoaderError(QStringLiteral("cube patch init symbol not found"));
-        closeFailedModule(handle);
+        error = QStringLiteral("cube patch init symbol not found");
+        runtime_agent::ModuleRegistry::closeUnadopted(handle);
         return nullptr;
     }
 
@@ -282,98 +150,22 @@ ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, Q
         || descriptor->struct_size < sizeof(CubeStepPatch)
         || descriptor->step == nullptr) {
         error = QStringLiteral("invalid CubeStepPatch descriptor");
-        closeFailedModule(handle);
+        runtime_agent::ModuleRegistry::closeUnadopted(handle);
         return nullptr;
     }
 
     auto module = std::make_unique<LoadedModule>();
-    module->id = nextModuleId();
-    module->path = absolutePath;
+    module->id = runtime_agent::ModuleRegistry::nextId();
+    module->path = QFileInfo(path).absoluteFilePath();
     module->name = QString::fromUtf8(descriptor->name_utf8 != nullptr
-                                    ? descriptor->name_utf8 : "unnamed cube patch");
-    module->kind = Kind::CubePatch;
+                                         ? descriptor->name_utf8
+                                         : "unnamed cube patch");
+    module->kind = QStringLiteral("cubePatch");
     module->handle = handle;
-    module->cubePatch = descriptor;
-    module->targetBuildId = moduleBuildId;
-    module->stamped = !moduleBuildId.isEmpty();
-    return insertModule(std::move(module));
-}
-
-ModuleManager::LoadedModule* ModuleManager::module(const quint64 id) const
-{
-    const auto iterator = m_modules.find(id);
-    return iterator == m_modules.end() ? nullptr : iterator->second.get();
-}
-
-QJsonArray ModuleManager::list() const
-{
-    QJsonArray result;
-    for (const auto& [id, module] : m_modules) {
-        Q_UNUSED(id);
-        result.append(moduleJson(*module));
-    }
-    return result;
-}
-
-namespace {
-
-// Where the build left its decision, beside the artifacts it describes.
-//
-// The path is compiled in, and the build directory being present is something
-// this assumes. An executable away from its build tree finds no manifest and
-// refuses every activation, which is the direction to fail in.
-//
-// Taking the path from whoever asks would defeat the point. The build id is
-// readable, so anyone who could name a path could write a manifest carrying
-// that id with coverage complete and a declared domain, and the decision would
-// become an input. What gives a manifest its meaning is that the build wrote it
-// and that it names this binary and this function, which is what the build id
-// and target checks establish.
-QString manifestPath()
-{
-    return QStringLiteral("%1/coverage-manifest.json").arg(QStringLiteral(DEMO_BUILD_DIR));
-}
-
-} // namespace
-
-bool ModuleManager::installIfNeeded(const runtime_agent::PatchSite& site,
-                                    const runtime_agent::CoverageDecision& decision,
-                                    runtime_agent::Quiescer& quiescer,
-                                    std::string& error)
-{
-    if (m_patches.state() != runtime_agent::PatchState::NoGateway) {
-        return true;
-    }
-    // The decision that allowed this write, handed over by the caller that got
-    // it. Passing it instead of keeping it is what stops an admission being
-    // built out of nothing when somebody adds a path that forgot to ask.
-    return m_patches.installGateway(site, admissionFor(quiescer, decision), quiescer, error);
-}
-
-runtime_agent::CoverageDecision ModuleManager::latestEvidence()
-{
-    const runtime_agent::CoverageDecision fresh = readDecision();
-
-    // A verdict that names this build and this function is about the binary
-    // now running, so it replaces what is held whether it allows or refuses.
-    // That is what lets the analyzer be run again against the same build to
-    // correct a decision, in either direction: a rerun that withdraws a verdict
-    // has to be able to stop later binds, or rereading would only ever be able
-    // to help.
-    if (fresh.describesThisTarget) {
-        m_evidence = fresh;
-        return fresh;
-    }
-
-    // Otherwise the file has nothing to say about this process. A rebuild gives
-    // the tree a manifest describing some other binary, and a missing or
-    // unreadable one says nothing at all; neither makes what this build
-    // recorded about itself untrue. So the last verdict that did describe this
-    // binary stands, and only the first admission has to find the file.
-    if (m_evidence.has_value()) {
-        return *m_evidence;
-    }
-    return fresh;
+    module->descriptor = descriptor;
+    module->targetBuildId = buildId;
+    module->stamped = !buildId.isEmpty();
+    return m_registry.adopt(std::move(module));
 }
 
 runtime_agent::CoverageDecision ModuleManager::readDecision() const
@@ -382,16 +174,30 @@ runtime_agent::CoverageDecision ModuleManager::readDecision() const
         manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
 }
 
+runtime_agent::CoverageDecision ModuleManager::latestEvidence()
+{
+    // Held for the process, beside the entry it describes, so a successor
+    // adapter asking about this target finds what the first admission
+    // established. Losing it with the adapter would leave a running gateway
+    // that nothing could bind through after an unrelated rebuild.
+    return runtime_agent::CoverageEvidence::instance().refresh(
+        QStringLiteral("cube_step_builtin"), readDecision());
+}
+
 void ModuleManager::refreshLabel()
 {
+    if (m_cube == nullptr) {
+        return;
+    }
+
     // From the manager, for the same reason status is. The label was written
     // imperatively at each call site, so releasing a host generation could
     // reveal a protocol predecessor while the window still named the released
     // one, and a release that changed no selection left whatever was written
     // last.
-    if (m_cube == nullptr) {
-        return;
-    }
+    //
+    // From one snapshot, so the state and the owner cannot come from two
+    // different instants.
     const runtime_agent::PatchStatus patch = m_patches.status();
     QString label = QStringLiteral("builtin");
     if (patch.state == runtime_agent::PatchState::RecoveryRequired) {
@@ -399,7 +205,7 @@ void ModuleManager::refreshLabel()
         if (const LoadedModule* owner = module(m_activeEntryModule); owner != nullptr) {
             label += QStringLiteral(": %1").arg(owner->name);
         }
-    } else if (m_patches.replacementSelected()) {
+    } else if (patch.state == runtime_agent::PatchState::GatewayReplacement) {
         // Named by whoever owns the selected generation, which is the module
         // whose code the entry reaches, on either path.
         const LoadedModule* owner = module(patch.selectedOwner);
@@ -452,12 +258,27 @@ bool ModuleManager::admits(const bool acceptIncompleteCoverage,
     return true;
 }
 
+bool ModuleManager::installIfNeeded(const runtime_agent::PatchSite& site,
+                                    const runtime_agent::CoverageDecision& decision,
+                                    runtime_agent::Quiescer& quiescer,
+                                    std::string& error)
+{
+    if (m_patches.state() != runtime_agent::PatchState::NoGateway) {
+        return true;
+    }
+    // The decision that allowed this write, handed over by the caller that got
+    // it. Passing it instead of keeping it is what stops an admission being
+    // built out of nothing when somebody adds a path that forgot to ask.
+    return m_patches.installGateway(site, admissionFor(quiescer, decision), quiescer, error);
+}
+
 bool ModuleManager::activateEntryPatch(const quint64 id,
                                        const bool acceptIncompleteCoverage,
                                        QString& error)
 {
     LoadedModule* loaded = module(id);
-    if (loaded == nullptr || loaded->kind != Kind::CubePatch || loaded->cubePatch == nullptr) {
+    if (loaded == nullptr || loaded->kind != QLatin1String("cubePatch")
+        || loaded->descriptor == nullptr) {
         error = QStringLiteral("module %1 is not a cube patch").arg(id);
         return false;
     }
@@ -503,7 +324,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
     // again against the site the gateway was actually installed at, which is
     // the one the jump is taken from.
     if (!runtime_agent::replacementIsReachable(
-            site, reinterpret_cast<void*>(loaded->cubePatch->step), nativeError)) {
+            site, reinterpret_cast<void*>(static_cast<const CubeStepPatch*>(loaded->descriptor)->step), nativeError)) {
         error = QString::fromStdString(nativeError);
         return false;
     }
@@ -518,7 +339,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         }
         return false;
     }
-    if (!m_patches.bind(reinterpret_cast<void*>(loaded->cubePatch->step),
+    if (!m_patches.bind(reinterpret_cast<void*>(static_cast<const CubeStepPatch*>(loaded->descriptor)->step),
                         id,
                         binding,
                         nativeError)) {
@@ -693,11 +514,10 @@ QJsonObject ModuleManager::patchStatus()
         {QStringLiteral("gatewaySlot"), patch.slotAddress != nullptr
             ? QJsonValue(pointerString(patch.slotAddress))
             : QJsonValue()},
-        // What made the one code write safe, and what it was judged against. A
-        // thread count above one is not proof the write was safe; it is the
-        // number the policy had to answer for.
-        // From the admission the gateway was written under, which is where
-        // this fact now lives. Absent until something has been written.
+        // What made the one code write safe, from the admission the gateway
+        // was written under. Absent until something has been written. A thread
+        // count above one is not proof the write was safe; it is the number
+        // the policy had to answer for.
         {QStringLiteral("quiescedBy"), patch.installedUnder.has_value()
             ? QJsonValue(QString::fromStdString(patch.installedUnder->provider()))
             : QJsonValue()},
@@ -725,18 +545,12 @@ QJsonObject ModuleManager::patchStatus()
                       });
     }
     if (LoadedModule* loaded = module(moduleId); loaded != nullptr) {
-        result.insert(QStringLiteral("module"), moduleJson(*loaded));
+        result.insert(QStringLiteral("module"),
+                      runtime_agent::ModuleRegistry::describe(*loaded));
     }
     return result;
 }
 
-ModuleManager::LoadedModule* ModuleManager::insertModule(std::unique_ptr<LoadedModule> module)
-{
-    const quint64 id = module->id;
-    LoadedModule* pointer = module.get();
-    m_modules.emplace(id, std::move(module));
-    return pointer;
-}
 
 bool ModuleManager::resetActivePatch(QString& error)
 {
@@ -795,51 +609,3 @@ bool ModuleManager::resetActivePatch(QString& error)
 }
 
 
-QJsonObject ModuleManager::moduleJson(const LoadedModule& module)
-{
-    QJsonObject json{
-        {QStringLiteral("id"), QString::number(module.id)},
-        {QStringLiteral("name"), module.name},
-        {QStringLiteral("path"), module.path},
-        {QStringLiteral("kind"), module.kind == Kind::Snippet
-            ? QStringLiteral("snippet") : QStringLiteral("cubePatch")},
-        {QStringLiteral("handle"), pointerString(module.handle)},
-        // A stamped module agrees with the running executable, because one that
-        // disagreed was refused. An unstamped one was never checked.
-        {QStringLiteral("stamped"), module.stamped},
-    };
-    if (module.stamped) {
-        json.insert(QStringLiteral("targetBuildId"), module.targetBuildId);
-    }
-    if (module.kind != Kind::Snippet) {
-        return json;
-    }
-
-    // How the module was last driven, so a caller can see what its release
-    // would run under without having to remember what it asked for earlier.
-    json.insert(QStringLiteral("declaresRelease"), module.declaresRelease());
-    json.insert(QStringLiteral("hadSuccessfulRun"), module.hadSuccessfulRun);
-    json.insert(QStringLiteral("hadAttemptedRun"), module.hadAttemptedRun);
-    if (!module.hadSuccessfulRun && module.hadAttemptedRun) {
-        // The run that installed something and then failed is the interesting
-        // case here, so say where it ran even though it did not complete.
-        json.insert(QStringLiteral("lastAttemptedExecutor"), module.lastAttemptedExecutor);
-        if (module.lastAttemptedExecutor == QStringLiteral("object")) {
-            // Same diagnosis the successful record offers: a release resolving
-            // through this record fails when the object is gone, and a caller
-            // can see that coming instead of being told after the fact.
-            json.insert(QStringLiteral("lastAttemptedTargetAlive"),
-                        !module.lastAttemptedTarget.isNull());
-        }
-    }
-    if (module.hadSuccessfulRun) {
-        json.insert(QStringLiteral("lastExecutor"), module.lastExecutor);
-        if (module.lastExecutor == QStringLiteral("object")) {
-            json.insert(QStringLiteral("lastTargetAlive"), !module.lastTarget.isNull());
-            json.insert(QStringLiteral("lastTarget"), module.lastTarget.isNull()
-                ? QString()
-                : module.lastTarget->objectName());
-        }
-    }
-    return json;
-}

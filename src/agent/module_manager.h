@@ -2,6 +2,7 @@
 
 #include "agent/agent_abi.h"
 #include "agent/coverage_manifest.h"
+#include "agent/module_registry.h"
 #include "agent/patch_registry.h"
 #include "demo/cube_step_abi.h"
 
@@ -19,76 +20,12 @@ class CubeWidget;
 
 class ModuleManager final {
 public:
-    enum class Kind { Snippet, CubePatch };
-
-    struct LoadedModule {
-        quint64 id = 0;
-        QString path;
-        QString name;
-        Kind kind = Kind::Snippet;
-        void* handle = nullptr;
-        const RuntimeAgentSnippet* snippet = nullptr;
-        const CubeStepPatch* cubePatch = nullptr;
-
-        // How this module was last run successfully, which is what its release
-        // runs under unless the caller says otherwise. This is observed rather
-        // than declared, so it cannot go stale the way a descriptor field would
-        // when someone changes the install path and forgets to update it.
-        //
-        // The last success and not the first attempt: a snippet needing a GL
-        // context fails under gui with "use executor=render" and is retried,
-        // and a release under the executor that already failed fails the same
-        // way. The target is held weakly because it can be gone by release
-        // time, whether a worker that finished or an object already destroyed,
-        // and a caller is better told that than silently given a different one.
-        QString lastExecutor;
-        QPointer<QObject> lastTarget;
-        bool hadSuccessfulRun = false;
-
-        // Where the module's code actually ran, recorded for every attempt
-        // whether or not it completed. A run that installs something and then
-        // fails leaves that state behind with no successful record, and it is
-        // the only witness to where the install happened.
-        //
-        // Releasing such a module under a guessed executor is worse than not
-        // releasing it at all. Qt is specific about what may not cross threads:
-        // removeEventFilter must run on the watched object's thread, a timer
-        // must be killed from its own, and deleting a QObject from another
-        // thread is forbidden. A release that faithfully undoes a worker-thread
-        // install from the GUI thread breaks those rules, and nothing checks
-        // thread affinity the way the scene snippets check the GL context, so
-        // it fails as a race inside the process and not as an error anyone
-        // can see. An attempt, by definition, is somewhere the install code
-        // already ran.
-        //
-        // Both records are heuristics under a mixed history, in the same way
-        // and with the same consequence. An old success under one executor
-        // followed by a newer failed install under another resolves to the old
-        // one; an install under one executor followed by a refused attempt
-        // under another resolves to the refused one. Either way a release that
-        // checks its context refuses loudly and the handover aborts, which is
-        // the failure worth having.
-        QString lastAttemptedExecutor;
-        QPointer<QObject> lastAttemptedTarget;
-        bool hadAttemptedRun = false;
-
-        // The host build this module reports having been compiled against, and
-        // whether it reported one at all. A module that reports a different
-        // build never gets this far, so a stamped module here agrees with the
-        // running executable. An unstamped one was built without the define the
-        // build supplies, and nothing about its offsets into application types
-        // has been checked.
-        QString targetBuildId;
-        bool stamped = false;
-
-        // Whether the module carries a release entry point. The loader refuses
-        // any descriptor whose layout does not match this host exactly, so the
-        // field is always present and only its value is in question.
-        [[nodiscard]] bool declaresRelease() const
-        {
-            return snippet != nullptr && snippet->release != nullptr;
-        }
-    };
+    // The cube's adapter onto the generic pieces: it knows this application's
+    // patch descriptor, its one target, which thread may write it, and what the
+    // window should say. Everything about loading and identifying modules is
+    // the registry's, and everything about what an entry holds is the patch
+    // manager's.
+    using LoadedModule = runtime_agent::ModuleRegistry::LoadedModule;
 
     explicit ModuleManager(CubeWidget* cube);
     ~ModuleManager();
@@ -96,10 +33,13 @@ public:
     ModuleManager(const ModuleManager&) = delete;
     ModuleManager& operator=(const ModuleManager&) = delete;
 
-    [[nodiscard]] LoadedModule* loadSnippet(const QString& path, QString& error);
+    [[nodiscard]] LoadedModule* loadSnippet(const QString& path, QString& error)
+    {
+        return m_registry.loadSnippet(path, error);
+    }
     [[nodiscard]] LoadedModule* loadCubePatch(const QString& path, QString& error);
-    [[nodiscard]] LoadedModule* module(quint64 id) const;
-    [[nodiscard]] QJsonArray list() const;
+    [[nodiscard]] LoadedModule* module(const quint64 id) const { return m_registry.module(id); }
+    [[nodiscard]] QJsonArray list() const { return m_registry.list(); }
 
     // acceptIncompleteCoverage proceeds when the build could not establish that
     // replacing the target reaches every call. It is a request a caller has to
@@ -111,12 +51,13 @@ public:
     // it, and a status that read the file separately could say one thing
     // while an activation in the next breath answered to another.
     [[nodiscard]] QJsonObject coverage();
-    // Puts the label back in step with what the entry actually reaches.
-    // Called after anything that can change that, so the window never shows
-    // a claim the manager would contradict.
-    void refreshLabel();
 
 private:
+    // Puts the label back in step with what the entry actually reaches. Called
+    // after anything that can change that, so the window never shows a claim
+    // the manager would contradict. Presentation, so nothing outside calls it.
+    void refreshLabel();
+
     // The one place that decides whether a write may go ahead, so both the
     // protocol and the host binding call answer to the same rules.
     [[nodiscard]] bool admits(bool acceptIncompleteCoverage,
@@ -144,31 +85,15 @@ public:
     [[nodiscard]] QJsonObject patchStatus();
 
 private:
-    [[nodiscard]] LoadedModule* insertModule(std::unique_ptr<LoadedModule> module);
     [[nodiscard]] bool resetActivePatch(QString& error);
-    [[nodiscard]] static QJsonObject moduleJson(const LoadedModule& module);
 
     CubeWidget* m_cube = nullptr;
-    std::unordered_map<quint64, std::unique_ptr<LoadedModule>> m_modules;
+    runtime_agent::ModuleRegistry m_registry;
     // Borrowed from the registry, which outlives this. What a gateway leaves
     // behind is referred to by the process's own text, so destroying this must
     // not take it: an agent torn down and built again finds the same manager
     // with the same gateway and the same recovery state.
     runtime_agent::PatchManager& m_patches;
-    // The last verdict that described this running binary and this function.
-    //
-    // Evidence about a process does not stop being true because the file it
-    // was read from was replaced. Rebuilding the tree while this one runs
-    // leaves a manifest describing a different binary, and refusing on that
-    // would let an unrelated build revoke what this build established about
-    // itself. A rerun against the same build does replace it, allowing or
-    // refusing, since that is the same binary speaking again.
-    //
-    // Separate from what a recovery record holds, and for a different reason.
-    // This is re-asked on every request and answers what may run; that is
-    // never re-asked and says what one write was made under.
-    std::optional<runtime_agent::CoverageDecision> m_evidence;
-
     // The protocol's own binding and the module it belongs to, kept so
     // rollback can release exactly that one and nothing else. Not what status
     // reports: what the entry reaches is the manager's to answer, and a module

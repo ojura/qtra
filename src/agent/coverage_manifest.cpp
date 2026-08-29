@@ -139,4 +139,22 @@ bool authorizesLiveTextWrite(const CoverageDecision& decision, QString& error)
     return true;
 }
 
+CoverageEvidence& CoverageEvidence::instance()
+{
+    // Never destroyed, like the registry that owns patched entries, and for the
+    // same reason: what it describes outlives everything that asks about it.
+    static CoverageEvidence* const evidence = new CoverageEvidence();
+    return *evidence;
+}
+
+CoverageDecision CoverageEvidence::refresh(const QString& target, const CoverageDecision& reading)
+{
+    if (reading.describesThisTarget) {
+        m_held.insert(target, reading);
+        return reading;
+    }
+    const auto held = m_held.constFind(target);
+    return held != m_held.constEnd() ? *held : reading;
+}
+
 } // namespace runtime_agent

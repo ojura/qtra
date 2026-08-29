@@ -869,7 +869,7 @@ void RuntimeAgent::handleSnippetRun(QLocalSocket* socket,
     const bool ok = parseUnsignedInteger(
         parameters.value(QStringLiteral("moduleId")), moduleId);
     ModuleManager::LoadedModule* module = m_modules.module(ok ? moduleId : 0);
-    if (module == nullptr || module->kind != ModuleManager::Kind::Snippet) {
+    if (module == nullptr || module->kind != QLatin1String("snippet")) {
         sendError(socket, requestId, QStringLiteral("module_not_found"),
                   QStringLiteral("snippet module was not found"));
         return;
@@ -914,7 +914,7 @@ void RuntimeAgent::handleSnippetRelease(QLocalSocket* socket,
     const bool ok = parseUnsignedInteger(
         parameters.value(QStringLiteral("moduleId")), moduleId);
     ModuleManager::LoadedModule* module = m_modules.module(ok ? moduleId : 0);
-    if (module == nullptr || module->kind != ModuleManager::Kind::Snippet) {
+    if (module == nullptr || module->kind != QLatin1String("snippet")) {
         sendError(socket, requestId, QStringLiteral("module_not_found"),
                   QStringLiteral("snippet module was not found"));
         return;
