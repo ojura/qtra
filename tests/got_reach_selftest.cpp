@@ -39,13 +39,22 @@ void check(const bool condition, const char* what)
 
 int replacementCalls = 0;
 
-// Forwards, because the point is which allocator Qt reaches and not what it
-// does. Calling the real one by name is safe here: this executable's own calls
-// go through its own table, and it is Qt's that has been redirected.
+// What the slot held before it was redirected, which is what a replacement is
+// given to chain to.
+using Allocator = void* (*)(std::size_t);
+Allocator originalAllocator = nullptr;
+
+// Forwards to what was captured from the slot, and not to malloc by name.
+//
+// Those need not be the same function. Something may have interposed on the
+// allocator this object calls, or it may be resolved in a different namespace,
+// so calling by name would forward to whatever this executable resolves and
+// quietly test something else. Chaining through what the slot held is the thing
+// the backend promises a replacement can do.
 extern "C" void* countingMalloc(const std::size_t bytes)
 {
     ++replacementCalls;
-    return std::malloc(bytes);
+    return originalAllocator != nullptr ? originalAllocator(bytes) : nullptr;
 }
 
 } // namespace
@@ -87,6 +96,9 @@ int main()
     // being measured and nothing counts the setup.
     const QByteArray input(4096, 'x');
     const int before = replacementCalls;
+
+    originalAllocator = reinterpret_cast<Allocator>(site.resolved);
+    check(originalAllocator != nullptr, "the slot handed back something to chain to");
 
     if (!runtime_agent::redirectGotSlot(site, reinterpret_cast<void*>(&countingMalloc),
                                         error)) {
