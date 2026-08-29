@@ -102,7 +102,7 @@ Executors:
 
 `snippet.release` calls the module's `release` entry point instead of `run`, and
 reports through `operation.finished` with kind `snippetRelease`. A module that
-does not declare one is answering rather than failing, and says so with
+does not declare one is answering the question, and says so with
 `no_release_declared`; that is a different thing from a release that ran and
 failed, and the two are meant to be told apart.
 
@@ -117,7 +117,8 @@ where it can safely be torn down. Guessing instead is worse than not releasing
 at all: Qt requires `removeEventFilter` to run on the watched object's thread, a
 timer to be killed from its own, and forbids deleting a QObject across threads,
 and nothing checks thread affinity the way the scene snippets check the GL
-context, so a wrong guess is a race inside the process rather than an error.
+context, so a wrong guess fails as a race inside the process, where nobody sees
+it.
 
 Errors worth handling separately:
 
@@ -148,7 +149,7 @@ The host keeps opaque byte strings under caller-chosen keys and never interprets
 them. A module that overwrites host state puts the original here so that code
 written afterwards can restore it: a copy kept in the module's own memory dies
 with that module's private state and is reachable to nothing else, which is what
-makes an undo written later impossible rather than merely unwritten.
+makes an undo written later impossible, not merely unwritten.
 
 The namespace is flat on purpose. Scoping keys to a module would shut out
 exactly the later repair module the stash exists to serve. The convention is
@@ -164,7 +165,7 @@ module can make about itself, so dropping is the driver's call, not the
 module's. A buggy restore that corrupts instead of restoring must not
 delete the only good copy as its last act. Dropping an entry whose displacement
 is still in effect is how you lose the original: releasing then reports that it
-could not restore, rather than writing whatever is in the buffer.
+could not restore, and leaves the buffer alone.
 
 Consumers replay an entry only after checking the displacement it describes is
 still in effect. For these snippets that check is that the face is still all
@@ -178,7 +179,7 @@ not depend on the depositor reporting it honestly.
 Those stamps decide one thing: overwrite rights. `stash_put` with overwrite set
 succeeds when the existing entry's stamped name matches the caller's and answers
 -2 when it does not, so a reloaded generation may replace its predecessor's
-entry while an unrelated module may not. The name rather than the id, because a
+entry while an unrelated module may not. Keyed on the name, because a
 reload gives the same source a new id. Reads are not restricted, which is what
 keeps a module written later to repair an earlier one able to fetch what it
 saved.
@@ -194,7 +195,7 @@ cube.vertexBuffer/<offset>+<length>/claimed   a displacement is in effect
 ```
 
 Installing queries the claims and refuses when one overlaps the region it wants,
-which is arithmetic over records rather than a pattern read out of the vertex
+which is arithmetic over records, not a pattern read out of the vertex
 values. A six-vertex displacement and a thirty-six-vertex one therefore see each
 other, and a module can be excluded by another it has never heard of.
 
@@ -219,9 +220,24 @@ leaves it collapsed and unclaimed, so the restore has to come first.
 ### Function patches
 
 - `patch.load {path}`
-- `patch.activate {moduleId}` rewrites the target's entry so calls reach the
-  module's replacement. The first activation installs a gateway that jumps
-  through a slot, and later ones store into that slot.
+- `patch.activate {moduleId, acceptIncompleteCoverage}` points the target's
+  entry at the module's replacement. The first activation writes a gateway that
+  jumps through a slot; later ones store into that slot.
+
+  Refused unless the build recorded that replacing this function reaches every
+  call. `acceptIncompleteCoverage` proceeds anyway and activates a replacement
+  that may not reach every caller.
+
+- `patch.status` reports:
+
+  | field | meaning |
+  |---|---|
+  | `mode` | what is driving the cube, `builtin` or `entry` |
+  | `entryState` | what the entry holds: `pristine`, `original`, `replacement`, `recovery-required` |
+  | `gatewaySlot` | the address the gateway loads its destination from |
+  | `quiescedBy` | the policy that made the one code write safe |
+  | `threadsAtInstall` | threads observed then, or null if they could not be counted |
+  | `coverage` | the build's decision, and whether it allows activation |
 - `patch.rollback`
 - `patch.status`
 

@@ -20,6 +20,8 @@ and provides:
   C++ objects, private fields, process symbols, and process memory;
 - replacing a function in the running process by rewriting its entry, with a
   gateway installed once and every later choice made by an atomic store;
+- a build-time decision about whether replacing a function reaches every call,
+  which activation reads and refuses to act against;
 - a build-oracle tool that derives a snippet compiler command from the owning
   translation unit in `compile_commands.json`.
 
@@ -482,7 +484,7 @@ Reading it back while the dialog is open gives:
 
 ```text
 An optimized Qt 6/OpenGL process with semantic RPC, runtime-compiled C++
-snippets, and two hotpatch modes.
+snippets, and function replacement by entry rewriting.
 
 claude was here
 ```
@@ -727,7 +729,7 @@ const RuntimeAgentSnippet descriptor{
 `release` receives a host and reports through `complete_json`/`fail` exactly as
 `run` does, so a release that fails is an error a program can act on.
 
-`RUNTIME_AGENT_ABI` is bumped whenever either ABI struct changes shape, and
+`RUNTIME_AGENT_ABI` is bumped whenever either ABI struct changes layout, and
 the loader accepts only an exact match: a module that disagrees with the host
 about either struct fails to load, so it cannot run against fields the host
 never wrote. There is no adaptation path and none is intended. Rebuild the
@@ -833,61 +835,171 @@ is still in `.symtab` and readable from the live process with
 is in the repository as source besides. The rule is to save what you overwrite
 *unless it is reconstructible from the binary or the source*.
 
-## Function hot-swapping
+## Replacing a function
 
-### Dispatch mode
+The application makes an ordinary direct call to `cube_step_builtin` once per
+animation tick. It holds no pointer for the agent to swap and knows nothing
+about being patched. Everything below is done to it, not with its help.
 
-`CubeWidget` performs one atomic function-pointer load and indirect call per
-animation tick. This is the predictable, portable seam:
+### The gateway
 
-```bash
-python3 tools/agentctl.py patch \
-  build/release/cube_patch_wobble.so
-python3 tools/agentctl.py call patch.rollback
-```
-
-Unpatched overhead is one atomic load plus an indirect call per tick.
-
-### Raw entry mode
-
-`cube_step_builtin` is built as:
-
-```cpp
-__attribute__((noinline, noclone, patchable_function_entry(16, 0)))
-```
-
-On Linux/x86-64 the patcher verifies that all 16 reserved bytes are NOPs, saves
-them, temporarily changes text-page permissions, and writes:
+The build reserves 20 bytes at the function's entry. The first time something
+asks to replace the function, the agent writes this into that space:
 
 ```text
-movabs r11, <replacement address>
-jmp    r11
+movabs r11, <slot address>     10 bytes
+jmp    qword ptr [r11]           3 bytes
+endbr64                          4 bytes
 ```
 
-Future entries jump to the replacement DSO. Rollback restores the exact saved
-bytes.
+The `endbr64` is the continuation. The slot points at it to begin with, so a
+call goes through the gateway, lands there, runs the remaining NOPs and falls
+into the function's own instructions. Nothing has changed about what the
+program does.
 
-With `-fcf-protection=full`, GCC places `ENDBR64` before that NOP region. The
-patcher preserves the four-byte landing pad and writes the jump at `entry + 4`.
-Because the jump itself is indirect, it also requires the replacement function
-to begin with `ENDBR64`. The `release-cet` and `selftest-cet` presets apply the
-same CET setting to the host and runtime modules.
+Choosing a replacement is a store into the slot. On x86-64 an aligned pointer
+store is atomic, so a thread reading the slot gets the old address or the new
+one and never half of either. Going back to the original is the same store with
+the continuation's address.
+
+This is the point of the arrangement. Writing 13 bytes of code into a live
+function is the dangerous part, and it happens once. Every choice after that
+costs nothing and needs no coordination.
+
+Under `-fcf-protection=full` GCC puts an `ENDBR64` at the function's entry.
+That is left alone and the gateway goes after it, at `entry + 4`. The jump is
+indirect, so a replacement has to start with `ENDBR64` too, and one that does
+not is refused.
+
+The gateway is never removed. A thread can be between the slot load and the
+jump at any instant, so there is no moment when taking it out is safe. The
+function can always be made to behave as it did, by pointing the slot back at
+the continuation, and `entryState` reports which of those is true:
+
+| entryState | meaning |
+|---|---|
+| `pristine` | the entry holds its reserved NOPs, nothing installed |
+| `original` | the gateway is in and the slot names the continuation |
+| `replacement` | the gateway is in and the slot names somebody's replacement |
+| `recovery-required` | an install changed bytes and could not finish |
 
 ```bash
-python3 tools/agentctl.py patch \
-  build/release/cube_patch_wobble.so --mode entry
+python3 tools/agentctl.py patch build/release-patch-ready/cube_patch_wobble.so
 python3 tools/agentctl.py call patch.status
 python3 tools/agentctl.py call patch.rollback
 ```
 
-The socket server and animation run on the GUI thread. Patch activation pauses
-the timer and happens at a GUI-thread request boundary, so this sample has no
-concurrent caller of the target while its 13-byte jump is written. That is a
-property of this demo, not a general stop-the-world implementation.
+### Preparing the target
 
-Entry rewriting does not affect inlined copies, compiler clones, folded calls,
-or callers optimized around the function. A general agent must inspect the final
-ELF and call sites, patch relevant clones/callers, or rebuild those callers.
+Three things have to be true of a function before its entry can be rewritten,
+and none of them belongs in its source:
+
+```cmake
+-fpatchable-function-entry=20,0   reserve the space
+-fno-lto                          keep callers from seeing the body
+-fno-ipa-icf                      keep it from being folded with another
+```
+
+`src/cube_step.cpp` carries no attributes. The second flag is what makes the
+first safe: with the body opaque, a caller in another translation unit sees
+only the declaration, so it cannot have inlined a copy and cannot have assumed
+anything about which registers the body leaves alone. A replacement is free to
+use them.
+
+This is weaker than GCC's `noipa` attribute, which is per function and covers
+passes that do not exist yet. It works here because `cube_step.cpp` has no
+callers of its own, so the object boundary is the whole story. A function
+sharing a file with its callers needs a compiler plugin or a much broader
+build profile.
+
+### Knowing whether it worked
+
+Rewriting an entry reaches the calls that arrive there. If the compiler inlined
+the function somewhere, made a specialised copy, or folded it together with an
+identical function, those keep running the original code and the entry never
+sees them. None of that survives into an optimised binary.
+
+So the build works it out and writes it down. `PATCH_READY=ON` keeps split
+DWARF and GCC's clone dumps, and `tools/analyze_coverage.py` combines them with
+the final ELF symbols and the flags above into a manifest keyed by the binary's
+build id:
+
+```bash
+cmake --preset release-patch-ready
+python3 -m json.tool build/release-patch-ready/coverage-manifest.json
+```
+
+Activation reads it, checks it describes this build and this function, and
+refuses unless it says coverage is complete. A missing manifest is also a
+refusal: a build that recorded nothing was never asked the question.
+
+```text
+no coverage manifest at .../build/release/coverage-manifest.json, so nothing
+recorded whether replacing this function reaches every call
+```
+
+`acceptIncompleteCoverage` proceeds anyway, and says what that means.
+
+Each kind of evidence is asked for separately, because targets differ. Split
+DWARF reports `not required` here: the body was opaque to callers in other
+units, so there was nothing for them to inline and no inline instance to look
+for. A function without that preparation needs the evidence and is refused
+without it.
+
+### Writing safely
+
+The write happens on the thread that owns the widget, which is the only thread
+that calls the function, and every path that reaches the write refuses if it is
+somewhere else. So the bytes change between two ticks of a single-threaded
+event loop with the function not on the stack.
+
+`quiescedBy` names the policy that made that claim, and `threadsAtInstall`
+records how many threads it had to answer for. Twenty threads and a
+same-thread claim is a different statement from one thread and no claim, and
+the two used to read the same.
+
+Three policies exist. One asserts the caller controls the phase before any
+thread could reach the target. One checks that by counting threads. One refuses,
+which is the answer when threads exist that nothing can account for, because
+changing several bytes of code another thread may be executing is worse than
+declining to.
+
+### What a snippet does
+
+A snippet asks the host, through `patch_bind`:
+
+```cpp
+RuntimeAgentPatchBinding bound{};
+host->patch_bind(host->agent_context,
+                 reinterpret_cast<void*>(&cube_step_builtin),
+                 reinterpret_cast<void*>(&myStep),
+                 &bound);
+```
+
+It gets back an id, the address of the original, and whatever its binding
+displaced, so a replacement can call either. `patch_unbind` releases it.
+
+Bindings stack, and releasing one out of order is safe. Releasing a binding
+that is not the selected one leaves the selection alone; releasing the selected
+one falls back to the newest still live. A module that let go could otherwise
+overwrite a replacement chosen after it. Ownership comes from the calling
+module, so nothing can release somebody else's binding.
+
+Call both from the executor the target runs on. They reach the object that owns
+the target, and a call from another thread is refused, because doing that work
+on the wrong thread fails as a race inside the process and not as an error
+anyone can see.
+
+`agent_snippet_audio_pulse` does exactly this: it binds a step function that
+drives the cube's angle, tint and scale from the audio, and unbinds when it is
+switched off.
+
+### What this does not do
+
+A selection store affects the next call that loads the slot. A call already
+running continues in the code it entered. Nothing drains calls in flight, so a
+module has to keep whatever its replacement uses alive until its own thread is
+idle.
 
 ## Unsafe memory and symbols
 
@@ -963,7 +1075,13 @@ src/agent/runtime_agent.*       JSON socket and command dispatch
 src/agent/object_registry.*     QObject IDs and reflection
 src/agent/module_manager.*      dlopen, snippets, module registry, cube adapter
 src/agent/build_id.*            the running executable's GNU build id
-src/agent/entry_hotpatch.*      Linux/x86-64 entry rewriter
+src/agent/entry_hotpatch.*      writing mapped text, and encoding the gateway
+src/agent/patch_site.*          where a function may be patched, from the compiler's record
+src/agent/patch_manager.*       what is installed, and which replacement is selected
+src/agent/gateway_record.h      one gateway's slot, never freed
+src/agent/quiescence*.h         when writing an entry is safe, and who says so
+src/agent/coverage_manifest.*   reading the build's decision back at runtime
+tools/analyze_coverage.py       deciding, at build time, whether replacing reaches every call
 src/cube_widget.*               OpenGL cube and execution seams
 snippets/                       native runtime code examples and scene modifications
 snippets/scene_toggle.h         runtime-added Cube menu entry shared by the scene snippets

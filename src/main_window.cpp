@@ -204,7 +204,7 @@ void MainWindow::createMenus()
                            QStringLiteral("Qt Runtime Agent Demo"),
                            QStringLiteral(
                                "An optimized Qt 6/OpenGL process with semantic RPC, "
-                               "runtime-compiled C++ snippets, and two hotpatch modes."));
+                               "runtime-compiled C++ snippets, and function replacement by entry rewriting."));
     });
 }
 
