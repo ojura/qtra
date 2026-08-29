@@ -67,23 +67,32 @@ class AgentClient:
         if self._socket is not None:
             return
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.setblocking(False)
+        # Every failure below closes the socket, which is why this is one block
+        # rather than a close beside each raise. Two of these paths had none:
+        # connect() reports a socket that is not there yet as FileNotFoundError
+        # and not BlockingIOError, and passing the deadline raises out of
+        # _remaining. A caller that retries until the application comes up takes
+        # the first one every time around, and leaks a descriptor each time.
         try:
-            sock.connect(self.socket_path)
-        except BlockingIOError:
-            pass
-        deadline = time.monotonic() + self.timeout
-        while True:
-            _, writable, exceptional = select.select([], [sock], [sock], self._remaining(deadline))
-            if exceptional:
-                sock.close()
-                raise ConnectionError(f"could not connect to {self.socket_path}")
-            if writable:
-                error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                if error:
-                    sock.close()
-                    raise OSError(error, os.strerror(error), self.socket_path)
-                break
+            sock.setblocking(False)
+            try:
+                sock.connect(self.socket_path)
+            except BlockingIOError:
+                pass
+            deadline = time.monotonic() + self.timeout
+            while True:
+                _, writable, exceptional = select.select(
+                    [], [sock], [sock], self._remaining(deadline))
+                if exceptional:
+                    raise ConnectionError(f"could not connect to {self.socket_path}")
+                if writable:
+                    error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if error:
+                        raise OSError(error, os.strerror(error), self.socket_path)
+                    break
+        except BaseException:
+            sock.close()
+            raise
         self._socket = sock
 
     def close(self) -> None:

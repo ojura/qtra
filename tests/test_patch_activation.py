@@ -16,17 +16,23 @@ build wrote, so being killed leaves nothing to put back.
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
-import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+
+# The same client agentctl.py drives the application with. Talking to the socket
+# from here as well meant two answers to how a reply is framed, and the copy
+# here was the worse one: it dropped events on the floor rather than holding
+# them, and it read a closed socket as an empty read forever.
+from agentctl import AgentClient, ProtocolError
+from private_display import OwnDisplay, can_draw, child_environment
 
 # Which build to drive. ctest sets this to the configuration it is running, so
 # release-lto and release-cet exercise their own binaries and not another
@@ -42,64 +48,7 @@ PATCH_MODULE = BUILD / "cube_patch_wobble.so"
 BINDER = BUILD / "agent_snippet_bind_probe.so"
 
 # Asked at import, before the display exists, so this is whether one can be had.
-CAN_DRAW = bool(
-    shutil.which("Xvfb") is not None
-    or (os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host"
-        and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")))
-)
-
-# Where the demo is shown.
-#
-# On a display of its own by default, so running these does not put windows on
-# somebody's screen while they are working. Set RUNTIME_AGENT_TEST_DISPLAY=host
-# to use the display this shell already has, which is what to do when watching
-# the cube is the point.
-#
-# The server is started here and stopped here, and the demo is launched directly
-# against it. Wrapping each launch in xvfb-run instead would leave a wrapper
-# between this and the process it has to stop, and killing the wrapper leaves
-# the demo and the server behind.
-class OwnDisplay:
-    def __init__(self) -> None:
-        self.number: str | None = None
-        self.server: subprocess.Popen | None = None
-
-    def start(self) -> str | None:
-        if os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host":
-            return None
-        if shutil.which("Xvfb") is None:
-            return None
-        for candidate in range(90, 130):
-            if Path(f"/tmp/.X11-unix/X{candidate}").exists():
-                continue
-            self.server = subprocess.Popen(
-                ["Xvfb", f":{candidate}", "-screen", "0", "1280x800x24",
-                 "+extension", "GLX", "+render", "-noreset"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if Path(f"/tmp/.X11-unix/X{candidate}").exists():
-                    self.number = f":{candidate}"
-                    return self.number
-                if self.server.poll() is not None:
-                    break
-                time.sleep(0.05)
-            self.stop()
-        return None
-
-    def stop(self) -> None:
-        if self.server is not None:
-            self.server.terminate()
-            try:
-                self.server.wait(10)
-            except subprocess.TimeoutExpired:
-                self.server.kill()
-                self.server.wait(5)
-            self.server = None
-        self.number = None
-
+CAN_DRAW = can_draw()
 
 DISPLAY_FOR_TESTS = OwnDisplay()
 
@@ -132,26 +81,11 @@ class Agent:
         # A real display, because the cube is a QOpenGLWidget and Qt's offscreen
         # platform has no support for one: it reports that, fails to compile the
         # shaders, and dies before the socket is useful.
-        environment = dict(os.environ)
-        if os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") != "host":
-            # Whatever this shell was given is removed whether or not a private
-            # display was started, so nothing can inherit its way onto
-            # somebody's screen. setUpModule has already skipped if there is no
-            # private display, and refusing here as well means a caller that
-            # bypasses it gets an error and not a window.
-            environment.pop("WAYLAND_DISPLAY", None)
-            environment.pop("DISPLAY", None)
-            if DISPLAY_FOR_TESTS.number is None:
-                raise RuntimeError(
-                    "there is no display of our own to draw on, and using the one this "
-                    "shell has must be asked for"
-                )
-            environment["DISPLAY"] = DISPLAY_FOR_TESTS.number
-            # Qt prefers Wayland where the environment offers one, which would
-            # be the session on somebody's screen.
-            environment["QT_QPA_PLATFORM"] = "xcb"
-            # A virtual display has no GPU behind it.
-            environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+        #
+        # setUpModule has already skipped if there is no private display. This
+        # raises rather than falling back, so a caller that goes around
+        # setUpModule gets an error and not a window on somebody's screen.
+        environment = child_environment(DISPLAY_FOR_TESTS)
         self.process = subprocess.Popen(
             [str(BINARY), "--agent-socket", str(socket_path)],
             env=environment,
@@ -166,43 +100,31 @@ class Agent:
             # registered to stop it yet.
             self.close()
             raise
-        self.next_id = 0
 
-    def _connect(self) -> socket.socket:
+    def _connect(self) -> AgentClient:
+        # The client connects once. Retrying is this test's business, because
+        # the demo is still starting and has not bound the socket yet, and only
+        # the caller that launched it knows to give up when it dies instead.
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError("the demo exited before it accepted a connection")
-            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client = AgentClient(str(self.socket_path), timeout=20)
             try:
-                connection.connect(str(self.socket_path))
+                client.connect()
+            # ConnectionError and TimeoutError are both OSError.
             except OSError:
-                connection.close()
+                client.close()
                 time.sleep(0.05)
                 continue
-            connection.settimeout(20)
-            return connection
+            return client
         raise RuntimeError("the demo never accepted a connection")
 
-    def call(self, command: str, **params: object) -> dict:
-        self.next_id += 1
-        request = {"id": self.next_id, "command": command, "params": params}
-        self.connection.sendall((json.dumps(request) + "\n").encode())
-        buffer = b""
-        while True:
-            buffer += self.connection.recv(65536)
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                message = json.loads(line)
-                # Events share the stream and are not answers to this request.
-                if message.get("id") == self.next_id:
-                    return message
-
     def ok(self, command: str, **params: object) -> dict:
-        answer = self.call(command, **params)
-        if not answer.get("ok"):
-            raise AssertionError(f"{command} refused: {answer}")
-        return answer["result"]
+        try:
+            return self.connection.request(command, params)
+        except ProtocolError as refusal:
+            raise AssertionError(f"{command} refused: {refusal}") from refusal
 
     def close(self) -> None:
         """Stops the demo, and is safe to call more than once.

@@ -17,6 +17,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agentctl import AgentClient  # noqa: E402
+from private_display import OwnDisplay, child_environment  # noqa: E402
 
 
 def wait_for_socket(path: Path, process: subprocess.Popen[Any], timeout: float) -> None:
@@ -73,39 +74,19 @@ def main(argv: list[str] | None = None) -> int:
     # on somebody's screen while they are working. Set
     # RUNTIME_AGENT_TEST_DISPLAY=host to watch it happen on the display this
     # shell already has.
-    command: list[str]
-    on_host = os.environ.get("RUNTIME_AGENT_TEST_DISPLAY") == "host"
-    if on_host:
-        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-            print("asked for the host display and there is none", file=sys.stderr)
-            return 2
-        command = [str(app)]
-    elif shutil.which("xvfb-run"):
-        command = [
-            "xvfb-run",
-            "-a",
-            "-s",
-            "-screen 0 1280x800x24 +extension GLX +render -noreset",
-            str(app),
-        ]
-    else:
-        # No falling back to whatever display is around. That would put a window
-        # on somebody's screen at the moment something has gone wrong.
-        print("xvfb-run is unavailable, and using the host display has to be asked for "
-              "with RUNTIME_AGENT_TEST_DISPLAY=host", file=sys.stderr)
+    display = OwnDisplay()
+    display.start()
+    try:
+        environment = child_environment(display)
+    except RuntimeError as why:
+        print(str(why), file=sys.stderr)
+        display.stop()
         return 2
-    command += ["--agent-socket", str(socket_path)]
+    command = [str(app), "--agent-socket", str(socket_path)]
 
-    environment = os.environ.copy()
-    environment.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
-    if not on_host:
-        # Qt prefers Wayland where the environment offers it, which would be the
-        # session on somebody's screen.
-        environment.pop("WAYLAND_DISPLAY", None)
-        environment["QT_QPA_PLATFORM"] = "xcb"
     log = log_path.open("wb")
-    # Its own process group, so shutting down reaches the application and the
-    # display server xvfb-run started, and not only the wrapper.
+    # Its own process group, so shutting down reaches the application and
+    # anything it started, not only the process launched here.
     process = subprocess.Popen(command, env=environment, stdout=log,
                                stderr=subprocess.STDOUT, start_new_session=True)
 
@@ -205,6 +186,10 @@ def main(argv: list[str] | None = None) -> int:
                 except (ProcessLookupError, PermissionError):
                     process.kill()
                 process.wait()
+        # After the application, so it is not drawing into a server that has
+        # gone. Unconditional, because this started the server and leaving it
+        # behind is how a machine ends up with a pile of them.
+        display.stop()
         log.close()
         if not args.keep_runtime and process.returncode == 0:
             shutil.rmtree(runtime, ignore_errors=True)
