@@ -1,6 +1,7 @@
 #include "agent/entry_hotpatch.h"
 
 #include "agent/errno_text.h"
+#include "agent/page_span.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -57,22 +58,19 @@ TextWriteResult writeText(void* address,
         return result;
     }
 
-    const long page_size_long = ::sysconf(_SC_PAGESIZE);
-    if (page_size_long <= 0) {
+    const std::size_t page_size = pageSize();
+    if (page_size == 0) {
         result.error = errnoMessage("sysconf(_SC_PAGESIZE)");
         return result;
     }
-    const auto page_size = static_cast<std::uintptr_t>(page_size_long);
     const auto target_address = reinterpret_cast<std::uintptr_t>(address);
-    const auto page_begin = target_address & ~(page_size - 1U);
 
-    if (size > std::numeric_limits<std::uintptr_t>::max() - target_address) {
+    std::uintptr_t page_begin = 0;
+    std::size_t mapping_size = 0;
+    if (!pageSpan(target_address, size, page_size, page_begin, mapping_size)) {
         result.error = "address range overflow";
         return result;
     }
-    const auto end_address = target_address + size;
-    const auto page_end = (end_address + page_size - 1U) & ~(page_size - 1U);
-    const auto mapping_size = static_cast<std::size_t>(page_end - page_begin);
 
     auto* mapping = reinterpret_cast<void*>(page_begin);
     const ProtectFunction change = protect != nullptr ? protect : &::mprotect;

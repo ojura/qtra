@@ -1,6 +1,7 @@
 #include "agent/prologue_relocation.h"
 
 #include "agent/errno_text.h"
+#include "agent/page_span.h"
 #include "agent/patch_site.h"
 
 #include <atomic>
@@ -663,15 +664,18 @@ bool extentOf(void* const function, const std::uint8_t*& entry, std::size_t& byt
 // nothing taken was position-dependent.
 void* allocateNear(const std::uint8_t* const target, const std::size_t bytes)
 {
-    const auto pageSize = static_cast<std::uintptr_t>(::sysconf(_SC_PAGESIZE));
-    const std::size_t rounded =
-        static_cast<std::size_t>((bytes + pageSize - 1U) / pageSize * pageSize);
-    const auto base = reinterpret_cast<std::uintptr_t>(target) & ~(pageSize - 1U);
+    const std::size_t page = runtime_agent::pageSize();
+    std::size_t rounded = 0;
+    if (page == 0 || !runtime_agent::roundUpToPages(bytes, page, rounded)) {
+        return nullptr;
+    }
+    const auto base = runtime_agent::pageBase(reinterpret_cast<std::uintptr_t>(target), page);
+    const auto stride = static_cast<std::uintptr_t>(page);
 
     // Outward from the function in both directions, staying well inside the
     // reach of a thirty-two bit displacement.
     constexpr std::uintptr_t limit = 1ULL << 30U;
-    for (std::uintptr_t step = pageSize; step < limit; step *= 2U) {
+    for (std::uintptr_t step = stride; step < limit; step *= 2U) {
         // Below the function only while there is room below it. These are
         // unsigned, so a step larger than the address wraps to somewhere near
         // the top of the space, and every attempt at that address fails for a
@@ -681,7 +685,7 @@ void* allocateNear(const std::uint8_t* const target, const std::size_t bytes)
         const std::uintptr_t below = step <= base ? base - step : 0U;
         const std::uintptr_t candidates[]{base + step, below};
         for (const std::uintptr_t candidate : candidates) {
-            if (candidate < pageSize) {
+            if (candidate < stride) {
                 continue;
             }
             void* const hint = reinterpret_cast<void*>(candidate);
@@ -904,11 +908,16 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     // writable, because choosing what runs is a store into it. They cannot
     // share a page: a page that is both executable and writable is one this
     // does not need and should not ask for.
-    const auto pageSize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    const std::size_t page = runtime_agent::pageSize();
     const std::size_t trampolineBytes =
         sizeof(landingPad) + plan.takenBytes + relativeJumpBytes;
-    const std::size_t codeBytes = (trampolineBytes + pageSize - 1U) / pageSize * pageSize;
-    const std::size_t mappedBytes = codeBytes + pageSize;
+    std::size_t codeBytes = 0;
+    if (page == 0 || !runtime_agent::roundUpToPages(trampolineBytes, page, codeBytes)) {
+        error = "the system page size could not be determined, so the copy cannot be given "
+                "pages of its own";
+        return false;
+    }
+    const std::size_t mappedBytes = codeBytes + page;
     void* const trampoline = allocateNear(patchAt, mappedBytes);
     if (trampoline == nullptr) {
         error = "no memory could be mapped near this entry for the copy of its prologue and "

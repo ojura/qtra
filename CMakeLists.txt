@@ -193,6 +193,7 @@ qt_add_executable(qt_runtime_cube
     src/cube_protocol.cpp
     src/cube_step.cpp
     src/agent/errno_text.h
+    src/agent/page_span.h
     src/agent/entry_hotpatch.h
     src/agent/entry_hotpatch.cpp
     src/agent/patch_site.h

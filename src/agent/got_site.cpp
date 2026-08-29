@@ -1,6 +1,7 @@
 #include "agent/got_site.h"
 
 #include "agent/errno_text.h"
+#include "agent/page_span.h"
 #include "agent/patch_site.h"
 
 #include <atomic>
@@ -292,12 +293,19 @@ SlotWriteResult storeIntoSlot(void** slot, void* value, const int protection,
         protect = &::mprotect;
     }
     SlotWriteResult result;
-    const auto pageSize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    const std::size_t bytes = pageSize();
     const auto address = reinterpret_cast<std::uintptr_t>(slot);
-    auto* page = reinterpret_cast<void*>(address & ~(pageSize - 1));
-    // A slot is one aligned pointer, so it never straddles pages; the page it
-    // sits in is what has to be writable.
-    const std::size_t span = pageSize;
+    std::uintptr_t base = 0;
+    std::size_t span = 0;
+    // A slot is one aligned pointer, so this is the single page it sits in.
+    // Asked for rather than assumed, because the same call reports a page size
+    // that could not be determined, which the mask would otherwise hide.
+    if (!pageSpan(address, sizeof(void*), bytes, base, span)) {
+        result.error = "the system page size could not be determined, so the pages holding "
+                       "the slot cannot be named";
+        return result;
+    }
+    auto* page = reinterpret_cast<void*>(base);
     const bool alreadyWritable = (protection & PROT_WRITE) != 0;
 
     if (!alreadyWritable && protect(page, span, protection | PROT_WRITE) != 0) {
