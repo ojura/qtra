@@ -153,12 +153,83 @@ bool signalIsQueued(const int tid, const int signalNumber)
     return queued;
 }
 
+// Whether any thread has the parking signal blocked or waiting for it.
+//
+// Reads both masks, because either one makes a later stop refuse: SigPnd is a
+// signal from an abandoned stop still queued, and SigBlk is a thread inside the
+// parking handler, which the kernel blocks the signal for until the handler
+// returns.
+bool anyThreadHoldsSignal(const int signalNumber)
+{
+    std::vector<int> tids;
+    std::string ignored;
+    if (!runtime_agent::currentThreadIds(tids, ignored)) {
+        return true;
+    }
+    const unsigned long long bit = 1ULL << (signalNumber - 1);
+    for (const int tid : tids) {
+        char path[64] = {};
+        std::snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
+        std::FILE* status = std::fopen(path, "re");
+        if (status == nullptr) {
+            continue;   // The thread exited between listing and reading it.
+        }
+        char line[256];
+        bool holds = false;
+        while (std::fgets(line, sizeof(line), status) != nullptr) {
+            unsigned long long mask = 0;
+            if (std::sscanf(line, "SigPnd: %llx", &mask) == 1
+                || std::sscanf(line, "SigBlk: %llx", &mask) == 1) {
+                if ((mask & bit) != 0ULL) {
+                    holds = true;
+                    break;
+                }
+            }
+        }
+        (void)std::fclose(status);
+        if (holds) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Waits until nothing is left over from the block before.
+//
+// Each block below assumes it starts from a process where no stop is in
+// progress and none has left anything behind. That is not automatic. A stop
+// that timed out leaves its signals queued, and the next acquire refuses while
+// they are there; a thread still inside the parking handler has the signal
+// blocked, and the next acquire refuses naming that thread. Both refusals are
+// the policy being right. A block that asserts on a different refusal, or on a
+// stop succeeding, then fails for a reason that has nothing to do with what it
+// is testing.
+//
+// That was a real intermittent failure, about one run in thirty, in two
+// appearances: the block expecting a refusal about the parking handler getting
+// one about a blocked signal instead, and the block expecting a thread to park
+// finding the stop refused outright. The deadline block already had a loop like
+// this of its own, which is why it was the one block that never failed this way.
+void settle()
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (anyThreadHoldsSignal(SIGRTMIN + 3)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::printf("  note  something still holds the parking signal after 10 seconds; "
+                        "the checks below may refuse for that rather than their own reason\n");
+            return;
+        }
+        std::this_thread::yield();
+    }
+}
+
 } // namespace
 
 int main()
 {
     std::printf("a signal the application already uses\n");
     {
+        settle();
         // Taking it would disable what the application does with it, for the
         // life of the process, with nothing to put back.
         struct sigaction mine {};
@@ -186,6 +257,7 @@ int main()
     // Alone, so the count is the count.
     std::printf("with no other threads\n");
     {
+        settle();
         std::vector<int> tids;
         std::string error;
         check(runtime_agent::currentThreadIds(tids, error), "the thread list is readable");
@@ -200,6 +272,7 @@ int main()
 
     std::printf("with threads running\n");
     {
+        settle();
         constexpr int workers = 4;
         std::vector<std::thread> threads;
         threads.reserve(workers);
@@ -259,6 +332,7 @@ int main()
 
     std::printf("a thread standing in the bytes about to change\n");
     {
+        settle();
         // The region is the whole function the thread is looping in, not the
         // exact address it occupied once. A thread in a loop is at a different
         // instruction from one moment to the next, so asking about the eight
@@ -299,6 +373,7 @@ int main()
 
     std::printf("a thread that has called out of the range is not seen in it\n");
     {
+        settle();
         // The limitation, tested so it is a known property and not a surprise.
         // This thread's return address is inside the yielding spinner, and its
         // instruction pointer is in the C library, so a region covering that
@@ -322,6 +397,7 @@ int main()
 
     std::printf("what makes two readings of the thread list comparable\n");
     {
+        settle();
         // A thread id is a number the kernel reuses, so the list is compared by
         // id and by the inode of the task's own directory. If that inode came
         // back the same for every thread, the comparison would be looking at
@@ -374,6 +450,7 @@ int main()
 
     std::printf("a thread that blocks the signal\n");
     {
+        settle();
         // Nothing is sent. A signal queued to a thread that blocks it waits
         // there until that thread unblocks, and every attempt would add another
         // against a limit this user's other processes share.
@@ -410,6 +487,7 @@ int main()
 
     std::printf("a deadline that expires, and what it leaves behind\n");
     {
+        settle();
         // Threads that will arrive given any time at all, and a deadline that
         // gives them none. What is tested is the giving up and the state it
         // leaves, not the waiting.
@@ -473,6 +551,7 @@ int main()
 
     std::printf("two stops at once\n");
     {
+        settle();
         // One at a time. A second would advance the generation and reset the
         // counters under the first, and the first's handlers would then be
         // counted by a stop they were never sent for.
@@ -514,6 +593,7 @@ int main()
 
     std::printf("a second policy asking for a different signal\n");
     {
+        settle();
         // One handler is installed for the life of the process, because a
         // signal sent earlier can still arrive. A second instance naming
         // another signal would send one nothing handles, and a real-time signal
@@ -529,6 +609,7 @@ int main()
 
     std::printf("without being told which bytes\n");
     {
+        settle();
         runtime_agent::StopTheWorldQuiescer quiescer;
         std::string error;
         auto lease = quiescer.acquire(runtime_agent::WriteRegion{}, error);
@@ -537,6 +618,7 @@ int main()
 
     std::printf("something installed over the parking handler\n");
     {
+        settle();
         // Last, because this leaves the signal reaching somebody else's handler
         // and the policy refusing from then on. That is the correct answer and
         // there is nothing here that could put the parking handler back.
