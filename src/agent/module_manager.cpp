@@ -274,10 +274,16 @@ namespace {
 
 // Where the build left its decision, beside the artifacts it describes.
 //
-// Baked in at compile time, so moving the executable away from its build tree
-// leaves this pointing at nothing and every activation refuses. A generic
-// version would look beside the running executable and fall back to a path the
-// caller supplies.
+// The path is compiled in, and the build directory being present is something
+// this assumes. An executable away from its build tree finds no manifest and
+// refuses every activation, which is the direction to fail in.
+//
+// Taking the path from whoever asks would defeat the point. The build id is
+// readable, so anyone who could name a path could write a manifest carrying
+// that id with coverage complete and a declared domain, and the decision would
+// become an input. What gives a manifest its meaning is that the build wrote it
+// and that it names this binary and this function, which is what the build id
+// and target checks establish.
 QString manifestPath()
 {
     return QStringLiteral("%1/coverage-manifest.json").arg(QStringLiteral(DEMO_BUILD_DIR));
