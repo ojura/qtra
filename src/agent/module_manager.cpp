@@ -2,6 +2,7 @@
 
 #include "agent/build_id.h"
 #include "agent/patch_area.h"
+#include "agent/quiescence_providers.h"
 #include "agent/patch_site.h"
 #include "cube_widget.h"
 
@@ -22,6 +23,8 @@ namespace {
 // that uses it.
 class CubeTimerQuiescer final : public runtime_agent::Quiescer {
 public:
+    [[nodiscard]] const char* name() const noexcept override { return "cube-animation-timer"; }
+
     explicit CubeTimerQuiescer(CubeWidget* cube)
         : m_cube(cube)
     {
@@ -421,6 +424,14 @@ QJsonObject ModuleManager::patchStatus() const
         {QStringLiteral("gatewaySlot"), patch.slotAddress != nullptr
             ? QJsonValue(pointerString(patch.slotAddress))
             : QJsonValue()},
+        // What made the one code write safe, and what it was judged against. A
+        // thread count above one is not proof the write was safe; it is the
+        // number the policy had to answer for.
+        {QStringLiteral("quiescedBy"), patch.quiescedBy.empty()
+            ? QJsonValue()
+            : QJsonValue(QString::fromStdString(patch.quiescedBy))},
+        {QStringLiteral("threadsAtInstall"),
+         static_cast<qint64>(patch.threadsAtInstall)},
     };
     if (LoadedModule* loaded = module(moduleId); loaded != nullptr) {
         result.insert(QStringLiteral("module"), moduleJson(*loaded));

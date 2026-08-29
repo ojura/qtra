@@ -1,5 +1,7 @@
 #include "agent/patch_manager.h"
 
+#include "agent/quiescence_providers.h"
+
 #include <cassert>
 #include <cstring>
 #include <utility>
@@ -51,6 +53,11 @@ bool PatchManager::installGateway(const PatchSite& site, Quiescer& quiescer, std
         error = "the gateway could not be encoded for this site";
         return false;
     }
+
+    // Recorded before acquiring, so a refusal reports what it was judged
+    // against as well as a success.
+    m_quiescedBy = quiescer.name();
+    m_threadsAtInstall = observedThreadCount();
 
     std::unique_ptr<QuiescenceLease> lease = quiescer.acquire(error);
     if (lease == nullptr) {
@@ -227,6 +234,8 @@ PatchStatus PatchManager::status() const
 {
     PatchStatus status;
     status.state = m_state;
+    status.quiescedBy = m_quiescedBy;
+    status.threadsAtInstall = m_threadsAtInstall;
     if (m_record != nullptr) {
         status.site = m_record->site;
         status.slotAddress = &m_record->slot;

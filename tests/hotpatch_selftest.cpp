@@ -1,5 +1,6 @@
 #include "agent/entry_hotpatch.h"
 #include "agent/patch_manager.h"
+#include "agent/quiescence_providers.h"
 #include "agent/patch_area.h"
 #include "agent/patch_site.h"
 #include "demo/cube_step_abi.h"
@@ -9,9 +10,12 @@
 #include <cerrno>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <dlfcn.h>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <atomic>
 
 #if defined(__linux__)
 #  include <sys/mman.h>
@@ -39,16 +43,6 @@ int failRestoreProtect(void* address, std::size_t length, int protection)
     return -1;
 }
 #endif
-
-// The self-test is single threaded and nothing is calling the target, so
-// stopping execution is already true and the lease has nothing to restore.
-class AlreadyQuiet final : public runtime_agent::Quiescer {
-public:
-    std::unique_ptr<runtime_agent::QuiescenceLease> acquire(std::string&) override
-    {
-        return std::make_unique<runtime_agent::QuiescenceLease>();
-    }
-};
 
 } // namespace
 
@@ -149,7 +143,7 @@ int main(int argc, char** argv)
         return 11;
     }
 
-    AlreadyQuiet quiet;
+    runtime_agent::SingleThreadQuiescer quiet;
 
     // An install that copies the gateway and cannot put the mapping back. The
     // slot already names the continuation at that point, so the original still
@@ -181,6 +175,65 @@ int main(int argc, char** argv)
         if (faulted.state() != runtime_agent::PatchState::NoGateway) {
             std::cerr << "recovery did not return the entry to its own bytes\n";
             return 16;
+        }
+    }
+
+    // With a thread nobody can account for, refusing is the answer, and the
+    // entry has to be exactly as it was afterwards. A caller acts on this by
+    // installing earlier, so the refusal is worth more than a write would be.
+    {
+        std::atomic<bool> keepRunning{true};
+        std::thread worker([&keepRunning] {
+            while (keepRunning.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        });
+
+        std::array<std::uint8_t, runtime_agent::patchAreaBytes> beforeRefusal{};
+        std::memcpy(beforeRefusal.data(), site.patchAddress, beforeRefusal.size());
+
+        if (runtime_agent::observedThreadCount() < 2) {
+            std::cerr << "the worker thread was not observed, so the refusal proves nothing\n";
+            keepRunning.store(false, std::memory_order_release);
+            worker.join();
+            return 33;
+        }
+
+        runtime_agent::SingleThreadQuiescer counted;
+        std::string countedError;
+        if (counted.acquire(countedError) != nullptr || countedError.empty()) {
+            std::cerr << "a second thread did not stop the single-thread policy\n";
+            keepRunning.store(false, std::memory_order_release);
+            worker.join();
+            return 34;
+        }
+
+        runtime_agent::PatchManager refused;
+        runtime_agent::RefusingQuiescer refusing;
+        runtime_agent::PatchBinding unused;
+        std::string refusedError;
+        if (refused.bind(site, reinterpret_cast<void*>(patch->step), 1, refusing,
+                         unused, refusedError)
+            || refusedError.empty()) {
+            std::cerr << "a refusing policy still bound a replacement\n";
+            keepRunning.store(false, std::memory_order_release);
+            worker.join();
+            return 35;
+        }
+        if (refused.state() != runtime_agent::PatchState::NoGateway) {
+            std::cerr << "a refused install left state behind\n";
+            keepRunning.store(false, std::memory_order_release);
+            worker.join();
+            return 36;
+        }
+
+        std::array<std::uint8_t, runtime_agent::patchAreaBytes> afterRefusal{};
+        std::memcpy(afterRefusal.data(), site.patchAddress, afterRefusal.size());
+        keepRunning.store(false, std::memory_order_release);
+        worker.join();
+        if (beforeRefusal != afterRefusal) {
+            std::cerr << "a refused install changed the entry\n";
+            return 37;
         }
     }
 
@@ -270,8 +323,9 @@ int main(int argc, char** argv)
     }
 
     std::cout << "PASS: " << patch->name_utf8
-              << " selected and deselected through a permanent gateway, and a failed"
-                 " install left recoverable state\n";
+              << " selected and deselected through a permanent gateway, a failed"
+                 " install left recoverable state, and a refused install with an"
+                 " unaccounted thread changed nothing\n";
     // Intentionally do not dlclose: the running app follows the same policy.
     return 0;
 #endif

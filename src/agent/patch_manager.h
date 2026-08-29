@@ -54,6 +54,12 @@ struct PatchStatus {
     void* replacement = nullptr;
     void* slotAddress = nullptr;
 
+    // What made the one code write safe, and what was observed at the time.
+    // A thread count above one is not proof the write was safe; it is what the
+    // policy was judged against.
+    std::string quiescedBy;
+    std::size_t threadsAtInstall = 0;
+
     // Whose replacement is selected. Zero when the original is running.
     std::uint64_t selectedBinding = 0;
     std::uint64_t selectedOwner = 0;
@@ -139,6 +145,8 @@ private:
 
     std::unique_ptr<GatewayRecord> m_record;
     std::vector<std::uint8_t> m_original;
+    std::string m_quiescedBy;
+    std::size_t m_threadsAtInstall = 0;
     std::vector<Generation> m_generations;
     std::uint64_t m_nextBinding = 1;
 

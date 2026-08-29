@@ -43,6 +43,12 @@ public:
     // Returns nothing and sets error when execution cannot be stopped, which is
     // a refusal to patch and not a reason to write anyway.
     [[nodiscard]] virtual std::unique_ptr<QuiescenceLease> acquire(std::string& error) = 0;
+
+    // Which policy this is, recorded with the install so a caller can tell
+    // what made the write safe. "the timer was stopped" and "there was only
+    // one thread" are different claims and a result that says neither is not
+    // worth much.
+    [[nodiscard]] virtual const char* name() const noexcept = 0;
 };
 
 } // namespace runtime_agent

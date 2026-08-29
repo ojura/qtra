@@ -88,6 +88,7 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.cpp
         src/agent/patch_manager.cpp
+        src/agent/quiescence_providers.cpp
     )
     target_include_directories(hotpatch_selftest PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
     target_link_libraries(hotpatch_selftest PRIVATE ${CMAKE_DL_LIBS})
@@ -120,6 +121,8 @@ if(BUILD_QT_APP)
         src/agent/patch_site.cpp
         src/agent/gateway_record.h
         src/agent/quiescence.h
+        src/agent/quiescence_providers.h
+        src/agent/quiescence_providers.cpp
         src/agent/patch_manager.h
         src/agent/patch_manager.cpp
         src/agent/object_registry.h
