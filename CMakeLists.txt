@@ -439,6 +439,17 @@ if(BUILD_TESTING)
     add_test(NAME module-teardown
              COMMAND module_teardown_selftest $<TARGET_FILE:teardown_module>)
 
+    # Links Qt so the redirect can be pointed at Qt's own calls, which is the
+    # case the unprepared backends exist for. No display and no window.
+    add_executable(got_reach_selftest
+        tests/got_reach_selftest.cpp
+        src/agent/got_site.cpp
+    )
+    target_include_directories(got_reach_selftest PRIVATE include src)
+    target_link_libraries(got_reach_selftest PRIVATE Qt6::Core)
+    target_compile_options(got_reach_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME got-reach COMMAND got_reach_selftest)
+
     add_executable(coverage_admission_selftest
         tests/coverage_admission_selftest.cpp
         src/agent/coverage_manifest.cpp
