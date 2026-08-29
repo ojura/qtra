@@ -186,6 +186,95 @@ int main(int argc, char** argv)
               "and its log reaches the process log, which needs no live agent");
     }
 
+    std::printf("a reply sent after the client has gone\n");
+    {
+        // runtime_agent.h line 82 says a handler may answer later than it is
+        // called. So a handler can hold what it needs to answer with across a
+        // disconnect, and the client it names can be deleted in between:
+        // removeClient calls deleteLater, and the deletion runs on a later turn
+        // of the event loop, which is exactly where a deferred reply also runs.
+        //
+        // Holding a raw socket across that is a use-after-free the API invites.
+        // Client keeps a QPointer, so the reply has something to find gone.
+        QObject replyRoot;
+        auto replying = std::make_unique<RuntimeAgent>(
+            &replyRoot, QStringLiteral("/tmp/agent-lifetime-reply-%1.sock").arg(::getpid()));
+
+        RuntimeAgent::Client held;
+        QJsonValue heldId;
+        bool handlerRan = false;
+        const bool ok = replying->registerCommand(
+            QStringLiteral("test.answerLater"), {},
+            [&](RuntimeAgent::Client client, const QJsonValue& requestId,
+                const QJsonObject&) {
+                held = client;          // kept deliberately, which is the point
+                heldId = requestId;
+                handlerRan = true;
+            });
+        check(ok, "a command that answers later is registered");
+
+        QString why;
+        check(replying->start(why), why.isEmpty() ? "it listens" : qPrintable(why));
+
+        {
+            QLocalSocket caller;
+            caller.connectToServer(replying->socketName());
+            check(caller.waitForConnected(5000), "a caller connects");
+            const QJsonObject ask{
+                {QStringLiteral("id"), 7},
+                {QStringLiteral("command"), QStringLiteral("test.answerLater")},
+                {QStringLiteral("params"), QJsonObject{}},
+            };
+            caller.write(QJsonDocument(ask).toJson(QJsonDocument::Compact) + "\n");
+            check(caller.waitForBytesWritten(5000), "and asks");
+
+            const auto ranBy = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!handlerRan && std::chrono::steady_clock::now() < ranBy) {
+                application.processEvents();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            check(handlerRan, "the handler runs and keeps what it needs to answer");
+            caller.disconnectFromServer();
+        }
+
+        // The socket is deleted here, not when disconnect was called. Draining
+        // deferred deletes is what makes this the real case rather than a
+        // simulation of it.
+        for (int turn = 0; turn < 50; ++turn) {
+            application.processEvents(QEventLoop::AllEvents, 5);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        }
+
+        // Answering now. There is nobody to answer, and the point is that this
+        // returns rather than writing into freed storage.
+        replying->sendSuccess(held, heldId, QJsonObject{{QStringLiteral("late"), true}});
+
+        // Reaching this line at all is half the result, and under a sanitizer
+        // it is the whole of it. The other half is that the agent is still
+        // itself afterwards, which a fresh caller getting a real answer shows
+        // and a bare "it did not crash" does not.
+        handlerRan = false;
+        QLocalSocket after;
+        after.connectToServer(replying->socketName());
+        check(after.waitForConnected(5000), "the agent still accepts a new caller");
+        const QJsonObject again{
+            {QStringLiteral("id"), 8},
+            {QStringLiteral("command"), QStringLiteral("test.answerLater")},
+            {QStringLiteral("params"), QJsonObject{}},
+        };
+        after.write(QJsonDocument(again).toJson(QJsonDocument::Compact) + "\n");
+        check(after.waitForBytesWritten(5000), "and takes a request from it");
+        const auto answeredBy = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!handlerRan && std::chrono::steady_clock::now() < answeredBy) {
+            application.processEvents();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        check(handlerRan, "and dispatches it, so the late reply left it intact");
+        after.disconnectFromServer();
+
+        replying.reset();
+    }
+
     std::printf("something already at the socket path\n");
     {
         // Starting used to clear whatever was in the way. A socket path is
