@@ -144,6 +144,23 @@ bool PatchManager::installGateway(const PatchSite& site,
     // names the continuation, so the original function is what runs, but the
     // bytes are not what they were and the caller is being told the install
     // failed. Keeping the lease is what stops execution reaching it.
+    // The entry holds a gateway and the mapping could not be put back. Keeping
+    // the lease is what stops execution reaching it, and that is only available
+    // from a policy whose lease costs the rest of the process nothing. One that
+    // parked every thread cannot be held across a return into ordinary code:
+    // the next allocation or log line can wait on a lock a parked thread holds.
+    if (!quiescer.leaseMaySurviveTheWrite()) {
+        error += "; the entry is rewritten and this policy's lease cannot be held while "
+                 "anything else runs, so execution is being let go with the entry in that "
+                 "state. It runs the original through the gateway, and rollback is still "
+                 "required";
+        m_record = std::move(record);
+        m_recovery = std::make_unique<Recovery>(std::move(original), nullptr, admission,
+                                                m_write);
+        m_state = PatchState::RecoveryRequired;
+        return false;
+    }
+
     m_record = std::move(record);
     m_recovery = std::make_unique<Recovery>(std::move(original), std::move(lease), admission,
                                             m_write);

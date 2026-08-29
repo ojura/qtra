@@ -53,18 +53,26 @@ struct GotSite {
     // What was in the slot when it was read, kept so a release can put exactly
     // that back.
     //
-    // Not promised to be the function. An object the loader bound lazily has a
-    // stub here that resolves the symbol on first call and then replaces
-    // itself, so this can be that stub. Calling it does reach the function on
-    // the form seen here, but that is a property of one procedure linkage table
-    // layout and not something this establishes, so a replacement wanting to
-    // chain to the original should not assume it.
+    // The function, because a slot still holding a resolver stub is refused.
+    // See the note on resolveGotSlot for why that is a refusal and not a
+    // caveat.
     void* resolved = nullptr;
 
     [[nodiscard]] bool valid() const noexcept { return slot != nullptr; }
 };
 
 // Finds the slot a named symbol is called through, from a named object.
+//
+// A slot the loader has not finished with is refused. Until the symbol is
+// bound, the slot holds a stub that resolves it on first call and then writes
+// the answer into the slot, which makes the loader a second writer to the same
+// word. A replacement stored there is correct until some thread takes that
+// path, and is then quietly overwritten by the resolver with the real function.
+// The store being atomic keeps the word from tearing and does nothing about
+// this: the value stops being what anybody chose.
+//
+// A caller wanting to redirect such an object has to get it bound first, which
+// is what RTLD_NOW does at load time.
 //
 // callerObject has to be a suffix of the loader's own name for the object, so
 // "libQt6Core.so.6" matches "/lib/x86_64-linux-gnu/libQt6Core.so.6" and

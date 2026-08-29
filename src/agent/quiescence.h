@@ -83,6 +83,21 @@ public:
     // one thread" are different claims and a result that says neither is not
     // worth much.
     [[nodiscard]] virtual const char* name() const noexcept = 0;
+
+    // Whether the lease may be held after the write it was taken for.
+    //
+    // An install that changed bytes and could not finish keeps its lease, so
+    // nothing reaches an entry that is half of two things. That works for a
+    // policy whose lease costs the rest of the process nothing.
+    //
+    // It does not work for one that stopped threads where they stood. Those
+    // threads are holding whatever they held: the allocator's lock, the
+    // loader's, a Qt lock. Returning through ordinary code while they are
+    // parked means formatting an error, answering a request or writing a log
+    // can wait on a lock only a parked thread can release. The write has to be
+    // finished or undone before returning, and a policy that says false here
+    // is saying so.
+    [[nodiscard]] virtual bool leaseMaySurviveTheWrite() const noexcept { return true; }
 };
 
 } // namespace runtime_agent

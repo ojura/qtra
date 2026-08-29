@@ -27,8 +27,18 @@
 //
 //   The instruction pointer says where a thread is, not where it has been. A
 //   thread standing outside the range with a return address inside it is a
-//   thread this cannot see. That is the same limitation the coverage question
-//   answers separately, by establishing which calls a replacement reaches.
+//   thread this cannot see. Nothing here answers that: coverage is about which
+//   calls a replacement reaches and says nothing about where a thread is
+//   standing. What answers it is refusing to move bytes that hand control
+//   anywhere, which is what the prologue planner does.
+//
+//   A thread already running its application's own signal handler is recorded
+//   at that handler, and the address it will return to is in a frame this does
+//   not read. If that address is inside the range, the thread resumes into
+//   bytes that changed while it was elsewhere. So this assumes no thread is
+//   suspended in a handler over the range being written, and cannot check it.
+//   Reading nested signal frames, or an update the resuming thread is
+//   redirected by, is what would close it.
 //
 // The handler runs on threads doing arbitrary work, so it touches nothing but
 // atomics and makes no library call that could allocate or lock.
@@ -65,6 +75,10 @@ public:
                                                            std::string& error) override;
 
     [[nodiscard]] const char* name() const noexcept override { return "stop-the-world"; }
+
+    // No. Every other thread is parked exactly where it was, holding whatever
+    // it held, so nothing may run ordinary code until they are let go.
+    [[nodiscard]] bool leaseMaySurviveTheWrite() const noexcept override { return false; }
 
     // Where every other thread was standing, from the last acquire, whether it
     // succeeded or not. Empty when nothing was stopped.

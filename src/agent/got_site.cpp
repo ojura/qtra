@@ -115,6 +115,7 @@ bool namesSymbol(const char* relocationSymbol, const std::string& wanted)
 }
 
 struct Search {
+    bool unresolved = false;
     std::string protectionError;
     const std::string* object = nullptr;
     const std::string* symbol = nullptr;
@@ -166,6 +167,26 @@ int visit(dl_phdr_info* object, std::size_t, void* opaque)
         if (!pageProtectionOf(slot, search.found->pageProtection, search.protectionError)) {
             search.found->slot = nullptr;
             return 1;
+        }
+
+        // A slot still pointing inside the object that owns it holds that
+        // object's own resolver stub, so the loader has not finished with it
+        // and will write the real answer there on first call.
+        const auto value = reinterpret_cast<ElfW(Addr)>(search.found->resolved);
+        ElfW(Addr) lowest = ~ElfW(Addr){0};
+        ElfW(Addr) highest = 0;
+        for (int i = 0; i < object->dlpi_phnum; ++i) {
+            if (object->dlpi_phdr[i].p_type != PT_LOAD) {
+                continue;
+            }
+            const ElfW(Addr) from = object->dlpi_addr + object->dlpi_phdr[i].p_vaddr;
+            lowest = from < lowest ? from : lowest;
+            const ElfW(Addr) to = from + object->dlpi_phdr[i].p_memsz;
+            highest = to > highest ? to : highest;
+        }
+        if (value >= lowest && value < highest) {
+            search.unresolved = true;
+            search.found->slot = nullptr;
         }
         return 1;
     }
@@ -274,6 +295,13 @@ bool resolveGotSlot(const std::string& callerObject,
     if (!search.sawObject) {
         error = "no loaded object named '" + callerObject
             + "'; the name is matched by suffix, so a versioned file name works";
+        return false;
+    }
+    if (search.unresolved) {
+        error = "'" + symbol + "' is not bound yet in that object, so its slot holds the "
+                "loader's own stub. Storing a replacement there works until some thread "
+                "takes that path, and the resolver then writes the real function over it. "
+                "Load the object with its symbols bound before redirecting it";
         return false;
     }
     if (!search.protectionError.empty()) {

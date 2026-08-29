@@ -294,7 +294,6 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     released.store(false, std::memory_order_release);
 
     auto lease = std::make_unique<ParkedLease>();
-    lease->m_expected = others;
 
     const int pid = ::getpid();
     // The whole structure, because that is what the system call takes. si_code
@@ -305,6 +304,10 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     carried.si_pid = pid;
     carried.si_uid = static_cast<uid_t>(::getuid());
     carried.si_value.sival_int = static_cast<int>(mine);
+    // Counted as they go out, because the lease waits for exactly the threads
+    // that were sent one. Abandoning while it still expects a thread that was
+    // never signalled waits for a departure that cannot happen.
+    unsigned sent = 0;
     for (std::size_t i = 0; i < beforeCount; ++i) {
         if (before[i] == self) {
             continue;
@@ -313,11 +316,20 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         // this stop from one left over.
         if (::syscall(SYS_rt_tgsigqueueinfo, pid, before[i], m_signal, &carried) != 0) {
             if (errno == ESRCH) {
+                // Gone between reading the list and signalling it. The list is
+                // read again below, which is where that is answered.
                 continue;
             }
-            return giveUp("could not signal a thread");
+            lease->m_expected = sent;
+            lease.reset();
+            error = "a thread could not be signalled, so not every one of them could be "
+                    "asked where it stands";
+            return nullptr;
         }
+        ++sent;
     }
+    lease->m_expected = sent;
+    others = sent;
 
     const auto until = std::chrono::steady_clock::now() + m_deadline;
     while (arrivals.load(std::memory_order_acquire) < others) {
