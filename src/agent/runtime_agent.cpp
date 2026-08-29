@@ -23,6 +23,8 @@
 #include <cerrno>
 #include <cmath>
 #include <cstring>
+#include <algorithm>
+
 #include <dlfcn.h>
 #include <exception>
 #include <sys/uio.h>
@@ -382,42 +384,42 @@ void RuntimeAgent::handleLine(QLocalSocket* socket, const QByteArray& line)
 const std::vector<RuntimeAgent::CommandEntry>& RuntimeAgent::commands()
 {
     static const std::vector<CommandEntry> table{
-        {"hello", &RuntimeAgent::handleHello},
-        {"help", &RuntimeAgent::handleHelp},
-        {"cube.state", &RuntimeAgent::handleCubeState},
-        {"cube.pause", &RuntimeAgent::handleCubePause},
-        {"cube.resume", &RuntimeAgent::handleCubeResume},
-        {"cube.reset", &RuntimeAgent::handleCubeReset},
-        {"cube.speed", &RuntimeAgent::handleCubeSpeed},
-        {"cube.wireframe", &RuntimeAgent::handleCubeWireframe},
-        {"cube.capture", &RuntimeAgent::handleCubeCapture},
-        {"object.tree", &RuntimeAgent::handleObjectTree},
-        {"object.list", &RuntimeAgent::handleObjectList},
-        {"object.describe", &RuntimeAgent::handleObjectDescribe},
-        {"object.get", &RuntimeAgent::handleObjectGet},
-        {"object.set", &RuntimeAgent::handleObjectSet},
-        {"object.invoke", &RuntimeAgent::handleObjectInvoke},
-        {"action.trigger", &RuntimeAgent::handleActionTrigger},
-        {"widget.click", &RuntimeAgent::handleWidgetClick},
-        {"event.subscribe", &RuntimeAgent::handleEventSubscribe},
-        {"event.history", &RuntimeAgent::handleEventHistory},
-        {"module.list", &RuntimeAgent::handleModuleList},
-        {"snippet.load", &RuntimeAgent::handleSnippetLoad},
-        {"snippet.run", &RuntimeAgent::handleSnippetRun},
-        {"snippet.release", &RuntimeAgent::handleSnippetRelease},
-        {"stash.list", &RuntimeAgent::handleStashList},
-        {"stash.get", &RuntimeAgent::handleStashGet},
-        {"stash.drop", &RuntimeAgent::handleStashDrop},
-        {"patch.load", &RuntimeAgent::handlePatchLoad},
-        {"patch.activate", &RuntimeAgent::handlePatchActivate},
-        {"patch.rollback", &RuntimeAgent::handlePatchRollback},
-        {"patch.status", &RuntimeAgent::handlePatchStatus},
-        {"symbol.resolve", &RuntimeAgent::handleSymbolResolve},
-        {"unsafe.status", &RuntimeAgent::handleUnsafeStatus},
-        {"unsafe.memory.read", &RuntimeAgent::handleUnsafeMemoryRead},
-        {"unsafe.memory.write", &RuntimeAgent::handleUnsafeMemoryWrite},
-        {"unsafe.crash", &RuntimeAgent::handleUnsafeCrash},
-        {"process.quit", &RuntimeAgent::handleProcessQuit},
+        {"hello", &RuntimeAgent::handleHello, {}},
+        {"help", &RuntimeAgent::handleHelp, {}},
+        {"cube.state", &RuntimeAgent::handleCubeState, {}},
+        {"cube.pause", &RuntimeAgent::handleCubePause, {}},
+        {"cube.resume", &RuntimeAgent::handleCubeResume, {}},
+        {"cube.reset", &RuntimeAgent::handleCubeReset, {}},
+        {"cube.speed", &RuntimeAgent::handleCubeSpeed, {"degreesPerSecond"}},
+        {"cube.wireframe", &RuntimeAgent::handleCubeWireframe, {"enabled"}},
+        {"cube.capture", &RuntimeAgent::handleCubeCapture, {"path"}},
+        {"object.tree", &RuntimeAgent::handleObjectTree, {"objectName", "id", "maxDepth"}},
+        {"object.list", &RuntimeAgent::handleObjectList, {}},
+        {"object.describe", &RuntimeAgent::handleObjectDescribe, {"objectName", "id", "includeValues"}},
+        {"object.get", &RuntimeAgent::handleObjectGet, {"objectName", "id", "property"}},
+        {"object.set", &RuntimeAgent::handleObjectSet, {"objectName", "id", "property", "value"}},
+        {"object.invoke", &RuntimeAgent::handleObjectInvoke, {"objectName", "id", "method"}},
+        {"action.trigger", &RuntimeAgent::handleActionTrigger, {"objectName", "id"}},
+        {"widget.click", &RuntimeAgent::handleWidgetClick, {"objectName", "id"}},
+        {"event.subscribe", &RuntimeAgent::handleEventSubscribe, {"all", "prefixes"}},
+        {"event.history", &RuntimeAgent::handleEventHistory, {"afterSequence", "limit", "prefixes"}},
+        {"module.list", &RuntimeAgent::handleModuleList, {}},
+        {"snippet.load", &RuntimeAgent::handleSnippetLoad, {"path"}},
+        {"snippet.run", &RuntimeAgent::handleSnippetRun, {"moduleId", "executor", "objectName", "id", "target", "request"}},
+        {"snippet.release", &RuntimeAgent::handleSnippetRelease, {"moduleId", "executor", "objectName", "id", "target", "request"}},
+        {"stash.list", &RuntimeAgent::handleStashList, {}},
+        {"stash.get", &RuntimeAgent::handleStashGet, {"key"}},
+        {"stash.drop", &RuntimeAgent::handleStashDrop, {"key"}},
+        {"patch.load", &RuntimeAgent::handlePatchLoad, {"path"}},
+        {"patch.activate", &RuntimeAgent::handlePatchActivate, {"moduleId", "acceptIncompleteCoverage"}},
+        {"patch.rollback", &RuntimeAgent::handlePatchRollback, {}},
+        {"patch.status", &RuntimeAgent::handlePatchStatus, {}},
+        {"symbol.resolve", &RuntimeAgent::handleSymbolResolve, {"name"}},
+        {"unsafe.status", &RuntimeAgent::handleUnsafeStatus, {}},
+        {"unsafe.memory.read", &RuntimeAgent::handleUnsafeMemoryRead, {"address", "size"}},
+        {"unsafe.memory.write", &RuntimeAgent::handleUnsafeMemoryWrite, {"address", "base64"}},
+        {"unsafe.crash", &RuntimeAgent::handleUnsafeCrash, {}},
+        {"process.quit", &RuntimeAgent::handleProcessQuit, {}},
     };
     return table;
 }
@@ -428,10 +430,32 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
                                    const QJsonObject& parameters)
 {
     for (const CommandEntry& entry : commands()) {
-        if (command == QLatin1String(entry.name)) {
-            (this->*entry.handler)(socket, requestId, parameters);
-            return;
+        if (command != QLatin1String(entry.name)) {
+            continue;
         }
+        // A parameter nobody reads makes a request that succeeds and does
+        // nothing, and the caller cannot tell the difference from one that
+        // worked. Refusing turns that into a failure the first time it is
+        // sent.
+        for (auto it = parameters.begin(); it != parameters.end(); ++it) {
+            const bool known = std::any_of(
+                entry.parameters.begin(), entry.parameters.end(),
+                [&it](const char* accepted) { return it.key() == QLatin1String(accepted); });
+            if (!known) {
+                QStringList accepted;
+                for (const char* name : entry.parameters) {
+                    accepted.append(QString::fromLatin1(name));
+                }
+                sendError(socket, requestId, QStringLiteral("unknown_parameter"),
+                          QStringLiteral("%1 does not read %2; it reads %3")
+                              .arg(command, it.key(),
+                                   accepted.isEmpty() ? QStringLiteral("nothing")
+                                                      : accepted.join(QStringLiteral(", "))));
+                return;
+            }
+        }
+        (this->*entry.handler)(socket, requestId, parameters);
+        return;
     }
     sendError(socket, requestId, QStringLiteral("unknown_command"), command);
 }

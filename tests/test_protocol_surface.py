@@ -20,7 +20,9 @@ from pathlib import Path
 
 AGENT_SOURCE = Path(__file__).resolve().parents[1] / "src" / "agent" / "runtime_agent.cpp"
 
-TABLE_ENTRY = re.compile(r'\{"([a-z][a-zA-Z.]*)", &RuntimeAgent::(handle[A-Za-z]+)\}')
+TABLE_ENTRY = re.compile(
+    r'\{"([a-z][a-zA-Z.]*)", &RuntimeAgent::(handle[A-Za-z]+), \{([^}]*)\}\}'
+)
 COMMAND_COMPARISON = re.compile(r'command == QStringLiteral\("([a-z][a-zA-Z.]*)"\)')
 
 
@@ -31,7 +33,7 @@ class ProtocolSurfaceTests(unittest.TestCase):
     def test_the_table_is_populated(self) -> None:
         entries = TABLE_ENTRY.findall(self.source)
         self.assertGreater(len(entries), 30, "the table pattern has rotted or the table shrank")
-        names = [name for name, _ in entries]
+        names = [name for name, _handler, _parameters in entries]
         self.assertEqual(sorted(names), sorted(set(names)), "a command is in the table twice")
 
     def test_nothing_dispatches_on_a_command_name_outside_the_table(self) -> None:
@@ -53,7 +55,7 @@ class ProtocolSurfaceTests(unittest.TestCase):
         )
 
     def test_every_handler_named_in_the_table_is_defined(self) -> None:
-        for name, handler in TABLE_ENTRY.findall(self.source):
+        for name, handler, _parameters in TABLE_ENTRY.findall(self.source):
             with self.subTest(command=name):
                 self.assertIn(f"void RuntimeAgent::{handler}(", self.source)
 

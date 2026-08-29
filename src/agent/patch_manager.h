@@ -57,10 +57,9 @@ struct PatchStatus {
     void* replacement = nullptr;
     void* slotAddress = nullptr;
 
-    // What made the one code write safe, and what was observed at the time.
-    // A thread count above one is not proof the write was safe; it is what the
-    // policy was judged against.
-    std::string quiescedBy;
+    // What the write that installed the gateway was admitted under, from the
+    // moment it happened. Absent before anything is written.
+    std::optional<LiveTextWriteAdmission> installedUnder;
     // Absent when the count could not be read, which is a different thing from
     // a process with no threads.
     std::optional<std::size_t> threadsAtInstall;
@@ -176,6 +175,12 @@ private:
     PatchState m_state = PatchState::NoGateway;
     std::shared_ptr<TextWriter> m_write;
 
+    // What the gateway was written under, whatever became of that write. The
+    // record keeps its own required copy, because recovery must not depend on
+    // anything outside itself; both are copies of one value made at one
+    // instant, so neither can drift from the other.
+    std::optional<LiveTextWriteAdmission> m_installedUnder;
+
     // What an install that changed bytes and could not finish left behind, and
     // everything needed to finish it.
     //
@@ -203,7 +208,6 @@ private:
     };
 
     std::unique_ptr<GatewayRecord> m_record;
-    std::string m_quiescedBy;
     std::optional<std::size_t> m_threadsAtInstall;
     std::vector<Generation> m_generations;
     std::uint64_t m_nextBinding = 1;

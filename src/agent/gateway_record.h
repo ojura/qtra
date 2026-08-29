@@ -41,9 +41,6 @@ struct GatewayRecord {
 
     PatchSite site;
 
-    // What the slot currently names, kept for reporting. The slot itself is the
-    // truth; this is the manager's record of what it published.
-    void* selected = nullptr;
 
     // The gateway loads this storage as one pointer word, so its representation
     // has to be exactly that. Both hold on GNU/x86-64 and neither is guaranteed

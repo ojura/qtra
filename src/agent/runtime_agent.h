@@ -114,6 +114,17 @@ private:
     struct CommandEntry {
         const char* name;
         void (RuntimeAgent::*handler)(QLocalSocket*, const QJsonValue&, const QJsonObject&);
+
+        // Every parameter this command reads. A request naming anything else is
+        // refused, because a parameter the host drops is a request that
+        // succeeded and did nothing, and the caller has no way to tell.
+        //
+        // That is not hypothetical: both tools kept sending a mode parameter
+        // for months after the thing it selected was removed, and every call
+        // succeeded, so nothing ever said the option had stopped meaning
+        // anything. Object selectors are why the empty list means no
+        // parameters at all and not "anything goes".
+        std::vector<const char*> parameters;
     };
     [[nodiscard]] static const std::vector<CommandEntry>& commands();
 

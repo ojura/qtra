@@ -646,9 +646,11 @@ QJsonObject ModuleManager::patchStatus() const
         // What made the one code write safe, and what it was judged against. A
         // thread count above one is not proof the write was safe; it is the
         // number the policy had to answer for.
-        {QStringLiteral("quiescedBy"), patch.quiescedBy.empty()
-            ? QJsonValue()
-            : QJsonValue(QString::fromStdString(patch.quiescedBy))},
+        // From the admission the gateway was written under, which is where
+        // this fact now lives. Absent until something has been written.
+        {QStringLiteral("quiescedBy"), patch.installedUnder.has_value()
+            ? QJsonValue(QString::fromStdString(patch.installedUnder->provider()))
+            : QJsonValue()},
         {QStringLiteral("threadsAtInstall"), patch.threadsAtInstall.has_value()
             ? QJsonValue(static_cast<qint64>(*patch.threadsAtInstall))
             : QJsonValue()},

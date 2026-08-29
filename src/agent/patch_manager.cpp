@@ -95,7 +95,6 @@ bool PatchManager::installGateway(const PatchSite& site,
     // it already finds the original. An install that changes bytes and then
     // fails still runs the original function.
     record->slot.store(record->continuation, std::memory_order_release);
-    record->selected = record->continuation;
 
     const std::vector<std::uint8_t> gateway = encodeGateway(&record->slot, site.availableBytes);
     if (gateway.empty()) {
@@ -105,7 +104,6 @@ bool PatchManager::installGateway(const PatchSite& site,
 
     // Recorded before acquiring, so a refusal reports what it was judged
     // against as well as a success.
-    m_quiescedBy = quiescer.name();
     m_threadsAtInstall = observedThreadCount();
 
     std::unique_ptr<QuiescenceLease> lease = quiescer.acquire(error);
@@ -124,6 +122,10 @@ bool PatchManager::installGateway(const PatchSite& site,
 
     const TextWriteResult write =
         m_write->write(site.patchAddress, gateway.data(), gateway.size());
+    // From here the bytes have changed, whatever the outcome, so what admitted
+    // that write is what describes the entry from now on.
+    m_installedUnder = admission;
+
     if (write.complete()) {
         m_record = std::move(record);
         m_state = PatchState::GatewayOriginal;
@@ -166,7 +168,6 @@ void PatchManager::publishSelection() noexcept
     const Generation* live = newestLive();
     void* target = live != nullptr ? live->replacement : m_record->continuation;
     m_record->slot.store(target, std::memory_order_release);
-    m_record->selected = target;
     m_state = live != nullptr ? PatchState::GatewayReplacement : PatchState::GatewayOriginal;
 }
 
@@ -276,7 +277,7 @@ PatchStatus PatchManager::status() const
 {
     PatchStatus status;
     status.state = m_state;
-    status.quiescedBy = m_quiescedBy;
+    status.installedUnder = m_installedUnder;
     status.threadsAtInstall = m_threadsAtInstall;
     if (m_recovery != nullptr) {
         status.recoveryAdmission = m_recovery->admission;
