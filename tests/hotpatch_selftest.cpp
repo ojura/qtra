@@ -173,7 +173,7 @@ int main(int argc, char** argv)
         }
 
         faulted.setProtectFunction(nullptr);
-        if (!faulted.rollback(quiet, faultError)) {
+        if (!faulted.rollback(faultError)) {
             std::cerr << "recovery failed: " << faultError << '\n';
             return 15;
         }
@@ -208,7 +208,7 @@ int main(int argc, char** argv)
 
     // The gateway stays. Rolling back is a store naming the continuation, and
     // the original runs again through an entry that is still rewritten.
-    if (!patches.rollback(quiet, error)) {
+    if (!patches.rollback(error)) {
         std::cerr << "rollback failed: " << error << '\n';
         return 21;
     }
@@ -233,7 +233,7 @@ int main(int argc, char** argv)
         std::cerr << "reselecting did not reach the replacement\n";
         return 25;
     }
-    if (!patches.rollback(quiet, error)) {
+    if (!patches.rollback(error)) {
         std::cerr << "final rollback failed: " << error << '\n';
         return 26;
     }

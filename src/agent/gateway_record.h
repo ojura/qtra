@@ -43,8 +43,15 @@ struct GatewayRecord {
     // truth; this is the manager's record of what it published.
     void* selected = nullptr;
 
+    // The gateway loads this storage as one pointer word, so its representation
+    // has to be exactly that. Both hold on GNU/x86-64 and neither is guaranteed
+    // by the standard, which is why they are stated here.
     static_assert(std::atomic<void*>::is_always_lock_free,
                   "the gateway loads this word directly, so it cannot carry a lock");
+    static_assert(sizeof(std::atomic<void*>) == sizeof(void*),
+                  "the gateway reads one pointer, so the atomic cannot be wider than one");
+    static_assert(alignof(std::atomic<void*>) >= sizeof(void*),
+                  "an unaligned slot has no atomic store");
 };
 
 } // namespace runtime_agent

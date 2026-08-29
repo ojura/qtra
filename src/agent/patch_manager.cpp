@@ -117,7 +117,9 @@ bool PatchManager::activate(const PatchSite& site,
             return false;
         }
     } else if (m_record->site.patchAddress != site.patchAddress) {
-        error = "a gateway is installed at a different entry, and this manager holds one site";
+        error = "this manager owns one site and already has a gateway at a different "
+                "entry; patching a second function needs a manager per site until sites "
+                "are held in a map";
         return false;
     }
 
@@ -130,7 +132,7 @@ bool PatchManager::activate(const PatchSite& site,
     return true;
 }
 
-bool PatchManager::rollback(Quiescer& quiescer, std::string& error)
+bool PatchManager::rollback(std::string& error)
 {
     error.clear();
 
@@ -165,7 +167,6 @@ bool PatchManager::rollback(Quiescer& quiescer, std::string& error)
     }
 
     // A store, like selecting one. The gateway stays where it is.
-    (void)quiescer;
     m_record->slot.store(m_record->continuation, std::memory_order_release);
     m_record->selected = m_record->continuation;
     m_state = PatchState::GatewayOriginal;

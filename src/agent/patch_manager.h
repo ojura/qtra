@@ -64,7 +64,11 @@ public:
 
     // Points the slot back at the continuation, so the entry runs the original
     // function again. The gateway stays installed.
-    [[nodiscard]] bool rollback(Quiescer& quiescer, std::string& error);
+    //
+    // Takes no quiescer. Selecting is a store, and the one path that writes
+    // code, recovering from an install that never finished, already holds the
+    // lease that stopped execution.
+    [[nodiscard]] bool rollback(std::string& error);
 
     [[nodiscard]] PatchStatus status() const;
     [[nodiscard]] PatchState state() const noexcept { return m_state; }

@@ -395,9 +395,8 @@ ModuleManager::LoadedModule* ModuleManager::insertModule(std::unique_ptr<LoadedM
 bool ModuleManager::resetActivePatch(QString& error)
 {
     if (m_patches.replacementSelected()) {
-        CubeTimerQuiescer quiescer(m_cube);
         std::string nativeError;
-        if (!m_patches.rollback(quiescer, nativeError)) {
+        if (!m_patches.rollback(nativeError)) {
             error = QString::fromStdString(nativeError);
             return false;
         }
