@@ -1,7 +1,11 @@
 #pragma once
 
-// Why writing into a live function's entry was allowed, recorded with the write
-// that used it.
+// What admitted a write into a live function's entry, kept with the write that
+// used it.
+//
+// Admission and not authorization, because the difference is the whole point:
+// this says a write was admitted, in the past, on stated grounds. It does not
+// say anything may be written now.
 //
 // This is what was true at the moment of the write, kept so that whoever
 // finishes an install that could not finish can say what the write was made
@@ -22,7 +26,7 @@ namespace runtime_agent {
 
 // What made the write safe. These are separate claims and a record that said
 // only "authorized" would not be worth keeping.
-enum class WriteAuthorizationBasis {
+enum class WriteAdmissionBasis {
     // Nothing that could reach the target was running: the process was patched
     // before its threads started, or the only thread that reaches it is the one
     // doing the writing and it is between requests.
@@ -33,13 +37,13 @@ enum class WriteAuthorizationBasis {
     RequestBoundary,
 };
 
-[[nodiscard]] const char* describe(WriteAuthorizationBasis basis) noexcept;
+[[nodiscard]] const char* describe(WriteAdmissionBasis basis) noexcept;
 
 // An aggregate so a test can state one directly. What makes a real one mean
 // anything is where it is built: the layer that evaluated the evidence makes
 // it, and only after that evidence allowed the write.
-struct LiveTextWriteAuthorization {
-    WriteAuthorizationBasis basis = WriteAuthorizationBasis::AlreadyQuiescent;
+struct LiveTextWriteAdmission {
+    WriteAdmissionBasis basis = WriteAdmissionBasis::AlreadyQuiescent;
 
     // The quiescence policy that was used, by name.
     std::string provider;

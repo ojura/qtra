@@ -67,6 +67,34 @@ private:
 };
 #endif
 
+// The two operations composed, which is what a caller wanting "make this run"
+// does. Stated here so every use below reads the same and the admission is
+// written down once.
+//
+// AlreadyQuiescent is the truth here: this runs before anything else in the
+// process can reach the target, and no manifest is involved at all. A
+// manifest-shaped admission would be a claim the self-test has no evidence for.
+bool installAndBind(runtime_agent::PatchManager& manager,
+                    const runtime_agent::PatchSite& site,
+                    void* replacement,
+                    const std::uint64_t owner,
+                    runtime_agent::Quiescer& quiescer,
+                    runtime_agent::PatchBinding& binding,
+                    std::string& error)
+{
+    if (manager.state() == runtime_agent::PatchState::NoGateway) {
+        runtime_agent::LiveTextWriteAdmission admission;
+        admission.basis = runtime_agent::WriteAdmissionBasis::AlreadyQuiescent;
+        admission.provider = quiescer.name();
+        admission.target = site.name;
+        admission.detail = "the self-test writes before anything can reach the target";
+        if (!manager.installGateway(site, admission, quiescer, error)) {
+            return false;
+        }
+    }
+    return manager.bind(replacement, owner, binding, error);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -176,7 +204,7 @@ int main(int argc, char** argv)
         runtime_agent::PatchManager& faulted = registry.forEntry(site.entry);
         runtime_agent::PatchBinding binding;
         std::string faultError;
-        if (faulted.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, binding, faultError)) {
+        if (installAndBind(faulted, site, reinterpret_cast<void*>(patch->step), 1, quiet, binding, faultError)) {
             std::cerr << "activate reported success although the mapping was never restored\n";
             return 12;
         }
@@ -203,6 +231,20 @@ int main(int argc, char** argv)
         if (successor.state() != runtime_agent::PatchState::RecoveryRequired) {
             std::cerr << "the registry did not keep what the failed write left\n";
             return 16;
+        }
+        // The record carries what admitted the write that made it, so a
+        // successor can say what the entry was rewritten under without asking
+        // anything that may have changed since.
+        const runtime_agent::PatchStatus recovering = successor.status();
+        if (!recovering.recoveryAdmission.has_value()) {
+            std::cerr << "recovery state exists with nothing saying what admitted the write\n";
+            return 22;
+        }
+        if (recovering.recoveryAdmission->basis
+                != runtime_agent::WriteAdmissionBasis::AlreadyQuiescent
+            || recovering.recoveryAdmission->provider != std::string(quiet.name())) {
+            std::cerr << "the admission kept with the write is not the one it was made under\n";
+            return 23;
         }
         if (successor.status().slotAddress != faulted.status().slotAddress) {
             std::cerr << "the gateway slot moved between two asks for one entry\n";
@@ -269,7 +311,7 @@ int main(int argc, char** argv)
         runtime_agent::RefusingQuiescer refusing;
         runtime_agent::PatchBinding unused;
         std::string refusedError;
-        if (refused.bind(site, reinterpret_cast<void*>(patch->step), 1, refusing,
+        if (installAndBind(refused, site, reinterpret_cast<void*>(patch->step), 1, refusing,
                          unused, refusedError)
             || refusedError.empty()) {
             std::cerr << "a refusing policy still bound a replacement\n";
@@ -316,7 +358,7 @@ int main(int argc, char** argv)
     runtime_agent::PatchManager patches;
     runtime_agent::PatchBinding first;
     std::string error;
-    if (!patches.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, first, error)) {
+    if (!installAndBind(patches, site, reinterpret_cast<void*>(patch->step), 1, quiet, first, error)) {
         std::cerr << "activate failed: " << error << '\n';
         return 17;
     }
@@ -355,7 +397,7 @@ int main(int argc, char** argv)
 
     // Selecting again writes no code at all.
     runtime_agent::PatchBinding second;
-    if (!patches.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, second, error)) {
+    if (!installAndBind(patches, site, reinterpret_cast<void*>(patch->step), 1, quiet, second, error)) {
         std::cerr << "rebinding failed: " << error << '\n';
         return 24;
     }
@@ -371,7 +413,7 @@ int main(int argc, char** argv)
     // A binding released out of order leaves the slot alone, because it is not
     // the one selected.
     runtime_agent::PatchBinding third;
-    if (!patches.bind(site, reinterpret_cast<void*>(patch->step), 2, quiet, third, error)) {
+    if (!installAndBind(patches, site, reinterpret_cast<void*>(patch->step), 2, quiet, third, error)) {
         std::cerr << "third bind failed: " << error << '\n';
         return 26;
     }

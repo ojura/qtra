@@ -8,6 +8,7 @@
 #include "agent/gateway_record.h"
 #include "agent/patch_site.h"
 #include "agent/quiescence.h"
+#include "agent/write_admission.h"
 
 #include <cstdint>
 #include <memory>
@@ -64,6 +65,10 @@ struct PatchStatus {
     // a process with no threads.
     std::optional<std::size_t> threadsAtInstall;
 
+    // What admitted the write that left this entry needing recovery, when it
+    // does. Absent otherwise, because there is no write to attribute.
+    std::optional<LiveTextWriteAdmission> recoveryAdmission;
+
     // Whose replacement is selected. Zero when the original is running.
     std::uint64_t selectedBinding = 0;
     std::uint64_t selectedOwner = 0;
@@ -99,19 +104,33 @@ public:
     // from released storage.
     ~PatchManager();
 
+    // Writes the gateway into the entry. The one operation here that changes
+    // bytes, so it is the only one that takes what admitted a write and the
+    // only one that needs execution stopped.
+    //
+    // Valid only with no gateway. A replacement is not required: installing
+    // early, before anything wants to replace the function, is a write and
+    // nothing else, and there is no coverage question to ask yet.
+    //
+    // Failing after the bytes changed leaves a recovery record holding the
+    // saved bytes, the lease, this admission and the writer, which is what
+    // makes finishing possible without whoever asked still being here.
+    [[nodiscard]] bool installGateway(const PatchSite& site,
+                                      const LiveTextWriteAdmission& admission,
+                                      Quiescer& quiescer,
+                                      std::string& error);
+
     // Selects which code the entry reaches, and records who asked.
     //
-    // The first call installs the gateway, which is one code write with
-    // execution stopped. Every later call is a store to the slot: atomic, and
-    // needing no quiescence, because a thread reading the slot gets one address
-    // or the other.
+    // Requires a gateway, and writes no bytes: one aligned store into the slot,
+    // where every call reads the old destination or the new one. So it takes no
+    // admission and no quiescer. A caller reading this line knows no text is at
+    // stake, which is what separating it from installation is for.
     //
     // owner identifies the module the binding belongs to, so a release can be
     // checked against it and so nothing can unbind somebody else's work.
-    [[nodiscard]] bool bind(const PatchSite& site,
-                            void* replacement,
+    [[nodiscard]] bool bind(void* replacement,
                             std::uint64_t owner,
-                            Quiescer& quiescer,
                             PatchBinding& binding,
                             std::string& error);
 
@@ -150,10 +169,6 @@ private:
         bool released = false;
     };
 
-    [[nodiscard]] bool installGateway(const PatchSite& site,
-                                      Quiescer& quiescer,
-                                      std::string& error);
-
     // The newest binding still live, or nothing when they have all gone.
     [[nodiscard]] const Generation* newestLive() const noexcept;
     void publishSelection() noexcept;
@@ -161,14 +176,38 @@ private:
     PatchState m_state = PatchState::NoGateway;
     std::shared_ptr<TextWriter> m_write;
 
+    // What an install that changed bytes and could not finish left behind, and
+    // everything needed to finish it.
+    //
+    // Built whole or not at all, so there is no way to hold recovery state
+    // without the admission the write was made under, and no way to hold it
+    // without something to write with. The manager is in RecoveryRequired
+    // exactly when this exists, so the state and its evidence cannot disagree.
+    struct Recovery {
+        Recovery(std::vector<std::uint8_t> bytes,
+                 std::unique_ptr<QuiescenceLease> held,
+                 LiveTextWriteAdmission admitted,
+                 std::shared_ptr<TextWriter> writer)
+            : original(std::move(bytes))
+            , lease(std::move(held))
+            , admission(std::move(admitted))
+            , write(std::move(writer))
+        {
+        }
+
+        std::vector<std::uint8_t> original;
+        std::unique_ptr<QuiescenceLease> lease;
+        LiveTextWriteAdmission admission;
+        std::shared_ptr<TextWriter> write;
+    };
+
     std::unique_ptr<GatewayRecord> m_record;
-    std::vector<std::uint8_t> m_original;
     std::string m_quiescedBy;
     std::optional<std::size_t> m_threadsAtInstall;
     std::vector<Generation> m_generations;
     std::uint64_t m_nextBinding = 1;
 
-    std::unique_ptr<QuiescenceLease> m_recoveryLease;
+    std::unique_ptr<Recovery> m_recovery;
 };
 
 } // namespace runtime_agent

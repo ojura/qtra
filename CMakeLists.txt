@@ -114,6 +114,8 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/agent/patch_site.cpp
         src/agent/patch_manager.cpp
         src/agent/patch_registry.cpp
+    src/agent/write_admission.cpp
+        src/agent/write_admission.cpp
         src/agent/quiescence_providers.cpp
     )
     target_include_directories(hotpatch_selftest PRIVATE include src ${CMAKE_BINARY_DIR}/generated)

@@ -114,6 +114,9 @@ private:
     // protocol and the host binding call answer to the same rules.
     [[nodiscard]] bool admits(bool acceptIncompleteCoverage, QString& error);
     [[nodiscard]] runtime_agent::CoverageDecision readDecision() const;
+    [[nodiscard]] bool installIfNeeded(const runtime_agent::PatchSite& site,
+                                       runtime_agent::Quiescer& quiescer,
+                                       std::string& error);
 
 public:
     [[nodiscard]] bool rollback(QString& error);

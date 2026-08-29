@@ -44,6 +44,9 @@ PatchManager::~PatchManager()
     // instruction stream cannot occur here, because the copy does not half-fail.
     assert(m_state != PatchState::RecoveryRequired
            && "recover before destroying a manager that is holding recovery state");
+    // Nothing here reclaims what the record holds, and nothing needs to: the
+    // registry owns managers for the life of the process, so this runs only in
+    // a test or at exit.
 
     // The gateway is permanent and carries this record's slot address as an
     // immediate, so the storage has to outlive whatever installed it. Freeing it
@@ -54,8 +57,26 @@ PatchManager::~PatchManager()
     (void)m_record.release();
 }
 
-bool PatchManager::installGateway(const PatchSite& site, Quiescer& quiescer, std::string& error)
+bool PatchManager::installGateway(const PatchSite& site,
+                                  const LiveTextWriteAdmission& admission,
+                                  Quiescer& quiescer,
+                                  std::string& error)
 {
+    error.clear();
+    if (!site.valid()) {
+        error = "a resolved site is required to install a gateway";
+        return false;
+    }
+    if (m_state == PatchState::RecoveryRequired) {
+        error = "an earlier install left the entry rewritten and execution stopped; recover "
+                "before writing anything else";
+        return false;
+    }
+    if (m_state != PatchState::NoGateway) {
+        error = "this entry already has a gateway; selecting what it reaches is a store and "
+                "needs no further write";
+        return false;
+    }
     if (!siteAcceptsGateway(site, error)) {
         return false;
     }
@@ -99,7 +120,6 @@ bool PatchManager::installGateway(const PatchSite& site, Quiescer& quiescer, std
         m_write->write(site.patchAddress, gateway.data(), gateway.size());
     if (write.complete()) {
         m_record = std::move(record);
-        m_original = std::move(original);
         m_state = PatchState::GatewayOriginal;
         return true;
     }
@@ -114,9 +134,9 @@ bool PatchManager::installGateway(const PatchSite& site, Quiescer& quiescer, std
     // bytes are not what they were and the caller is being told the install
     // failed. Keeping the lease is what stops execution reaching it.
     m_record = std::move(record);
-    m_original = std::move(original);
+    m_recovery = std::make_unique<Recovery>(std::move(original), std::move(lease), admission,
+                                            m_write);
     m_state = PatchState::RecoveryRequired;
-    m_recoveryLease = std::move(lease);
     error += "; the gateway was already written, so the entry is not as it was and "
              "rollback is still required";
     return false;
@@ -149,17 +169,15 @@ void* PatchManager::continuation() const noexcept
     return m_record != nullptr ? m_record->continuation : nullptr;
 }
 
-bool PatchManager::bind(const PatchSite& site,
-                        void* replacement,
+bool PatchManager::bind(void* replacement,
                         const std::uint64_t owner,
-                        Quiescer& quiescer,
                         PatchBinding& binding,
                         std::string& error)
 {
     error.clear();
     binding = PatchBinding{};
-    if (!site.valid() || replacement == nullptr) {
-        error = "a resolved site and a replacement are both required";
+    if (replacement == nullptr) {
+        error = "a replacement is required";
         return false;
     }
     if (m_state == PatchState::RecoveryRequired) {
@@ -167,18 +185,15 @@ bool PatchManager::bind(const PatchSite& site,
                 "before binding anything else";
         return false;
     }
-    if (!replacementIsReachable(site, replacement, error)) {
+    if (m_state == PatchState::NoGateway) {
+        error = "this entry has no gateway, so there is nothing to select through; install "
+                "one first";
         return false;
     }
 
-    if (m_state == PatchState::NoGateway) {
-        if (!installGateway(site, quiescer, error)) {
-            return false;
-        }
-    } else if (m_record->site.patchAddress != site.patchAddress) {
-        error = "this manager owns one site and already has a gateway at a different "
-                "entry; patching a second function needs a manager per site until sites "
-                "are held in a map";
+    // Against the site the gateway was installed at, which is the one the jump
+    // will actually be taken from.
+    if (!replacementIsReachable(m_record->site, replacement, error)) {
         return false;
     }
 
@@ -227,10 +242,12 @@ bool PatchManager::recover(std::string& error)
         return false;
     }
 
-    // The one path that writes code outside installation. The lease that
-    // stopped execution when the install failed is still held.
-    const TextWriteResult write =
-        m_write->write(m_record->site.patchAddress, m_original.data(), m_original.size());
+    // The one path that writes code outside installation, and it writes with
+    // the writer the failed install used, held by the record. The lease that
+    // install acquired is in there too and is still held.
+    const TextWriteResult write = m_recovery->write->write(m_record->site.patchAddress,
+                                                           m_recovery->original.data(),
+                                                           m_recovery->original.size());
     if (!write.changedBytes()) {
         error = write.error;
         return false;
@@ -238,9 +255,8 @@ bool PatchManager::recover(std::string& error)
 
     m_state = PatchState::NoGateway;
     m_record.reset();
-    m_original.clear();
     m_generations.clear();
-    m_recoveryLease.reset();
+    m_recovery.reset();
     if (!write.complete()) {
         error = write.error;
         error += "; the entry was restored, so execution may reach it again, and the "
@@ -256,6 +272,9 @@ PatchStatus PatchManager::status() const
     status.state = m_state;
     status.quiescedBy = m_quiescedBy;
     status.threadsAtInstall = m_threadsAtInstall;
+    if (m_recovery != nullptr) {
+        status.recoveryAdmission = m_recovery->admission;
+    }
     if (m_record != nullptr) {
         status.site = m_record->site;
         status.slotAddress = &m_record->slot;

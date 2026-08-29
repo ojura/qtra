@@ -147,6 +147,31 @@ std::uint64_t nextModuleId()
 
 } // namespace
 
+namespace {
+
+// What the write was admitted under, in the terms the record keeps.
+//
+// Built here because this is where the evidence was read and judged. The patch
+// layer is handed the conclusion and never looks inside it.
+runtime_agent::LiveTextWriteAdmission admissionFor(
+    const runtime_agent::Quiescer& quiescer,
+    const runtime_agent::CoverageDecision& decision)
+{
+    runtime_agent::LiveTextWriteAdmission admission;
+    admission.basis = runtime_agent::WriteAdmissionBasis::RequestBoundary;
+    admission.provider = quiescer.name();
+    admission.target = decision.target.toStdString();
+    admission.buildId = decision.manifestBuildId.toStdString();
+    admission.detail = QStringLiteral("caller execution domain %1")
+                           .arg(decision.domainStrength.isEmpty()
+                                    ? QStringLiteral("absent")
+                                    : decision.domainStrength)
+                           .toStdString();
+    return admission;
+}
+
+} // namespace
+
 ModuleManager::ModuleManager(CubeWidget* cube)
     : m_cube(cube)
     , m_patches(runtime_agent::PatchRegistry::instance().forEntry(
@@ -313,6 +338,21 @@ QString manifestPath()
 
 } // namespace
 
+bool ModuleManager::installIfNeeded(const runtime_agent::PatchSite& site,
+                                    runtime_agent::Quiescer& quiescer,
+                                    std::string& error)
+{
+    if (m_patches.state() != runtime_agent::PatchState::NoGateway) {
+        return true;
+    }
+    // admits() has already run and stored what allowed this, which is what the
+    // record keeps. Selecting a replacement afterwards writes no bytes and asks
+    // nothing further.
+    return m_patches.installGateway(
+        site, admissionFor(quiescer, m_admitted.value_or(runtime_agent::CoverageDecision{})),
+        quiescer, error);
+}
+
 runtime_agent::CoverageDecision ModuleManager::readDecision() const
 {
     return runtime_agent::readCoverageManifest(
@@ -405,10 +445,18 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
 
     SameThreadRequestBoundary quiescer(m_cube);
     runtime_agent::PatchBinding binding;
-    if (!m_patches.bind(site,
-                        reinterpret_cast<void*>(loaded->cubePatch->step),
+    if (!installIfNeeded(site, quiescer, nativeError)) {
+        error = QString::fromStdString(nativeError);
+        if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
+            m_activeEntryModule = id;
+            m_cube->setActivePatchLabel(
+                QStringLiteral("entry (recovery required): %1").arg(loaded->name));
+            m_cube->update();
+        }
+        return false;
+    }
+    if (!m_patches.bind(reinterpret_cast<void*>(loaded->cubePatch->step),
                         id,
-                        quiescer,
                         binding,
                         nativeError)) {
         error = QString::fromStdString(nativeError);
@@ -497,7 +545,11 @@ int ModuleManager::bindReplacement(void* target,
     }
 
     SameThreadRequestBoundary quiescer(m_cube);
-    if (!m_patches.bind(site, replacement, owner, quiescer, binding, nativeError)) {
+    if (!installIfNeeded(site, quiescer, nativeError)) {
+        error = QString::fromStdString(nativeError);
+        return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;
+    }
+    if (!m_patches.bind(replacement, owner, binding, nativeError)) {
         error = QString::fromStdString(nativeError);
         return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;
     }
@@ -609,20 +661,14 @@ bool ModuleManager::resetActivePatch(QString& error)
         // refused with the entry left mid-install and nothing able to finish
         // it. The bytes being restored are this process's own, so the decision
         // taken when they were written is the one that governs restoring them.
-        // Only the write question. Recovery puts the target's own bytes back,
-        // so there is no replacement whose reach anyone could ask about.
+        // Nothing is asked of the manifest here. What admitted the write is
+        // kept with the write, in the record the failed install left, and a
+        // record cannot exist without one. Asking again would be asking a
+        // question about now that the answer describes about then, and on a
+        // file that may have been replaced since.
         //
-        // m_admitted holds what authorized the install, which is the only way
-        // into this state. Reading the file is what is left if it is somehow
-        // absent, and that read is not kept: a manifest missing or unreadable
-        // at this instant would otherwise become the answer for the rest of the
-        // process, and a retry after putting it back would find the stored
-        // refusal and never look again.
-        const runtime_agent::CoverageDecision decision =
-            m_admitted.has_value() ? *m_admitted : readDecision();
-        if (!runtime_agent::authorizesLiveTextWrite(decision, error)) {
-            return false;
-        }
+        // What makes recovery safe is the lease that install is still holding
+        // and the check above, which is a fact about this instant.
         std::string nativeError;
         if (!m_patches.recover(nativeError)) {
             error = QString::fromStdString(nativeError);
