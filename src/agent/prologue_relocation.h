@@ -185,6 +185,18 @@ struct RelocatedPrologue {
 
 // Moves the prologue and points the entry at the replacement.
 //
+// The jump written at the entry is relative, so it reaches two gigabytes. That
+// covers a replacement compiled into the same image and does not cover the case
+// this exists for: a replacement in a module loaded at run time, which the
+// loader places wherever it likes and which is routinely terabytes away. Such a
+// request is refused, and the refusal is about the distance and not about the
+// function.
+//
+// Closing it needs a relay near the entry, holding a slot the far address is
+// loaded from, which is the shape the prepared backend already uses: one write
+// to install, and a store to choose afterwards. Until that exists this backend
+// serves a replacement in the same image.
+//
 // The quiescer is asked to stop execution for the one write, because several
 // bytes change and a thread standing inside them would execute the join of what
 // was there and what is arriving. The range being written is the range that

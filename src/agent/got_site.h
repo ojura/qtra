@@ -122,8 +122,8 @@ struct GotSite {
 // replacement with the wrong signature is a crash the caller has asked for.
 [[nodiscard]] bool redirectGotSlot(const GotSite& site, void* replacement, std::string& error);
 
-// Puts back exactly the value the slot held when it was resolved, which for a
-// lazily bound object is the stub that was there and not the function.
+// Puts back exactly the value the slot held when it was resolved, which is the
+// function: a slot still holding a stub is refused at resolve time.
 [[nodiscard]] bool restoreGotSlot(const GotSite& site, std::string& error);
 
 } // namespace runtime_agent
