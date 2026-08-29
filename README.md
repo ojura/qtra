@@ -1,56 +1,205 @@
 # Qt Runtime Agent / Hotpatch Cube
 
-A deliberately sharp-edged Linux/GCC/Qt 6 prototype for giving an external agent
-semantic and native control over a running optimized C++ application.
+A Linux/GCC/Qt 6 prototype for giving an external agent semantic and native
+control over a running optimized C++ application. The demo is a `QMainWindow`
+with a rotating OpenGL cube; an in-process agent listens on a user-only Unix
+socket and lets you inspect the object tree, drive widgets, load compiled C++
+into the process, and replace a function in the running binary.
 
-The demo application is a `QMainWindow` containing a continuously rotating
-OpenGL cube. Its menus expose ordinary Qt actions and a simulated asynchronous
-point-cloud job. An in-process agent listens on a user-only Unix-domain socket
-and provides:
+This is not a production debugger or a security boundary. Its operating
+principle is: **correct native code can do almost anything; incorrect native
+code may corrupt or crash the process.**
 
-- QObject/widget/action discovery through Qt's meta-object system;
-- property reads and writes, zero-argument method invocation, semantic clicks,
-  screenshots, and event subscriptions;
-- a bounded event replay buffer for reconnecting clients;
-- execution of separately compiled project-native C++ snippets on the GUI
-  event loop, a selected QObject's event loop, or inside `paintGL()` while the
-  OpenGL context is current;
-- OpenGL vendor/renderer/version state and asynchronous debug-message events;
-- a stable C host ABI for snippets plus an intentionally unsafe route to real
-  C++ objects, private fields, process symbols, and process memory;
-- replacing a function in the running process by rewriting its entry, with a
-  gateway installed once and every later choice made by an atomic store;
-- a build-time decision about whether replacing a function reaches every call,
-  which activation reads and refuses to act against;
-- a build-oracle tool that derives a snippet compiler command from the owning
-  translation unit in `compile_commands.json`.
+## Quick start
 
-This is not a production debugger or a security boundary. It is an experiment
-whose operating principle is: **correct native code can do almost anything;
-incorrect native code may corrupt or crash the process.**
+Two terminals and about five minutes. On Debian or Ubuntu, install the
+dependencies first:
+
+```bash
+sudo ./scripts/install_deps_debian.sh
+```
+
+Build the optimized application and every module:
+
+```bash
+export CMAKE_PREFIX_PATH=/path/to/Qt/6.9.3/gcc_64   # only if cmake cannot find Qt
+./scripts/build.sh release
+```
+
+In the first terminal, start the demo. A window appears with a rotating cube:
+
+```bash
+./build/release/qt_runtime_cube
+```
+
+In the second, talk to it. `hello` reports the process, the Qt version, the
+build id, and what the target function's entry currently holds:
+
+```bash
+python3 tools/agentctl.py call hello
+python3 tools/agentctl.py call cube.state
+```
+
+Now replace the function that drives the cube's motion, in the running process,
+and put it back:
+
+```bash
+python3 tools/agentctl.py patch build/release/cube_patch_wobble.so
+python3 tools/agentctl.py call patch.status
+python3 tools/agentctl.py call patch.rollback
+```
+
+Between the first command and the last the cube pulses in size, cycles through
+colours, and turns at about half its usual rate, which is what
+`patches/wobble_patch.cpp` computes. Stop the application with Ctrl-C in the
+first terminal when you are done.
+
+What those three commands did:
+
+- `patch` loaded a shared object and pointed the entry of `cube_step_builtin` at
+  the replacement it carries. `entryState` went from `pristine` to
+  `replacement`.
+- `patch.status` reported `quiescedBy` as `same-thread-request-boundary`, which
+  is the claim that made writing into live code safe, and `threadsAtInstall`,
+  which is how many threads that claim had to answer for.
+- `patch.rollback` pointed the entry back at the original. `entryState` is now
+  `original` and not `pristine`, because the gateway the first command installed
+  stays for the life of the process.
+
+## The two mechanisms
+
+Everything here is one of two things. They compose, and one module can use both.
+
+**A snippet** is an ordinary shared object loaded into the running process and
+run on a chosen event loop. It sees the application's real C++ types, because it
+is compiled against the same headers with the same flags, and it is free to
+connect signals, install event filters, add menu entries, or draw into the
+current OpenGL context. Its life is compile, `snippet.load`, `snippet.run`, and
+optionally `snippet.release`. Nothing is ever unloaded, because a snippet may
+have left a callback whose machine code lives in the module.
+
+**A function replacement** changes what an existing call reaches, with no
+cooperation from the application. The first replacement writes a gateway into
+the target's reserved entry space; every later choice is one aligned store into
+that gateway's slot. Its life is `patch.load`, `patch.activate`, and
+`patch.rollback`. The gateway is never removed, because a thread can be between
+the slot load and the jump at any instant.
+
+Two things guard the second mechanism, and both are worth knowing before you
+read further.
+
+The build decides whether replacing a function reaches every call, and writes
+that down. Inlined copies, specialised clones and bodies folded together with an
+identical one keep running the original code, and the entry never sees them.
+None of that survives into an optimized binary, so `tools/analyze_coverage.py`
+works it out at build time and the runtime refuses to act against what it
+recorded.
+
+The write itself needs a claim about which threads can reach the target.
+Changing several bytes of code another thread may be executing is worse than
+declining to, so a policy that cannot account for every thread refuses.
+
+## Choosing a workflow
+
+| you want to | use | where |
+|---|---|---|
+| read or change a property, click something, trigger an action | `agentctl.py call` | [Basic control](#basic-control) |
+| watch what the process is doing | `agentctl.py events` and `history` | [Basic control](#basic-control) |
+| take a screenshot of the cube | `cube.capture` | [Basic control](#basic-control) |
+| run your own C++ inside the process | a snippet | [Runtime-native snippets](#runtime-native-snippets) |
+| change what the cube looks like | one of the prebuilt scene snippets | [Ready-made scene modifications](#ready-made-scene-modifications) |
+| compile a source file and run it in one step | `tools/jit_snippet.py` | [Project-aware on-demand compilation](#project-aware-on-demand-compilation) |
+| get an edited snippet live without restarting | `agentctl.py reload` | [Editing a loaded snippet without restarting](#editing-a-loaded-snippet-without-restarting) |
+| change what an existing function does | a patch module | [Replacing a function](#replacing-a-function) |
+| do that from inside a snippet | `patch_bind` on the host ABI | [What a snippet does](#what-a-snippet-does) |
+| read or write arbitrary process memory | `--unsafe-agent` | [Unsafe memory and symbols](#unsafe-memory-and-symbols) |
+
+## Assumptions and limits
+
+What the tooling takes for granted:
+
+- Linux on x86-64, GCC, and Qt 6.4 or later. The entry patcher is written for
+  that combination and nothing else.
+- The target function was built with a reserved entry area. The build supplies
+  `-fpatchable-function-entry=20,0`, `-fno-lto` and `-fno-ipa-icf` for
+  `src/cube_step.cpp`, and the source itself carries no attributes. Preparing a
+  function you own is a build change, so the tooling asks nothing of the
+  application's logic.
+- The build directory is still there. The coverage manifest is read from a path
+  compiled into the binary, and an executable moved away from its build tree
+  finds no manifest and refuses every activation.
+- A module reads application types at offsets fixed when it was compiled, so it
+  carries the build id of the executable it was compiled against and is refused
+  against a different one.
+
+What it does not do:
+
+- Relocate arbitrary prologues. It patches prepared all-NOP entries only.
+- Make installing the gateway atomic. That write covers the whole reserved area.
+  Choosing a replacement afterwards is one aligned pointer store and is atomic.
+  A general multi-threaded target needs every thread accounted for before that
+  one write, which is why a policy that cannot do so refuses.
+- Drain calls in flight. A selection store affects the next call that loads the
+  slot, and a call already running continues in the code it entered.
+- Unload anything. Only successful loads are retained, and a failed load is
+  closed.
+- Reflect non-QObject domain state. The semantic registry covers the main-window
+  QObject tree and explicitly registered objects; anything else needs a
+  generated or hand-written adapter.
+- Invoke methods with arguments. `object.invoke` handles zero-argument methods.
+- Reach worker-thread-affine objects from the socket handler. QObject property
+  operations run on the GUI thread, so use a queued native snippet targeting
+  that object.
+- Recover an optimized-away variable. The agent can read DWARF and assembly
+  where possible, or hot-install a rebuilt probe that materializes the value on
+  the next execution.
+- Say whether a module is correct. A matching build id says the offsets it holds
+  describe the types this process has. What it does through them is its own
+  business.
+
+## Cleanup and troubleshooting
+
+The application leaves nothing behind but its socket, which it removes on a
+clean exit. A process killed with `SIGKILL` leaves a stale
+`/tmp/qt-runtime-cube-<uid>.sock`; delete it and start again.
+
+| symptom | cause |
+|---|---|
+| `patch.activate` refused with "no coverage manifest" | the build did not record whether replacing the function reaches every call. Use a preset with `PATCH_READY` on, which the three GUI presets are. |
+| `patch.activate` refused naming two build ids | the manifest beside the binary describes a different build. Rebuild, or run the binary its manifest describes. |
+| a module refused naming two build ids | the module was compiled against a different build of the application. Rebuild the module. |
+| `snippet.run` succeeded and nothing changed | the value you wrote is recomputed every tick by its owner. See [Writing through the seam that owns the value](#writing-through-the-seam-that-owns-the-value). |
+| a rebuilt snippet runs its old code | `dlopen()` keys objects by pathname and returned the resident handle. Use `agentctl.py reload`. |
+| queued `render` work never runs | the window is hidden and the compositor has stopped sending frame callbacks. A 100 ms watchdog drains the queue through `grabFramebuffer()`, so this resolves itself. |
+| `unknown_parameter` | the command does not read that parameter, and the error names what it does read. |
 
 ## Validation
 
-`./scripts/validate.sh` builds three Release configurations and runs the
-hotpatch tests against each: ordinary `-O3`, `-O3` with GCC LTO, and `-O3` with
-Intel CET/IBT (`-fcf-protection=full`). Every run
-calls the optimized built-in function, installs an x86-64 entry redirect,
-checks the replacement behavior, rolls the original bytes back, and checks the
-original behavior again. The CET configuration also checks that `ENDBR64`
-survives, that the jump lands in the NOP area after it, and that a replacement
-entry point without `ENDBR64` is rejected.
+```bash
+./scripts/validate.sh
+```
 
-For each configuration the build oracle then derives a fresh `-O3`
-shared-object command from that build's `compile_commands.json`, compiles
+Three Release configurations, four tests each: ordinary `-O3`, `-O3` with GCC
+LTO, and `-O3` with Intel CET/IBT. Each configuration runs the two raw hotpatch
+tests against its own binary, the admission-order checks, and the Python tests,
+which cover compilation-command transformation, retained-event replay, quiet
+event streams, socket protocol behavior, and activation over the socket. For
+each configuration the build oracle then derives a fresh `-O3` shared-object
+command from that build's `compile_commands.json`, compiles
 `patches/wobble_patch.cpp` with it, and puts the result through the same
 redirect and rollback.
 
-The Python tests run under `ctest` and cover compilation-command
-transformation, retained-event replay, quiet event streams, and socket protocol
-behavior.
+Every run calls the optimized built-in function, installs an x86-64 entry
+redirect, checks the replacement behavior, rolls the original bytes back, and
+checks the original behavior again. The CET configuration also checks that
+`ENDBR64` survives, that the jump lands in the NOP area after it, and that a
+replacement entry point without `ENDBR64` is rejected.
 
-`./scripts/validate.sh --with-gui` adds the Xvfb/current-display smoke session,
-which drives the running application.
+`./scripts/validate.sh --with-gui` adds a smoke session that drives the running
+application.
+
+[`docs/validation.md`](docs/validation.md) has the individual commands, the
+expected test names, and how to inspect a prepared entry by hand.
 
 ## Architecture
 
@@ -119,26 +268,14 @@ configures and builds either way. Install it to get the beat visualizer:
 apt-get install -y --no-install-recommends libpulse-dev
 ```
 
-## Build
+## More builds
 
-Optimized application and all modules:
-
-```bash
-./scripts/build.sh release
-```
-
-Equivalent commands:
+`./scripts/build.sh release` is these three commands:
 
 ```bash
 cmake --preset release
 cmake --build --preset release --parallel
-```
-
-Each build runs its tests. The presets do not name a Qt, so where cmake cannot
-already find one, say where it is:
-
-```bash
-export CMAKE_PREFIX_PATH=/path/to/Qt/6.9.3/gcc_64
+ctest --preset release
 ```
 
 Two more builds exist for the codegen the patcher has to survive. The LTO one,
@@ -155,27 +292,13 @@ has to leave alone:
 ./scripts/build.sh release-cet
 ```
 
-Run all three plus the build-oracle redirect tests:
-
-```bash
-./scripts/validate.sh
-```
-
-`./scripts/validate.sh --with-gui` also executes the Xvfb/current-display smoke
-session against the built application.
-
 The build exports `compile_commands.json`, which is the build oracle's source of
 compiler, include, macro, language, target, and ABI context.
 
-## Run
+## Run options
 
-Use an existing display:
-
-```bash
-./build/release/qt_runtime_cube
-```
-
-Or let the wrapper create an Xvfb display and force Mesa software rendering:
+Without a display of your own, let the wrapper create an Xvfb one and force
+Mesa software rendering:
 
 ```bash
 ./scripts/run_xvfb.sh
@@ -705,8 +828,9 @@ module, `snippet.load` says so in its result, and the agent logs a warning.
 
 The identity is the note the linker already writes, so the application carries
 no code for this. CMake reads it after the executable links, writes it into a
-generated header, and force-includes that header into every module target, which
-is why no snippet source mentions it. `tools/compile_snippet.py` stamps the same
+generated header, and force-includes that header into every snippet target,
+which is why no snippet source mentions it. The two `cube_patch_*` targets do
+not get it, so they load as unstamped modules and `module.list` says so. `tools/compile_snippet.py` stamps the same
 value by reading the executable beside the compile database, so `jit_snippet.py`
 and `jit_patch.py` produce stamped modules too. Pass `--no-build-id` for one
 that is deliberately unstamped.
@@ -1067,29 +1191,6 @@ loads the private-state, persistent-observer, and render-context snippets,
 replays retained completion events, captures a PNG framebuffer, and requests a
 clean process exit. Logs, screenshot, and transcript are kept when requested or
 when a failure occurs.
-
-## Important limits
-
-- The entry patcher is Linux/x86-64 only and supports prepared all-NOP entries;
-  it does not relocate arbitrary prologues.
-- Installing the gateway writes the whole reserved area and is not atomic.
-  Choosing a replacement afterwards is one aligned pointer store and is. A
-  general multi-threaded target needs every thread accounted for before that
-  one write, which is why a policy that cannot do so refuses.
-- Only successful DSO loads are retained; a failed load is closed.
-- The semantic registry covers the main-window QObject tree and explicitly
-  registered objects; non-QObject domain state needs generated/manual adapters.
-- `object.invoke` currently handles only zero-argument methods.
-- QObject property operations are executed by the GUI-thread socket handler.
-  Worker-thread-affine objects should be accessed through a queued native
-  snippet targeting that object.
-- An optimized-away source variable may have no recoverable runtime value. The
-  agent can use DWARF and assembly where possible, or hot-install a rebuilt probe
-  that explicitly materializes the value on the next execution.
-- A matching build id says a module was compiled against the running build. It
-  says nothing about whether the module is correct: the offsets it holds
-  describe the types this process has, and what it does through them is its own
-  business.
 
 ## Repository map
 
