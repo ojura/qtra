@@ -218,6 +218,12 @@ if(BUILD_QT_APP)
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/analyze_coverage.py
                         --binary $<TARGET_FILE:qt_runtime_cube>
                         --build-dir ${CMAKE_BINARY_DIR}
+                        --caller-domain "the GUI thread only: the sole caller is\
+ CubeWidget::advanceAnimation, connected to a QTimer owned by the widget, and the\
+ agent's own request handler runs on that same thread"
+                        --caller-domain-caveat "a nested event loop. QMessageBox::about\
+ in the Help menu runs one, so during a modal dialog the GUI thread is inside a second\
+ loop and a request boundary is no longer a moment when the target is provably idle"
                         --output ${RUNTIME_AGENT_COVERAGE_MANIFEST}
                 DEPENDS qt_runtime_cube ${CMAKE_SOURCE_DIR}/tools/analyze_coverage.py
                 COMMENT "Deciding whether replacing the target can be complete"

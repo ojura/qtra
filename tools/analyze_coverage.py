@@ -22,11 +22,18 @@ Evidence, and what each piece rules out:
                            body, which is what makes DWARF unnecessary here
   build id                 that all of the above describes the binary in front
                            of you
+  caller execution domain  which threads the callers run on, which none of the
+                           above answers
 
 Coverage is complete only when every modality that could hide a copy has been
 answered. A target prepared as an opaque non-LTO translation unit needs no
 inline evidence from DWARF: callers in other units could only see the
 declaration, so there is nothing for them to have inlined.
+
+Knowing every call site is not knowing when they run. A complete call graph
+says who calls a function and never on which thread, so the execution domain of
+the callers is recorded as its own field and is declared by whoever embeds the
+agent rather than derived here. Nothing in an ELF file answers it.
 """
 
 from __future__ import annotations
@@ -163,7 +170,9 @@ def analyze(binary: pathlib.Path,
             build_dir: pathlib.Path,
             compile_db: pathlib.Path,
             target: str,
-            source_hint: str) -> dict[str, object]:
+            source_hint: str,
+            caller_domain: str | None,
+            domain_caveat: str | None) -> dict[str, object]:
     prepared = preparation(compile_db, source_hint)
     found_aliases = aliases_at(binary, target)
     clones, dump_count = clone_records(build_dir, target)
@@ -194,6 +203,18 @@ def analyze(binary: pathlib.Path,
                    else "required: callers could see this body and may hold copies",
     })
 
+    # Declared, never derived. A build system can see every call site and still
+    # know nothing about which thread reaches them, so this is recorded as
+    # somebody's claim with their caveat attached, and it is deliberately not
+    # folded into the coverage verdict: it answers whether the target can be
+    # written safely at a given moment, which is a different question from
+    # whether replacing it reaches everything.
+    domain = {
+        "declared": caller_domain,
+        "provenance": "declared by the embedding, not derived from the binary",
+        "caveat": domain_caveat,
+    }
+
     unknown = [e["modality"] for e in evidence if not e["answered"]]
     skipped = [{"what": c["into"], "why": c["kind"]} for c in clones]
 
@@ -214,6 +235,7 @@ def analyze(binary: pathlib.Path,
         "skipped": skipped,
         "unknown": unknown,
         "evidence": evidence,
+        "callerExecutionDomain": domain,
         "aliases": found_aliases,
         "clones": clones,
         "preparation": prepared,
@@ -227,11 +249,17 @@ def main() -> int:
     parser.add_argument("--compile-db", type=pathlib.Path)
     parser.add_argument("--target", default="cube_step_builtin")
     parser.add_argument("--source-hint", default="cube_step.cpp")
+    parser.add_argument("--caller-domain",
+                        help="which threads the callers of this target run on, if the "
+                             "embedding knows. Recorded as a claim, never derived")
+    parser.add_argument("--caller-domain-caveat",
+                        help="what would make the declaration untrue")
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
 
     compile_db = args.compile_db or (args.build_dir / "compile_commands.json")
-    report = analyze(args.binary, args.build_dir, compile_db, args.target, args.source_hint)
+    report = analyze(args.binary, args.build_dir, compile_db, args.target,
+                     args.source_hint, args.caller_domain, args.caller_domain_caveat)
     if report["buildId"] is None:
         print("the binary carries no build id, so a manifest could not be tied to it",
               file=sys.stderr)
