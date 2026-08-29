@@ -127,6 +127,15 @@ if(BUILD_HOTPATCH_SELFTEST)
         -Wall -Wextra -Wpedantic
         $<$<CONFIG:Release>:-O3>
     )
+    add_executable(thread_accounting_selftest
+        tests/thread_accounting_selftest.cpp
+        src/agent/stop_the_world.cpp
+    )
+    target_include_directories(thread_accounting_selftest PRIVATE include src)
+    target_link_libraries(thread_accounting_selftest PRIVATE pthread)
+    target_compile_options(thread_accounting_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME thread-accounting COMMAND thread_accounting_selftest)
+
     add_test(NAME raw-entry-hotpatch-wobble
              COMMAND hotpatch_selftest $<TARGET_FILE:cube_patch_wobble>)
     add_test(NAME raw-entry-hotpatch-reverse
