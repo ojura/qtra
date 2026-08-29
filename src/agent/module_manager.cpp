@@ -416,13 +416,6 @@ int ModuleManager::bindReplacement(void* target,
         return -3;
     }
 
-    // The same admission the protocol answers to. Without this a module reaches
-    // a write that a request over the socket would have refused, and the build's
-    // decision only binds whoever happened to ask the other way.
-    if (!admits(acceptIncompleteCoverage, error)) {
-        return -1;
-    }
-
     if (target != reinterpret_cast<void*>(&cube_step_builtin)) {
         error = QStringLiteral(
             "this runtime resolves one target so far, cube_step_builtin at %1. The host "
@@ -430,6 +423,13 @@ int ModuleManager::bindReplacement(void* target,
             "function's prepared area and to stop whatever might be running it")
             .arg(QStringLiteral("0x%1").arg(
                 reinterpret_cast<quintptr>(&cube_step_builtin), 0, 16));
+        return -1;
+    }
+
+    // The same admission the protocol answers to. Without this a module reaches
+    // a write that a request over the socket would have refused, and the build's
+    // decision only binds whoever happened to ask the other way.
+    if (!admits(acceptIncompleteCoverage, error)) {
         return -1;
     }
 
