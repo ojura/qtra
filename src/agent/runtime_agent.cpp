@@ -272,10 +272,29 @@ RuntimeAgent::~RuntimeAgent()
     }
     m_clients.clear();
 
-    const bool ownedEndpoint = m_server.isListening();
+    const std::optional<BoundSocketIdentity> boundSocket = m_boundSocket;
+    m_boundSocket.reset();
     m_server.close();
-    if (ownedEndpoint) {
-        QLocalServer::removeServer(m_socketName);
+
+    // The pathname may have been unlinked and reused while this server was
+    // alive. Remove it only when it still names the socket this instance bound.
+    if (boundSocket.has_value()) {
+        const QByteArray encodedPath = QFile::encodeName(boundSocket->path);
+        struct stat current {};
+        if (::lstat(encodedPath.constData(), &current) == 0) {
+            const bool sameSocket = S_ISSOCK(current.st_mode)
+                && static_cast<std::uint64_t>(current.st_dev) == boundSocket->device
+                && static_cast<std::uint64_t>(current.st_ino) == boundSocket->inode;
+            if (sameSocket && !QLocalServer::removeServer(boundSocket->path)) {
+                qWarning().noquote()
+                    << "runtime-agent: could not remove its socket during shutdown:"
+                    << boundSocket->path;
+            }
+        } else if (errno != ENOENT) {
+            qWarning().noquote()
+                << "runtime-agent: could not inspect its socket during shutdown:"
+                << failedCall("lstat(runtime-agent socket)", errno);
+        }
     }
 }
 
@@ -328,6 +347,27 @@ bool RuntimeAgent::start(QString& error)
         error = m_server.errorString();
         return false;
     }
+
+    const QString boundPath = m_server.fullServerName();
+    const QByteArray encodedBoundPath = QFile::encodeName(boundPath);
+    struct stat boundStatus {};
+    if (::lstat(encodedBoundPath.constData(), &boundStatus) != 0) {
+        error = failedCall("lstat(bound runtime-agent socket)", errno);
+        m_server.close();
+        return false;
+    }
+    if (!S_ISSOCK(boundStatus.st_mode)) {
+        error = QStringLiteral(
+                    "the runtime-agent socket path changed before its identity was recorded: %1")
+                    .arg(boundPath);
+        m_server.close();
+        return false;
+    }
+    m_boundSocket = BoundSocketIdentity{
+        boundPath,
+        static_cast<std::uint64_t>(boundStatus.st_dev),
+        static_cast<std::uint64_t>(boundStatus.st_ino),
+    };
     return true;
 }
 

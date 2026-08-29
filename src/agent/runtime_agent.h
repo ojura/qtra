@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -28,6 +29,12 @@ class RuntimeAgent final : public QObject {
 
     struct CallbackLifetime;
     class CallbackLease;
+
+    struct BoundSocketIdentity {
+        QString path;
+        std::uint64_t device = 0;
+        std::uint64_t inode = 0;
+    };
 
 public:
     // A guarded client reference for command handlers. It may be copied into a
@@ -373,6 +380,7 @@ private:
 
     QString m_socketName;
     QLocalServer m_server;
+    std::optional<BoundSocketIdentity> m_boundSocket;
     QHash<QLocalSocket*, ClientState> m_clients;
     std::vector<CommandEntry> m_commands;
     QMap<QString, SnippetExecutor> m_executors;
