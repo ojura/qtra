@@ -104,6 +104,22 @@ struct DecodedInstruction {
     //
     // The sweep cannot help either: where an indirect branch goes is decided at
     // run time, so a scan cannot prove it does not enter the taken bytes.
+    // How it hands control on, when it does. They are refused for three
+    // different reasons and saying the wrong one is worse than saying none.
+    enum class Transfer {
+        None,
+        // Comes back, so a thread can be in the callee with its return address
+        // inside the bytes about to be overwritten.
+        Call,
+        // Where it goes is decided when it runs, so nothing read here can show
+        // it does not land in those bytes.
+        IndirectJump,
+        // Leaves without coming back, so an opening containing one never
+        // reaches the continuation the copy ends with.
+        Exit,
+    };
+    Transfer transfer = Transfer::None;
+
     bool transfersControl = false;
 
     // Whether where it goes cannot be established by reading the function.

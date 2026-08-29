@@ -42,6 +42,20 @@
 //
 // The handler runs on threads doing arbitrary work, so it touches nothing but
 // atomics and makes no library call that could allocate or lock.
+//
+// The signal has to be one nothing else in the process uses, and that is a
+// requirement on whoever embeds this and not something it can establish. There
+// is no way to install a handler only if the signal is unused: sigaction
+// replaces what is there and hands back what it replaced, so by the time a
+// conflict is visible the application's handler has already been displaced, and
+// putting it back can overwrite a third one installed in between. Nothing here
+// can close that, so it is stated instead of papered over.
+//
+// What is done: an application handler found this way is put back immediately
+// and the stop refuses. That covers a process which set its handlers up before
+// asking for a stop, which is the ordinary case. It does not cover one still
+// installing handlers concurrently, and nothing short of the application
+// reserving the signal would.
 
 #include "agent/quiescence.h"
 

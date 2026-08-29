@@ -370,6 +370,11 @@ bool decodeInstruction(const std::uint8_t* at,
         }
         decoded.relativeBranch = true;
         decoded.transfersControl = true;
+        // A relative call comes back; a relative jump does not, and either way
+        // moving it changes where it goes, which is refused separately.
+        decoded.transfer = (!escaped && primaryOpcode == 0xE8U)
+            ? DecodedInstruction::Transfer::Call
+            : DecodedInstruction::Transfer::Exit;
         decoded.branchTarget = reinterpret_cast<std::uintptr_t>(origin + offset)
             + static_cast<std::uintptr_t>(delta);
     }
@@ -384,16 +389,29 @@ bool decodeInstruction(const std::uint8_t* at,
     if (!escaped && primaryOpcode == 0xFFU && modrmReg >= 2U && modrmReg <= 5U) {
         decoded.transfersControl = true;
         decoded.unprovableTarget = modrmReg == 4U || modrmReg == 5U;
+        decoded.transfer = decoded.unprovableTarget
+            ? DecodedInstruction::Transfer::IndirectJump
+            : DecodedInstruction::Transfer::Call;
     }
     if (!escaped
         && (primaryOpcode == 0xC2U || primaryOpcode == 0xC3U || primaryOpcode == 0xCAU
             || primaryOpcode == 0xCBU || primaryOpcode == 0xCCU || primaryOpcode == 0xCDU
             || primaryOpcode == 0xCEU || primaryOpcode == 0xCFU)) {
         decoded.transfersControl = true;  // returns and software interrupts
+        // An interrupt comes back; a return does not.
+        decoded.transfer = (primaryOpcode == 0xCCU || primaryOpcode == 0xCDU
+                            || primaryOpcode == 0xCEU)
+            ? DecodedInstruction::Transfer::Call
+            : DecodedInstruction::Transfer::Exit;
     }
     if (escaped
         && (primaryOpcode == 0x05U || primaryOpcode == 0x34U || primaryOpcode == 0x35U)) {
         decoded.transfersControl = true;  // syscall, sysenter, sysexit
+        // syscall and sysenter return where they were called from; sysexit
+        // does not.
+        decoded.transfer = primaryOpcode == 0x35U
+            ? DecodedInstruction::Transfer::Exit
+            : DecodedInstruction::Transfer::Call;
     }
 
     std::size_t immediate = 0;
@@ -600,11 +618,25 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
         }
         if (decoded.transfersControl) {
             error = "the instruction at offset " + std::to_string(taken)
-                + " of this function's opening bytes hands control somewhere else. A thread "
-                  "that has gone through it is standing in the callee with its return "
-                  "address inside the bytes about to be overwritten, and nothing that reads "
-                  "instruction pointers can see that. Where it goes is decided at run time, "
-                  "so scanning the body cannot rule it out either";
+                + " of this function's opening bytes ";
+            switch (decoded.transfer) {
+            case DecodedInstruction::Transfer::Call:
+                error += "calls somewhere and comes back, so a thread that has gone through "
+                         "it is standing in the callee with its return address inside the "
+                         "bytes about to be overwritten. Nothing that reads instruction "
+                         "pointers can see that";
+                break;
+            case DecodedInstruction::Transfer::IndirectJump:
+                error += "jumps to an address it works out when it runs, so nothing read "
+                         "here can say where a thread that took it has gone";
+                break;
+            case DecodedInstruction::Transfer::Exit:
+            case DecodedInstruction::Transfer::None:
+                error += "leaves without coming back, so moving it would put that departure "
+                         "in a copy that ends by continuing into the rest of the function, "
+                         "which is not where this goes";
+                break;
+            }
             return false;
         }
         if (decoded.ripRelative) {

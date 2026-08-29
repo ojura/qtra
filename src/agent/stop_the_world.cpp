@@ -334,12 +334,21 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
             // Put back what was there, then refuse. Parking claims a signal for
             // the life of the process, so taking one the application uses would
             // replace what it does with no way back.
-            (void)::sigaction(m_signal, &displaced, nullptr);
+            //
+            // This is a repair after the fact and not a check before: sigaction
+            // has no install-only-if-unused form, so the handler is already in
+            // place by the time its predecessor is known. See the header on why
+            // the signal has to be reserved by whoever embeds this.
+            const bool restored = ::sigaction(m_signal, &displaced, nullptr) == 0;
             controllerBusy.store(false, std::memory_order_release);
             error = "this process already does something with signal "
                 + std::to_string(m_signal)
                 + ", and parking threads takes that signal for good, so installing here "
                   "would quietly replace what it does. Choose a signal it does not use";
+            if (!restored) {
+                error += ". What was there could not be put back either, so this signal now "
+                         "reaches a parking handler that no stop will ever use";
+            }
             return nullptr;
         }
 

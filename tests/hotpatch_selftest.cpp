@@ -451,7 +451,10 @@ int main(int argc, char** argv)
                 std::cerr << "a prologue calling through a register was accepted\n";
                 return 75;
             }
-            if (callWhy.find("hands control somewhere else") == std::string::npos) {
+            // The reason has to be the one that applies to a call, and not a
+            // sentence true of some other refused form.
+            if (callWhy.find("calls somewhere and comes back") == std::string::npos
+                || callWhy.find("return address inside") == std::string::npos) {
                 std::cerr << "refused for the wrong reason: " << callWhy << '\n';
                 return 76;
             }
