@@ -76,12 +76,6 @@ bool PatchManager::installGateway(const PatchSite& site,
     // against as well as a success.
     m_threadsAtInstall = observedThreadCount();
 
-    // Room for whatever any of this has to say, taken before anything stops.
-    // A policy that parks every thread leaves them holding whatever they held,
-    // so growing a string between here and letting them go can wait on a lock
-    // only a parked thread can release.
-    error.reserve(512);
-
     // The bytes about to change, so a policy able to account for threads can
     // check that none of them is standing inside them.
     std::unique_ptr<QuiescenceLease> lease =
@@ -90,10 +84,13 @@ bool PatchManager::installGateway(const PatchSite& site,
         return false;
     }
 
-    // Everything between here and releasing is the write and what it needs.
-    // The site is checked again because everything above happened while the
-    // target was still running.
-    const bool stillAcceptsGateway = siteAcceptsGateway(site, error);
+    // Everything between here and releasing is the write and what it needs,
+    // and none of it allocates. The site is checked again because everything
+    // above happened while the target was still running, and it is checked with
+    // the form that answers without saying why: a parked thread may hold the
+    // allocator's lock, so composing a sentence here would be waiting for a
+    // thread that is waiting for this one.
+    const bool stillAcceptsGateway = siteAcceptsGateway(site);
     const TextWriteResult write = stillAcceptsGateway
         ? m_write->write(site.patchAddress, gateway.data(), gateway.size())
         : TextWriteResult{};
@@ -101,6 +98,8 @@ bool PatchManager::installGateway(const PatchSite& site,
     lease.reset();
 
     if (!stillAcceptsGateway) {
+        // Asked again now that everything is running, for the reason.
+        (void)siteAcceptsGateway(site, error);
         return false;
     }
 

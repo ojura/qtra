@@ -127,8 +127,14 @@ struct GatewayLayout {
                                                       std::size_t areaBytes);
 
 // Whether a gateway can go here, checked against the bytes actually present.
-// The site was measured earlier, so this confirms it has not gone stale, and it
-// runs with execution stopped.
+// The site was measured earlier, so this confirms it has not gone stale.
+//
+// Two forms, and which one to call is decided by whether anything is stopped.
+// The answer alone allocates nothing, so it is what runs with every thread
+// parked: a parked thread may hold the allocator's lock, and building a
+// sentence there is the caller waiting for a thread that is waiting for it.
+// The other says why, and is for asking again once they are running.
+[[nodiscard]] bool siteAcceptsGateway(const PatchSite& site) noexcept;
 [[nodiscard]] bool siteAcceptsGateway(const PatchSite& site, std::string& error);
 
 // Whether the gateway's indirect jump may land on this address. Under CET an

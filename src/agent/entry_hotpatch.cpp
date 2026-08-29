@@ -133,6 +133,25 @@ std::vector<std::uint8_t> encodeGateway(void* slotAddress, const std::size_t are
     return bytes;
 }
 
+// The answer, with nothing said about it and nothing allocated to say it.
+//
+// This runs with every thread parked, so it touches no string. The reasons live
+// in the form below, which asks the same questions in the same order and is
+// called once execution is running again.
+bool siteAcceptsGateway(const PatchSite& site) noexcept
+{
+    if (!site.valid() || site.availableBytes < GatewayLayout::totalBytes) {
+        return false;
+    }
+    const auto* bytes = static_cast<const std::uint8_t*>(site.patchAddress);
+    for (std::size_t index = 0; index < site.availableBytes; ++index) {
+        if (bytes[index] != 0x90U) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool siteAcceptsGateway(const PatchSite& site, std::string& error)
 {
     error.clear();
