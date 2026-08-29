@@ -1,6 +1,8 @@
 #include "agent/entry_hotpatch.h"
 #include "agent/got_site.h"
 #include "agent/patch_registry.h"
+#include "agent/prologue_relocation.h"
+#include "tests/prologue_fixtures.h"
 #include "agent/quiescence_providers.h"
 #include "agent/patch_area.h"
 #include "agent/patch_site.h"
@@ -34,6 +36,18 @@ bool approximatelyEqual(float a, float b)
 
 int replacementMemcpyCalls = 0;
 char gotScratch[64] = {};
+
+// What the fixtures reach once their prologues have been moved. Distinct
+// answers, so a test cannot pass by the original having run.
+extern "C" int replacementAddsOne(int value)
+{
+    return value * 101;
+}
+
+extern "C" int replacementCounter()
+{
+    return -1;
+}
 
 // Copies without calling memcpy, which would come straight back through the
 // slot this replaces.
@@ -301,6 +315,148 @@ int main(int argc, char** argv)
     }
 
     runtime_agent::SingleThreadQuiescer quiet;
+
+    // A function with no space reserved at its entry, redirected by moving the
+    // instructions that were there.
+    //
+    // The entry patcher needs an area the compiler set aside, so it reaches
+    // only what this build prepares. A call through the table needs the call to
+    // cross an object boundary, so it reaches only what is called from outside.
+    // A function called from inside its own object, built without the flag, is
+    // reachable by neither, and these fixtures are that.
+    {
+        std::string why;
+        runtime_agent::ProloguePlan plan;
+        const auto writer = runtime_agent::processTextWriter();
+
+        // Each refusal, checked before anything that writes, because a refusal
+        // arriving after the bytes changed would be no refusal at all.
+        if (runtime_agent::planPrologueRelocation(
+                reinterpret_cast<void*>(&fixtureUndecodable), plan, why)
+            || why.find("not one this decoder reads") == std::string::npos) {
+            std::cerr << "a prologue opening with an instruction the decoder cannot read "
+                         "was planned anyway: " << why << '\n';
+            return 50;
+        }
+
+        why.clear();
+        if (runtime_agent::planPrologueRelocation(
+                reinterpret_cast<void*>(&fixtureOpensWithABranch), plan, why)
+            || why.find("branches somewhere named as a distance") == std::string::npos) {
+            std::cerr << "a prologue opening with a branch was planned anyway: " << why << '\n';
+            return 51;
+        }
+
+        why.clear();
+        if (runtime_agent::planPrologueRelocation(
+                reinterpret_cast<void*>(&fixtureBranchesIntoItsPrologue), plan, why)
+            || why.find("inside the") == std::string::npos) {
+            std::cerr << "a function looping back into its own opening bytes was planned "
+                         "anyway: " << why << '\n';
+            return 52;
+        }
+
+        // A plan that succeeds, and what it says about the site.
+        why.clear();
+        if (!runtime_agent::planPrologueRelocation(
+                reinterpret_cast<void*>(&fixtureAddsOne), plan, why)) {
+            std::cerr << "a plain prologue could not be planned: " << why << '\n';
+            return 53;
+        }
+        if (plan.takenBytes < 5) {
+            std::cerr << "the plan takes fewer bytes than a jump needs\n";
+            return 54;
+        }
+        if (!plan.keepsLandingPad
+            || plan.patchAddress != static_cast<std::uint8_t*>(plan.entry) + 4) {
+            std::cerr << "the plan would write over the landing pad, leaving every indirect "
+                         "call to this function faulting\n";
+            return 55;
+        }
+
+        if (fixtureAddsOne(10) != 11) {
+            std::cerr << "the fixture does not do what it says before anything is moved\n";
+            return 56;
+        }
+
+        runtime_agent::RelocatedPrologue moved;
+        if (!runtime_agent::installRelocatedPrologue(
+                plan, reinterpret_cast<void*>(&replacementAddsOne), quiet, *writer, moved,
+                why)) {
+            std::cerr << "moving a plain prologue failed: " << why << '\n';
+            return 57;
+        }
+        if (fixtureAddsOne(10) != 1010) {
+            std::cerr << "the redirect did not reach the replacement\n";
+            return 58;
+        }
+
+        // The copy runs the instructions that were at the entry and then
+        // continues into the rest of the body, so calling it is calling what
+        // the function did before.
+        const auto original = reinterpret_cast<int (*)(int)>(moved.original);
+        if (original(10) != 11) {
+            std::cerr << "the copy of the prologue does not run the original behaviour\n";
+            return 59;
+        }
+
+        if (!runtime_agent::restoreRelocatedPrologue(moved, quiet, *writer, why)) {
+            std::cerr << "putting the prologue back failed: " << why << '\n';
+            return 60;
+        }
+        if (fixtureAddsOne(10) != 11) {
+            std::cerr << "restoring did not put the original bytes back\n";
+            return 61;
+        }
+
+        // An operand naming its address as a distance has to name the same
+        // address once moved. The copy sits somewhere else entirely, so an
+        // uncorrected distance would read whatever happens to be near it.
+        why.clear();
+        runtime_agent::ProloguePlan counterPlan;
+        if (!runtime_agent::planPrologueRelocation(
+                reinterpret_cast<void*>(&fixtureCounter), counterPlan, why)) {
+            std::cerr << "a prologue reading through a distance could not be planned: "
+                      << why << '\n';
+            return 62;
+        }
+        if (!counterPlan.adjustedRipRelative) {
+            std::cerr << "the plan did not notice the operand that names its address as a "
+                         "distance, so this test proves nothing\n";
+            return 63;
+        }
+
+        fixtureCounterStorage = 41;
+        if (fixtureCounter() != 42) {
+            std::cerr << "the counter fixture does not do what it says\n";
+            return 64;
+        }
+
+        runtime_agent::RelocatedPrologue movedCounter;
+        if (!runtime_agent::installRelocatedPrologue(
+                counterPlan, reinterpret_cast<void*>(&replacementCounter), quiet, *writer,
+                movedCounter, why)) {
+            std::cerr << "moving a prologue that reads through a distance failed: " << why
+                      << '\n';
+            return 65;
+        }
+        const auto originalCounter = reinterpret_cast<int (*)()>(movedCounter.original);
+        fixtureCounterStorage = 100;
+        if (originalCounter() != 101) {
+            std::cerr << "the copy read the wrong place, so the distance was not corrected "
+                         "for where the copy sits\n";
+            return 66;
+        }
+        if (!runtime_agent::restoreRelocatedPrologue(movedCounter, quiet, *writer, why)) {
+            std::cerr << "putting the counter's prologue back failed: " << why << '\n';
+            return 67;
+        }
+        fixtureCounterStorage = 41;
+        if (fixtureCounter() != 42) {
+            std::cerr << "restoring the counter did not put the original bytes back\n";
+            return 68;
+        }
+    }
 
     // A replacement that cannot be reached must leave the entry as it was. The
     // gateway is permanent, so installing one for a request that then fails
