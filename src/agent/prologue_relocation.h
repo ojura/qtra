@@ -261,6 +261,15 @@ struct RelocatedPrologue {
     // out yet. That makes the failure paths the only ones where a leak is
     // possible, and hotpatch_selftest measures the process's mapped bytes across
     // a refused install to keep it that way.
+    //
+    // One path still grows: restoring an entry and installing at it again maps a
+    // fresh copy each time, because the first is never given back. Nothing here
+    // does that, since choosing among replacements is a store through the
+    // selection word and only attaching and detaching installs at all. If a
+    // caller ever cycles, the answer is to reuse the existing mapping when the
+    // entry is the same one and its patchAddress, takenBytes and expectedBytes
+    // all match, and to extend that mapped-bytes measurement to a reinstall so
+    // the reuse is checked rather than assumed.
     std::size_t mappedBytes = 0;
 
     // What the entry held, so restoring is a copy and not a reconstruction.
