@@ -96,7 +96,7 @@ bool PatchManager::installGateway(const PatchSite& site, Quiescer& quiescer, std
     std::memcpy(original.data(), site.patchAddress, site.availableBytes);
 
     const TextWriteResult write =
-        writeText(site.patchAddress, gateway.data(), gateway.size(), m_protect);
+        m_write(site.patchAddress, gateway.data(), gateway.size());
     if (write.complete()) {
         m_record = std::move(record);
         m_original = std::move(original);
@@ -229,10 +229,8 @@ bool PatchManager::recover(std::string& error)
 
     // The one path that writes code outside installation. The lease that
     // stopped execution when the install failed is still held.
-    const TextWriteResult write = writeText(m_record->site.patchAddress,
-                                            m_original.data(),
-                                            m_original.size(),
-                                            m_protect);
+    const TextWriteResult write =
+        m_write(m_record->site.patchAddress, m_original.data(), m_original.size());
     if (!write.changedBytes()) {
         error = write.error;
         return false;

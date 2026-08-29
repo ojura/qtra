@@ -43,6 +43,22 @@ int failRestoreProtect(void* address, std::size_t length, int protection)
     errno = EACCES;
     return -1;
 }
+
+// Fails the restore on the first write and behaves normally afterwards, so one
+// manager can be driven into recovery and then back out of it. A manager is
+// given its writer once, and recovery is itself a write.
+bool restoreFailsOnce = true;
+
+runtime_agent::TextWriteResult writeFailingFirstRestore(void* address,
+                                                        const std::uint8_t* bytes,
+                                                        const std::size_t size)
+{
+    if (restoreFailsOnce) {
+        restoreFailsOnce = false;
+        return runtime_agent::writeText(address, bytes, size, &failRestoreProtect);
+    }
+    return runtime_agent::writeMappedText(address, bytes, size);
+}
 #endif
 
 } // namespace
@@ -150,9 +166,8 @@ int main(int argc, char** argv)
     // slot already names the continuation at that point, so the original still
     // runs, and the saved bytes are the only way back to a pristine entry.
     {
-        runtime_agent::PatchManager faulted;
+        runtime_agent::PatchManager faulted(&writeFailingFirstRestore);
         runtime_agent::PatchBinding binding;
-        faulted.setProtectFunction(&failRestoreProtect);
         std::string faultError;
         if (faulted.bind(site, reinterpret_cast<void*>(patch->step), 1, quiet, binding, faultError)) {
             std::cerr << "activate reported success although the mapping was never restored\n";
@@ -168,7 +183,6 @@ int main(int argc, char** argv)
             return 14;
         }
 
-        faulted.setProtectFunction(nullptr);
         if (!faulted.recover(faultError)) {
             std::cerr << "recovery failed: " << faultError << '\n';
             return 15;

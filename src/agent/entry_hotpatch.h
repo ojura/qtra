@@ -49,6 +49,23 @@ using ProtectFunction = int (*)(void* address, std::size_t length, int protectio
                                         std::size_t size,
                                         ProtectFunction protect = nullptr);
 
+// How something that installs code writes it, so what does the writing is a
+// choice its owner makes and not a fact about the type.
+//
+// The state worth testing is a copy that happened followed by a mapping that
+// could not be restored, because it is the only one that leaves the process
+// changed while the caller is told nothing worked. A real mprotect does not
+// fail on demand, so reaching it means supplying a writer that reports it.
+using TextWriter = TextWriteResult (*)(void* address,
+                                       const std::uint8_t* bytes,
+                                       std::size_t size);
+
+// Writes into this process's own mapped text, which is what an owner that was
+// given no writer of its own uses.
+[[nodiscard]] TextWriteResult writeMappedText(void* address,
+                                              const std::uint8_t* bytes,
+                                              std::size_t size);
+
 
 // How a gateway is laid out inside a prepared area.
 //

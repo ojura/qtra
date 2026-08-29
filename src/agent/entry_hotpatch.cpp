@@ -25,6 +25,11 @@ std::string errnoMessage(const char* operation)
 
 } // namespace
 
+TextWriteResult writeMappedText(void* address, const std::uint8_t* bytes, const std::size_t size)
+{
+    return writeText(address, bytes, size, nullptr);
+}
+
 TextWriteResult writeText(void* address,
                           const std::uint8_t* bytes,
                           const std::size_t size,

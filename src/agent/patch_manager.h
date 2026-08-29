@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -71,7 +70,14 @@ struct PatchStatus {
 
 class PatchManager final {
 public:
-    PatchManager() = default;
+    // What does the writing is given, so a test can reach the state where the
+    // copy has happened and the mapping has not been put back without the
+    // product carrying a way to ask for that.
+    explicit PatchManager(TextWriter writer = &writeMappedText) noexcept
+        : m_write(writer)
+    {
+    }
+
     PatchManager(const PatchManager&) = delete;
     PatchManager& operator=(const PatchManager&) = delete;
 
@@ -122,10 +128,6 @@ public:
     // Where a replacement reaches the original without re-entering the gateway.
     [[nodiscard]] void* continuation() const noexcept;
 
-    // Tests substitute the permission call to reach the path where the copy has
-    // happened and putting the mapping back has not.
-    void setProtectFunction(const ProtectFunction protect) noexcept { m_protect = protect; }
-
 private:
     // One replacement somebody bound. Kept for the life of the process: the code
     // it names is in a module that is never unloaded, and a thread can be
@@ -146,7 +148,7 @@ private:
     void publishSelection() noexcept;
 
     PatchState m_state = PatchState::NoGateway;
-    ProtectFunction m_protect = nullptr;
+    TextWriter m_write = nullptr;
 
     std::unique_ptr<GatewayRecord> m_record;
     std::vector<std::uint8_t> m_original;
