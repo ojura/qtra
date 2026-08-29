@@ -103,6 +103,17 @@ void* ModuleRegistry::open(const QString& path, QString& buildId, QString& error
         closeUnadopted(handle);
         return nullptr;
     }
+
+    // Said here, so every kind of module gets the same warning. Only the
+    // snippet loader used to say it, so a cube patch built without the define
+    // loaded in silence while a snippet said so, and the two cube patch
+    // targets are in fact not stamped.
+    if (buildId.isEmpty()) {
+        qWarning().noquote()
+            << "runtime-agent: loaded unstamped module" << absolutePath
+            << "which reports no host build id, so its offsets into application types are"
+            << "unchecked against this process";
+    }
     return handle;
 }
 
@@ -152,12 +163,6 @@ ModuleRegistry::LoadedModule* ModuleRegistry::loadSnippet(const QString& path, Q
     module->descriptor = descriptor;
     module->targetBuildId = buildId;
     module->stamped = !buildId.isEmpty();
-    if (!module->stamped) {
-        qWarning().noquote()
-            << "runtime-agent: loaded unstamped module" << module->path
-            << "which reports no host build id, so its offsets into application types are"
-            << "unchecked against this process";
-    }
     return adopt(std::move(module));
 }
 
