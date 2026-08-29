@@ -9,11 +9,12 @@
 #include "agent/patch_site.h"
 #include "agent/quiescence.h"
 
-#include <cassert>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace runtime_agent {
@@ -77,10 +78,15 @@ public:
     // Shares ownership of its writer, so the writer cannot go before the
     // manager does. Recovery is a write, and what needs recovering can outlast
     // everything that asked for the install.
+    // Refuses a null writer in every build. An assert would leave the release
+    // build dereferencing it on the first write, which is the build where a
+    // failed install matters most.
     explicit PatchManager(std::shared_ptr<TextWriter> writer = processTextWriter())
         : m_write(std::move(writer))
     {
-        assert(m_write != nullptr && "a patch manager needs something to write with");
+        if (m_write == nullptr) {
+            throw std::invalid_argument("a patch manager needs something to write with");
+        }
     }
 
     PatchManager(const PatchManager&) = delete;

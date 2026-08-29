@@ -20,16 +20,24 @@
 #include "agent/patch_manager.h"
 
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace runtime_agent {
 
 class PatchRegistry final {
 public:
+    // Refused here as well as in PatchManager, so a registry cannot be built
+    // that will fail later on whichever entry is asked for first.
     explicit PatchRegistry(std::shared_ptr<TextWriter> writer = processTextWriter())
         : m_write(std::move(writer))
     {
+        if (m_write == nullptr) {
+            throw std::invalid_argument("a patch registry needs something to write with");
+        }
     }
 
     PatchRegistry(const PatchRegistry&) = delete;
@@ -49,6 +57,9 @@ public:
     // Keyed by the entry, so two callers naming the same function get the same
     // manager and cannot install two gateways over each other. A caller holds
     // the reference for as long as it likes; it belongs to the registry.
+    //
+    // Safe to call from any thread. The reference stays valid however the map
+    // grows afterwards, because the managers are separate allocations.
     [[nodiscard]] PatchManager& forEntry(void* entry);
 
     // Whether anything is known about this entry yet, which is a question about
@@ -59,6 +70,10 @@ public:
     [[nodiscard]] std::vector<void*> entries() const;
 
 private:
+    // Guards the map only. What a manager does once handed out is the caller's
+    // to order: a write into an entry has to happen on a thread that may write
+    // it, which is a stronger requirement than any lock here could express.
+    mutable std::mutex m_mutex;
     std::shared_ptr<TextWriter> m_write;
     std::unordered_map<void*, std::unique_ptr<PatchManager>> m_managers;
 };

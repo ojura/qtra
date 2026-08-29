@@ -135,7 +135,6 @@ private:
     [[nodiscard]] static QJsonObject moduleJson(const LoadedModule& module);
 
     CubeWidget* m_cube = nullptr;
-    quint64 m_nextId = 1;
     std::unordered_map<quint64, std::unique_ptr<LoadedModule>> m_modules;
     // Borrowed from the registry, which outlives this. What a gateway leaves
     // behind is referred to by the process's own text, so destroying this must

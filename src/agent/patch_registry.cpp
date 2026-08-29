@@ -13,6 +13,7 @@ PatchRegistry& PatchRegistry::instance()
 
 PatchManager& PatchRegistry::forEntry(void* const entry)
 {
+    const std::lock_guard<std::mutex> held(m_mutex);
     std::unique_ptr<PatchManager>& manager = m_managers[entry];
     if (manager == nullptr) {
         manager = std::make_unique<PatchManager>(m_write);
@@ -22,11 +23,13 @@ PatchManager& PatchRegistry::forEntry(void* const entry)
 
 bool PatchRegistry::knows(void* const entry) const
 {
+    const std::lock_guard<std::mutex> held(m_mutex);
     return m_managers.find(entry) != m_managers.end();
 }
 
 std::vector<void*> PatchRegistry::entries() const
 {
+    const std::lock_guard<std::mutex> held(m_mutex);
     std::vector<void*> known;
     known.reserve(m_managers.size());
     for (const auto& [entry, manager] : m_managers) {

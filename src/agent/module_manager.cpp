@@ -12,6 +12,8 @@
 #include <QFileInfo>
 #include <QThread>
 
+#include <atomic>
+
 #include <dlfcn.h>
 
 namespace {
@@ -127,6 +129,24 @@ bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
 
 } // namespace
 
+namespace {
+
+// Module ids, never reused for the life of the process.
+//
+// A binding names the module that owns it, and bindings now outlive the manager
+// that made them: the registry keeps the entry's generations whatever happens to
+// whoever installed them. A second manager numbering from one again would hand a
+// new module the identity of one whose binding is still selected, and the rule
+// that nobody can release somebody else's work would then be checking two
+// different modules against one number.
+std::uint64_t nextModuleId()
+{
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+} // namespace
+
 ModuleManager::ModuleManager(CubeWidget* cube)
     : m_cube(cube)
     , m_patches(runtime_agent::PatchRegistry::instance().forEntry(
@@ -185,7 +205,7 @@ ModuleManager::LoadedModule* ModuleManager::loadSnippet(const QString& path, QSt
     }
 
     auto module = std::make_unique<LoadedModule>();
-    module->id = m_nextId++;
+    module->id = nextModuleId();
     module->path = absolutePath;
     module->name = QString::fromUtf8(descriptor->name_utf8 != nullptr
                                     ? descriptor->name_utf8 : "unnamed snippet");
@@ -244,7 +264,7 @@ ModuleManager::LoadedModule* ModuleManager::loadCubePatch(const QString& path, Q
     }
 
     auto module = std::make_unique<LoadedModule>();
-    module->id = m_nextId++;
+    module->id = nextModuleId();
     module->path = absolutePath;
     module->name = QString::fromUtf8(descriptor->name_utf8 != nullptr
                                     ? descriptor->name_utf8 : "unnamed cube patch");
