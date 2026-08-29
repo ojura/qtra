@@ -17,37 +17,12 @@ const char* describe(const PatchState state) noexcept
         return "original";
     case PatchState::GatewayReplacement:
         return "replacement";
-    case PatchState::RecoveryRequired:
-        return "recovery-required";
     }
     return "unknown";
 }
 
 PatchManager::~PatchManager()
 {
-    // Destroying a manager that is still in recovery loses the saved bytes and
-    // drops the lease, so nothing can recover afterwards and whatever the lease
-    // was holding is let go. This embedding does not do that: it recovers first,
-    // and the assert says so to whoever changes that.
-    //
-    // Leaking the lease instead would be worse. Today's lease restores nothing,
-    // so letting it go costs nothing, but a lease from a policy that actually
-    // stopped threads would leave them stopped for the life of the process with
-    // nothing able to release them.
-    //
-    // The structural answer is for the site registry to outlive any one manager
-    // and hold the recovery state, so recovery stays reachable no matter who is
-    // destroyed. That is part of splitting the registry out.
-    //
-    // What produces this state today is a gateway that was copied completely and
-    // whose mapping could not be made executable again. A half-written
-    // instruction stream cannot occur here, because the copy does not half-fail.
-    assert(m_state != PatchState::RecoveryRequired
-           && "recover before destroying a manager that is holding recovery state");
-    // Nothing here reclaims what the record holds, and nothing needs to: the
-    // registry owns managers for the life of the process, so this runs only in
-    // a test or at exit.
-
     // The gateway is permanent and carries this record's slot address as an
     // immediate, so the storage has to outlive whatever installed it. Freeing it
     // here would leave every later call loading a destination out of released
@@ -65,11 +40,6 @@ bool PatchManager::installGateway(const PatchSite& site,
     error.clear();
     if (!site.valid()) {
         error = "a resolved site is required to install a gateway";
-        return false;
-    }
-    if (m_state == PatchState::RecoveryRequired) {
-        error = "an earlier install left the entry rewritten and execution stopped; recover "
-                "before writing anything else";
         return false;
     }
     if (m_state != PatchState::NoGateway) {
@@ -127,9 +97,8 @@ bool PatchManager::installGateway(const PatchSite& site,
         m_write->write(site.patchAddress, gateway.data(), gateway.size());
     // From here the bytes have changed, whatever the outcome, so what admitted
     // that write is what describes the entry from now on.
-    m_installedUnder = admission;
-
     if (write.complete()) {
+        m_installedUnder = admission;
         m_record = std::move(record);
         m_state = PatchState::GatewayOriginal;
         return true;
@@ -140,38 +109,29 @@ bool PatchManager::installGateway(const PatchSite& site,
         return false;
     }
 
-    // The entry holds a gateway and the mapping could not be put back. The slot
-    // names the continuation, so the original function is what runs, but the
-    // bytes are not what they were and the caller is being told the install
-    // failed.
+    // The whole gateway was copied and the mapping could not be made executable
+    // again. There is no outcome here that copies part of an instruction
+    // stream, so the entry holds a complete, working gateway: its slot names
+    // the continuation, so the original function runs, and choosing a
+    // replacement afterwards is a store like any other.
     //
-    // Keeping the lease is what stops execution reaching it, and only a policy
-    // whose lease costs the rest of the process nothing can do that. One that
-    // parked every thread cannot be held across a return into ordinary code:
-    // the next allocation or log line can wait on a lock a parked thread holds.
-    if (!quiescer.leaseMaySurviveTheWrite()) {
-        // Threads go first, and nothing else happens until they have. They are
-        // parked wherever they were, holding whatever they held, so appending
-        // to a string or allocating a record here can wait on a lock only a
-        // parked thread can release.
-        lease.reset();
-        error += "; the entry is rewritten and this policy's lease cannot be held while "
-                 "anything else runs, so execution was let go with the entry in that state. "
-                 "It runs the original through the gateway, and rollback is still required";
-        m_record = std::move(record);
-        m_recovery = std::make_unique<Recovery>(std::move(original), nullptr, admission,
-                                                m_write);
-        m_state = PatchState::RecoveryRequired;
-        return false;
-    }
+    // So this is an installed gateway with one thing wrong with it, and what is
+    // wrong is a page that should not be writable. Calling it a state needing
+    // the entry's bytes put back would say the bytes are wrong, which they are
+    // not, and would be the only reason a lease has to outlive its write.
+    //
+    // Threads go first. They are parked wherever they were, holding whatever
+    // they held, so appending to a string here can wait on a lock only a parked
+    // thread can release.
+    lease.reset();
 
     m_record = std::move(record);
-    m_recovery = std::make_unique<Recovery>(std::move(original), std::move(lease), admission,
-                                            m_write);
-    m_state = PatchState::RecoveryRequired;
-    error += "; the gateway was already written, so the entry is not as it was and "
-             "rollback is still required";
-    return false;
+    m_installedUnder = admission;
+    m_mappingLeftWritable = true;
+    m_state = PatchState::GatewayOriginal;
+    error += "; the gateway is installed and runs the original, and the page it is on is "
+             "still writable, which repairing needs no code write and no stop";
+    return true;
 }
 
 const PatchManager::Generation* PatchManager::newestLive() const noexcept
@@ -209,11 +169,6 @@ bool PatchManager::bind(void* replacement,
     binding = PatchBinding{};
     if (replacement == nullptr) {
         error = "a replacement is required";
-        return false;
-    }
-    if (m_state == PatchState::RecoveryRequired) {
-        error = "an earlier install left the entry rewritten and execution stopped; recover "
-                "before binding anything else";
         return false;
     }
     if (m_state == PatchState::NoGateway) {
@@ -265,64 +220,13 @@ bool PatchManager::unbind(const std::uint64_t id, const std::uint64_t owner, std
     return false;
 }
 
-bool PatchManager::recover(Quiescer& quiescer, std::string& error)
-{
-    error.clear();
-    if (m_state != PatchState::RecoveryRequired) {
-        error = "there is nothing to recover";
-        return false;
-    }
-
-    // Its own stop. The install's lease may still be held, in which case this
-    // asks for a second one over the same bytes and a policy that stopped
-    // nothing gives it freely; or it was let go because it could not be held,
-    // in which case threads have been running and nothing about the earlier
-    // stop says anything about now.
-    std::unique_ptr<QuiescenceLease> lease = quiescer.acquire(
-        WriteRegion{m_record->site.patchAddress, m_recovery->original.size()}, error);
-    if (lease == nullptr) {
-        return false;
-    }
-
-    // The one path that writes code outside installation, and it writes with
-    // the writer the failed install used, held by the record. The lease that
-    // install acquired is in there too and is still held.
-    const TextWriteResult write = m_recovery->write->write(m_record->site.patchAddress,
-                                                           m_recovery->original.data(),
-                                                           m_recovery->original.size());
-    if (!write.changedBytes()) {
-        error = write.error;
-        return false;
-    }
-
-    // The entry's own bytes are back, so nothing is standing over a half
-    // state and the threads can go. They go before anything here frees
-    // storage: a parked thread may hold the allocator's lock, and destroying
-    // the record and the saved bytes is where that would be waited on.
-    lease.reset();
-
-    m_state = PatchState::NoGateway;
-    m_record.reset();
-    m_generations.clear();
-    m_recovery.reset();
-    if (!write.complete()) {
-        error = write.error;
-        error += "; the entry was restored, so execution may reach it again, and the "
-                 "mapping is left writable";
-        return false;
-    }
-    return true;
-}
-
 PatchStatus PatchManager::status() const
 {
     PatchStatus status;
     status.state = m_state;
     status.installedUnder = m_installedUnder;
     status.threadsAtInstall = m_threadsAtInstall;
-    if (m_recovery != nullptr) {
-        status.recoveryAdmission = m_recovery->admission;
-    }
+    status.mappingLeftWritable = m_mappingLeftWritable;
     if (m_record != nullptr) {
         status.site = m_record->site;
         status.slotAddress = &m_record->slot;

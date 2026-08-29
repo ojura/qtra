@@ -233,12 +233,13 @@ leaves it collapsed and unclaimed, so the restore has to come first.
   | field | meaning |
   |---|---|
   | `mode` | what is driving the cube, `builtin` or `entry` |
-  | `entryState` | what the entry holds: `pristine`, `original`, `replacement`, `recovery-required` |
+  | `entryState` | what the entry holds: `pristine`, `original`, `replacement` |
   | `gatewaySlot` | the address the gateway loads its destination from |
   | `quiescedBy` | the policy that made the one code write safe |
   | `threadsAtInstall` | threads observed then, or null if they could not be counted |
   | `coverage` | the build's decision, and whether it allows activation |
-  | `recoveryAdmission` | what the write that needs finishing was admitted under, present only in `recovery-required` |
+  | `mappingLeftWritable` | whether the page the gateway is on is still writable, because putting its permissions back failed after the bytes were copied. The gateway is complete either way |
+  | `installedUnder` | what admitted the write that installed the gateway |
 - `patch.rollback`
 - `patch.status`
 

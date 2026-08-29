@@ -26,14 +26,11 @@ namespace runtime_agent {
 //
 // There is no way back to NoGateway once a gateway is installed. Removing it
 // would need another code write with all the same hazards, and a caller asking
-// to stop a replacement is not asking for that. The one exception is recovery
-// from an install that never finished, which restores the saved bytes while the
-// lease that stopped execution is still held.
+// to stop a replacement is not asking for that.
 enum class PatchState {
     NoGateway,
     GatewayOriginal,
     GatewayReplacement,
-    RecoveryRequired,
 };
 
 [[nodiscard]] const char* describe(PatchState state) noexcept;
@@ -64,9 +61,14 @@ struct PatchStatus {
     // a process with no threads.
     std::optional<std::size_t> threadsAtInstall;
 
-    // What admitted the write that left this entry needing recovery, when it
-    // does. Absent otherwise, because there is no write to attribute.
-    std::optional<LiveTextWriteAdmission> recoveryAdmission;
+    // Whether the page the gateway is on is still writable, because making it
+    // executable again failed after the bytes were copied.
+    //
+    // The gateway itself is complete and correct: the write that changed the
+    // bytes either copies all of them or none. So this is an entry that works
+    // and a permission that should be put back, which needs no code write and
+    // nothing stopped.
+    bool mappingLeftWritable = false;
 
     // Whose replacement is selected. Zero when the original is running.
     std::uint64_t selectedBinding = 0;
@@ -80,8 +82,8 @@ public:
     // copy has happened and the mapping has not been put back without the
     // product carrying a way to ask for that.
     // Shares ownership of its writer, so the writer cannot go before the
-    // manager does. Recovery is a write, and what needs recovering can outlast
-    // everything that asked for the install.
+    // manager does. What a gateway leaves behind outlasts everything that asked
+    // for the install.
     // Refuses a null writer in every build. An assert would leave the release
     // build dereferencing it on the first write, which is the build where a
     // failed install matters most.
@@ -111,9 +113,11 @@ public:
     // early, before anything wants to replace the function, is a write and
     // nothing else, and there is no coverage question to ask yet.
     //
-    // Failing after the bytes changed leaves a recovery record holding the
-    // saved bytes, the lease, this admission and the writer, which is what
-    // makes finishing possible without whoever asked still being here.
+    // A write that changes the bytes and cannot make the mapping executable
+    // again leaves a complete, working gateway on a page that is still
+    // writable. That is reported and is not a failure: nothing here copies part
+    // of an instruction stream, so there is no half-written entry to recover
+    // from, and putting the permissions back needs no code write and no stop.
     [[nodiscard]] bool installGateway(const PatchSite& site,
                                       const LiveTextWriteAdmission& admission,
                                       Quiescer& quiescer,
@@ -140,19 +144,6 @@ public:
     // nearest predecessor still live. Without that, an old module letting go
     // would overwrite a replacement chosen after it.
     [[nodiscard]] bool unbind(std::uint64_t id, std::uint64_t owner, std::string& error);
-
-    // Puts the entry back to its own bytes. Only possible while recovering from
-    // an install that never finished, which still holds the lease that stopped
-    // execution.
-// Takes its own quiescer, and does not reuse the install's.
-    //
-    // This writes the entry's own bytes back, which is a code write happening
-    // now and not a continuation of the one that failed. What admitted that
-    // write is history: it says what was true then. Whether these bytes may be
-    // written at this moment is a fresh question, and a policy that parked
-    // every thread cannot have kept its lease this long anyway, since nothing
-    // could have run to ask for recovery.
-    [[nodiscard]] bool recover(Quiescer& quiescer, std::string& error);
 
     [[nodiscard]] PatchStatus status() const;
     [[nodiscard]] PatchState state() const noexcept { return m_state; }
@@ -183,44 +174,18 @@ private:
     PatchState m_state = PatchState::NoGateway;
     std::shared_ptr<TextWriter> m_write;
 
-    // What the gateway was written under, whatever became of that write. The
-    // record keeps its own required copy, because recovery must not depend on
-    // anything outside itself; both are copies of one value made at one
-    // instant, so neither can drift from the other.
+    // What the gateway was written under, kept for reporting.
     std::optional<LiveTextWriteAdmission> m_installedUnder;
 
-    // What an install that changed bytes and could not finish left behind, and
-    // everything needed to finish it.
-    //
-    // Built whole or not at all, so there is no way to hold recovery state
-    // without the admission the write was made under, and no way to hold it
-    // without something to write with. The manager is in RecoveryRequired
-    // exactly when this exists, so the state and its evidence cannot disagree.
-    struct Recovery {
-        Recovery(std::vector<std::uint8_t> bytes,
-                 std::unique_ptr<QuiescenceLease> held,
-                 LiveTextWriteAdmission admitted,
-                 std::shared_ptr<TextWriter> writer)
-            : original(std::move(bytes))
-            , lease(std::move(held))
-            , admission(std::move(admitted))
-            , write(std::move(writer))
-        {
-        }
-
-        std::vector<std::uint8_t> original;
-        std::unique_ptr<QuiescenceLease> lease;
-        // Const, so custody cannot be edited after the write it describes.
-        const LiveTextWriteAdmission admission;
-        std::shared_ptr<TextWriter> write;
-    };
+    // Whether the page the gateway sits on is still writable, because putting
+    // its permissions back failed after the bytes were copied. The gateway
+    // itself is complete: nothing here copies part of one.
+    bool m_mappingLeftWritable = false;
 
     std::unique_ptr<GatewayRecord> m_record;
     std::optional<std::size_t> m_threadsAtInstall;
     std::vector<Generation> m_generations;
     std::uint64_t m_nextBinding = 1;
-
-    std::unique_ptr<Recovery> m_recovery;
 };
 
 } // namespace runtime_agent

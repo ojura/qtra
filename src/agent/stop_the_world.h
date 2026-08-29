@@ -90,10 +90,6 @@ public:
 
     [[nodiscard]] const char* name() const noexcept override { return "stop-the-world"; }
 
-    // No. Every other thread is parked exactly where it was, holding whatever
-    // it held, so nothing may run ordinary code until they are let go.
-    [[nodiscard]] bool leaseMaySurviveTheWrite() const noexcept override { return false; }
-
     // Where every other thread was standing, from the last acquire, whether it
     // succeeded or not. Empty when nothing was stopped.
     [[nodiscard]] const std::vector<ParkedThread>& parked() const noexcept { return m_parked; }

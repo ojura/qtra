@@ -202,12 +202,7 @@ void ModuleManager::refreshLabel()
     // different instants.
     const runtime_agent::PatchStatus patch = m_patches.status();
     QString label = QStringLiteral("builtin");
-    if (patch.state == runtime_agent::PatchState::RecoveryRequired) {
-        label = QStringLiteral("entry (recovery required)");
-        if (const LoadedModule* owner = module(m_activeEntryModule); owner != nullptr) {
-            label += QStringLiteral(": %1").arg(owner->name);
-        }
-    } else if (patch.state == runtime_agent::PatchState::GatewayReplacement) {
+    if (patch.state == runtime_agent::PatchState::GatewayReplacement) {
         // Named by whoever owns the selected generation, which is the module
         // whose code the entry reaches, on either path.
         const LoadedModule* owner = module(patch.selectedOwner);
@@ -335,10 +330,6 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
     runtime_agent::PatchBinding binding;
     if (!installIfNeeded(site, decision, quiescer, nativeError)) {
         error = QString::fromStdString(nativeError);
-        if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
-            m_activeEntryModule = id;
-            refreshLabel();
-        }
         return false;
     }
     if (!m_patches.bind(reinterpret_cast<void*>(static_cast<const CubeStepPatch*>(loaded->descriptor)->step),
@@ -346,12 +337,6 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
                         binding,
                         nativeError)) {
         error = QString::fromStdString(nativeError);
-        if (m_patches.status().state == runtime_agent::PatchState::RecoveryRequired) {
-            // The manager is holding execution stopped. Recording the module
-            // keeps rollback able to name what is installed.
-            m_activeEntryModule = id;
-            refreshLabel();
-        }
         return false;
     }
 
@@ -444,11 +429,11 @@ int ModuleManager::bindReplacement(void* target,
     SameThreadRequestBoundary quiescer(m_cube);
     if (!installIfNeeded(site, decision, quiescer, nativeError)) {
         error = QString::fromStdString(nativeError);
-        return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;
+        return -2;
     }
     if (!m_patches.bind(replacement, owner, binding, nativeError)) {
         error = QString::fromStdString(nativeError);
-        return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;
+        return -2;
     }
     refreshLabel();
     return 0;
@@ -527,13 +512,14 @@ QJsonObject ModuleManager::patchStatus()
             ? QJsonValue(static_cast<qint64>(*patch.threadsAtInstall))
             : QJsonValue()},
     };
-    // What the write that left this entry needing recovery was admitted under.
-    // Present only then, because that is the only write anyone still has to
-    // finish, and a caller looking at a stuck process can say what it was made
-    // under without asking a file that may have changed since.
-    if (patch.recoveryAdmission.has_value()) {
-        const runtime_agent::LiveTextWriteAdmission& admitted = *patch.recoveryAdmission;
-        result.insert(QStringLiteral("recoveryAdmission"),
+    // What the gateway was written under, and whether its page was left
+    // writable. The gateway is complete either way, because nothing here copies
+    // part of an instruction stream; a writable page is a permission to put
+    // back, which needs no code write and nothing stopped.
+    result.insert(QStringLiteral("mappingLeftWritable"), patch.mappingLeftWritable);
+    if (patch.installedUnder.has_value()) {
+        const runtime_agent::LiveTextWriteAdmission& admitted = *patch.installedUnder;
+        result.insert(QStringLiteral("installedUnder"),
                       QJsonObject{
                           {QStringLiteral("basis"),
                            QString::fromLatin1(runtime_agent::describe(admitted.basis()))},
@@ -556,44 +542,6 @@ QJsonObject ModuleManager::patchStatus()
 
 bool ModuleManager::resetActivePatch(QString& error)
 {
-    // The one way back from an install that changed bytes and could not finish.
-    // Without this the state told a caller to recover and no command could.
-    if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
-        // Recovery restores the entry's own bytes, which is a code write, so
-        // reaching it from the wrong thread is the same hazard installing from
-        // one would be.
-        if (QThread::currentThread() != m_cube->thread()) {
-            error = QStringLiteral("recovery writes the target's entry, so it has to run "
-                                   "on the thread that owns it");
-            return false;
-        }
-        // What admitted the install admits putting it back. Reading the
-        // manifest again would ask about the file as it stands now: a rebuild
-        // between the failed install and this call gives the binary a new build
-        // id, the manifest on disk describes that one, and recovery would be
-        // refused with the entry left mid-install and nothing able to finish
-        // it. The bytes being restored are this process's own, so the decision
-        // taken when they were written is the one that governs restoring them.
-        // Nothing is asked of the manifest here. What admitted the write is
-        // kept with the write, in the record the failed install left, and a
-        // record cannot exist without one. Asking again would be asking a
-        // question about now that the answer describes about then, and on a
-        // file that may have been replaced since.
-        //
-        // What makes recovery safe is the lease that install is still holding
-        // and the check above, which is a fact about this instant.
-        std::string nativeError;
-        SameThreadRequestBoundary recoveryQuiescer(m_cube);
-        if (!m_patches.recover(recoveryQuiescer, nativeError)) {
-            error = QString::fromStdString(nativeError);
-            return false;
-        }
-        m_entryBinding = 0;
-        m_activeEntryModule = 0;
-        refreshLabel();
-        return true;
-    }
-
     if (m_entryBinding != 0) {
         std::string nativeError;
         if (!m_patches.unbind(m_entryBinding, m_activeEntryModule, nativeError)) {

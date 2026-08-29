@@ -142,6 +142,25 @@ if(BUILD_HOTPATCH_SELFTEST)
     target_compile_options(thread_accounting_selftest PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME thread-accounting COMMAND thread_accounting_selftest)
 
+    # Its own process: it installs a gateway, and gateways are permanent, so it
+    # cannot share the one prepared entry with tests that need it untouched.
+    add_executable(writable_page_selftest
+        tests/writable_page_selftest.cpp
+        src/cube_step.cpp
+        src/agent/entry_hotpatch.cpp
+        src/agent/patch_site.cpp
+        src/agent/patch_manager.cpp
+        src/agent/patch_registry.cpp
+        src/agent/write_admission.cpp
+        src/agent/quiescence_providers.cpp
+        src/agent/stop_the_world.cpp
+    )
+    target_include_directories(writable_page_selftest
+        PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
+    target_link_libraries(writable_page_selftest PRIVATE ${CMAKE_DL_LIBS})
+    target_compile_options(writable_page_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME writable-page COMMAND writable_page_selftest)
+
     add_test(NAME raw-entry-hotpatch-wobble
              COMMAND hotpatch_selftest $<TARGET_FILE:cube_patch_wobble>)
     add_test(NAME raw-entry-hotpatch-reverse

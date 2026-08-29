@@ -1012,7 +1012,12 @@ the continuation, and `entryState` reports which of those is true:
 | `pristine` | the entry holds its reserved NOPs, nothing installed |
 | `original` | the gateway is in and the slot names the continuation |
 | `replacement` | the gateway is in and the slot names somebody's replacement |
-| `recovery-required` | an install changed bytes and could not finish |
+
+A write that copies the whole gateway and cannot make the mapping executable
+again leaves an entry that works: the copy does not half-fail, so the gateway is
+complete and the slot names its continuation. `mappingLeftWritable` says the
+page is still writable, which is a permission to put back and needs neither a
+code write nor anything stopped.
 
 ```bash
 python3 tools/agentctl.py patch build/release/cube_patch_wobble.so
