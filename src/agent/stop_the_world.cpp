@@ -40,7 +40,19 @@ std::atomic<unsigned> arrivals{0};
 // running will finish.
 std::atomic<unsigned> inside{0};
 std::atomic<bool> released{true};
-std::atomic<bool> arranging{false};
+
+// Two separate facts, which one flag cannot carry.
+//
+// controllerBusy says a stop owns this machinery, and stays true until every
+// handler from it has left. activeGeneration says which stop a handler may
+// belong to, and is cleared first so a signal delivered from that moment on is
+// recognised as late and returns without touching anything.
+//
+// With one flag doing both, clearing it to let late signals go also let the
+// next stop claim ownership, and an old handler still between its check and its
+// arrival could then count itself into the new stop's counters.
+std::atomic<bool> controllerBusy{false};
+std::atomic<unsigned> activeGeneration{0};
 
 // One slot per parked thread, written by that thread alone.
 std::atomic<const void*> parkedAt[maxParked];
@@ -65,8 +77,8 @@ void parkHandler(int signalNumber, siginfo_t* info, void* contextPointer)
     const unsigned mine = info != nullptr
         ? static_cast<unsigned>(info->si_value.sival_int)
         : 0U;
-    if (!arranging.load(std::memory_order_acquire)
-        || mine != generation.load(std::memory_order_acquire)) {
+    const unsigned active = activeGeneration.load(std::memory_order_acquire);
+    if (active == 0U || mine != active) {
         // A signal left over from a stop that has finished. Its sender is gone
         // and nobody is counting it.
         (void)signalNumber;
@@ -180,8 +192,11 @@ public:
         // Parked handlers may leave, and this stop stops being the one anybody
         // belongs to, so a signal delivered from here on is recognised as late
         // and returns without parking.
+        // Parked handlers may leave, and this stop stops being one anybody can
+        // belong to, so a signal delivered from here on returns without
+        // parking.
         released.store(true, std::memory_order_release);
-        arranging.store(false, std::memory_order_release);
+        activeGeneration.store(0U, std::memory_order_release);
 
         // Then wait for the handlers actually running, and only those. A signal
         // sent to a thread that has it blocked stays pending until that thread
@@ -190,6 +205,10 @@ public:
         while (inside.load(std::memory_order_acquire) != 0U) {
             (void)::syscall(SYS_sched_yield);
         }
+
+        // Only now may another stop begin. Until every handler from this one
+        // has left, one of them could still be counted by the next.
+        controllerBusy.store(false, std::memory_order_release);
     }
 };
 
@@ -228,7 +247,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     }
 
     bool expected = false;
-    if (!arranging.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    if (!controllerBusy.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         error = "another stop is already arranged; this policy handles one at a time";
         return nullptr;
     }
@@ -245,7 +264,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     static std::atomic<int> installedFor{0};
     const int already = installedFor.load(std::memory_order_acquire);
     if (already != 0 && already != m_signal) {
-        arranging.store(false, std::memory_order_release);
+        controllerBusy.store(false, std::memory_order_release);
         error = "this process already parks threads with signal " + std::to_string(already)
             + ", and one handler is installed for the life of the process because a signal "
               "sent earlier can still arrive. Use that signal or none";
@@ -258,7 +277,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         ::sigfillset(&parking.sa_mask);
         if (::sigaction(m_signal, &parking, nullptr) != 0) {
             const int failure = errno;
-            arranging.store(false, std::memory_order_release);
+            controllerBusy.store(false, std::memory_order_release);
             error = std::string("could not install the parking handler: ")
                 + std::strerror(failure);
             return nullptr;
@@ -278,7 +297,11 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
 
     auto giveUp = [&](std::string why) -> std::unique_ptr<QuiescenceLease> {
         released.store(true, std::memory_order_release);
-        arranging.store(false, std::memory_order_release);
+        activeGeneration.store(0U, std::memory_order_release);
+        while (inside.load(std::memory_order_acquire) != 0U) {
+            (void)::syscall(SYS_sched_yield);
+        }
+        controllerBusy.store(false, std::memory_order_release);
         error = std::move(why);
         return nullptr;
     };
@@ -303,6 +326,9 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     arrivals.store(0, std::memory_order_relaxed);
     nextSlot.store(0, std::memory_order_relaxed);
     released.store(false, std::memory_order_release);
+    // Published last, so nothing can belong to this stop until everything it
+    // will read is in place.
+    activeGeneration.store(mine, std::memory_order_release);
 
     auto lease = std::make_unique<ParkedLease>();
 
