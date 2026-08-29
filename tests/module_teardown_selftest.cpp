@@ -13,6 +13,9 @@
 #include "agent/module_manager.h"
 #include "agent/module_registry.h"
 #include "agent/patch_registry.h"
+#include "agent/patch_area.h"
+#include "agent/patch_site.h"
+#include "agent/quiescence_providers.h"
 
 #include "demo/cube_step_abi.h"
 
@@ -90,24 +93,79 @@ int main(int argc, char** argv)
         }
     }
 
-    std::printf("the patched entry is the same one whoever asks\n");
+    // A binding made through one adapter, named and released through another.
+    //
+    // This is the case the whole ownership argument is about, and the version
+    // of it I wrote first proved nothing: it compared pristine to pristine,
+    // which two unrelated managers would also report, and it compared the
+    // registry with itself.
+    std::printf("a binding outlives the adapter that made it\n");
     {
         auto* entry = reinterpret_cast<void*>(&cube_step_builtin);
-        runtime_agent::PatchManager& viaRegistry =
+        runtime_agent::PatchManager& patches =
             runtime_agent::PatchRegistry::instance().forEntry(entry);
 
-        auto adapter = std::make_unique<ModuleManager>(nullptr);
-        const QJsonObject before = adapter->patchStatus();
-        adapter.reset();
+        auto owner = std::make_unique<ModuleManager>(nullptr);
+        QString error;
+        ModuleManager::LoadedModule* binder = owner->loadSnippet(modulePath, error);
+        check(binder != nullptr, "loaded a module to own the binding");
+        if (binder == nullptr) {
+            return 1;
+        }
+        const quint64 binderId = binder->id;
 
-        auto successor = std::make_unique<ModuleManager>(nullptr);
-        const QJsonObject after = successor->patchStatus();
+        // Installed and selected directly, because going through the adapter
+        // would ask the manifest, and what is being tested is ownership.
+        const runtime_agent::LiveTextWriteAdmission admission(
+            runtime_agent::WriteAdmissionBasis::AlreadyQuiescent,
+            "single-thread",
+            "cube_step_builtin",
+            "the teardown test is the only thread there is");
+        runtime_agent::SingleThreadQuiescer quiet;
+        runtime_agent::PatchSite site;
+        std::string nativeError;
+        if (!runtime_agent::resolvePatchSite(entry, runtime_agent::patchAreaBytes, site,
+                                             nativeError)) {
+            std::printf("  skip  this build reserved no area: %s\n", nativeError.c_str());
+        } else {
+            check(patches.installGateway(site, admission, quiet, nativeError),
+                  nativeError.empty() ? "installed a gateway" : nativeError.c_str());
 
-        check(before.value(QStringLiteral("entryState"))
-                  == after.value(QStringLiteral("entryState")),
-              "a successor reports the same entry state");
-        check(&viaRegistry == &runtime_agent::PatchRegistry::instance().forEntry(entry),
-              "and the same manager is behind both of them");
+            runtime_agent::PatchBinding binding;
+            check(patches.bind(reinterpret_cast<void*>(&cube_step_builtin), binderId, binding,
+                               nativeError),
+                  nativeError.empty() ? "bound a replacement owned by that module"
+                                      : nativeError.c_str());
+
+            const QJsonObject held = owner->patchStatus();
+            check(held.value(QStringLiteral("mode")).toString() == QStringLiteral("entry"),
+                  "the adapter that made it says the entry is replaced");
+            check(held.value(QStringLiteral("moduleId")).toString()
+                      == QString::number(binderId),
+                  "and names the module that owns it");
+
+            owner.reset();
+
+            // The adapter is gone. The binding is not, and neither is what is
+            // needed to say whose it is.
+            auto successor = std::make_unique<ModuleManager>(nullptr);
+            const QJsonObject found = successor->patchStatus();
+            check(found.value(QStringLiteral("entryState")).toString()
+                      == QStringLiteral("replacement"),
+                  "a successor sees the entry still replaced");
+            check(found.value(QStringLiteral("moduleId")).toString()
+                      == QString::number(binderId),
+                  "and names the same module, which is the record that used to die");
+            check(successor->module(binderId) != nullptr,
+                  "and can still look that module up");
+
+            // And can let it go, which needs the owner id to match.
+            check(patches.unbind(binding.id, binderId, nativeError),
+                  nativeError.empty() ? "and can release it" : nativeError.c_str());
+            check(successor->patchStatus().value(QStringLiteral("mode")).toString()
+                      == QStringLiteral("builtin"),
+                  "after which nothing is selected");
+        }
     }
 
     std::printf("%s\n", failures == 0 ? "all teardown checks passed" : "teardown checks failed");

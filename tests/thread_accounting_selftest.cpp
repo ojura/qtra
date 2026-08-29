@@ -44,6 +44,23 @@ void spin()
 // where the answer should be yes.
 void quietCorner() {}
 
+std::atomic<bool> keepTight{true};
+std::atomic<int> tight{0};
+
+// A loop that calls nothing, so a thread in it is standing in these bytes.
+//
+// The other spinner yields, which means it is usually inside the C library and
+// not here at all. That is the policy's stated limitation showing up in its own
+// test: a thread that has called out of a range has its return address inside
+// it and its instruction pointer somewhere else, and this sees only the second.
+__attribute__((noinline)) void tightSpin()
+{
+    tight.fetch_add(1, std::memory_order_release);
+    while (keepTight.load(std::memory_order_acquire)) {
+        // Nothing. A call here would put the thread in the callee.
+    }
+}
+
 } // namespace
 
 int main()
@@ -126,8 +143,52 @@ int main()
 
     std::printf("a thread standing in the bytes about to change\n");
     {
-        // The thread parks inside the spin loop, so the loop's own address
-        // range is where it is standing. Asking about that range has to refuse.
+        // The region is the whole function the thread is looping in, not the
+        // exact address it occupied once. A thread in a loop is at a different
+        // instruction from one moment to the next, so asking about the eight
+        // bytes it happened to be in is a test that passes when it is lucky.
+        keepTight.store(true, std::memory_order_release);
+        tight.store(0, std::memory_order_release);
+        std::thread worker(&tightSpin);
+        while (tight.load(std::memory_order_acquire) < 1) {
+            std::this_thread::yield();
+        }
+
+        const runtime_agent::WriteRegion body{reinterpret_cast<void*>(&tightSpin), 256};
+
+        // Established first, so the refusal below is known to be about a thread
+        // that really is in this range and not about an empty claim.
+        std::string error;
+        runtime_agent::StopTheWorldQuiescer locating;
+        auto found = locating.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, error);
+        check(found != nullptr, "the worker stopped so its position could be read");
+        const bool insideBody = !locating.parked().empty()
+            && body.contains(locating.parked().front().instructionPointer);
+        found.reset();
+        check(insideBody, "and it is standing inside the function it is looping in");
+
+        if (insideBody) {
+            runtime_agent::StopTheWorldQuiescer refusing;
+            std::string refusal;
+            auto denied = refusing.acquire(body, refusal);
+            check(denied == nullptr, "writing that function's bytes is refused");
+            check(refusal.find("standing inside") != std::string::npos,
+                  refusal.empty() ? "with a reason" : refusal.c_str());
+            check(refusal.find("thread ") != std::string::npos,
+                  "naming the thread that is standing there");
+        }
+
+        keepTight.store(false, std::memory_order_release);
+        worker.join();
+    }
+
+    std::printf("a thread that has called out of the range is not seen in it\n");
+    {
+        // The limitation, tested so it is a known property and not a surprise.
+        // This thread's return address is inside the yielding spinner, and its
+        // instruction pointer is in the C library, so a region covering that
+        // function does not refuse.
         keepSpinning.store(true, std::memory_order_release);
         spinning.store(0, std::memory_order_release);
         std::thread worker(&spin);
@@ -136,24 +197,41 @@ int main()
         }
 
         std::string error;
-        runtime_agent::StopTheWorldQuiescer locating;
-        auto found = locating.acquire(
-            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, error);
-        check(found != nullptr, "the worker stopped so its position could be read");
-        const void* where = locating.parked().empty()
-            ? nullptr
-            : locating.parked().front().instructionPointer;
-        found.reset();
+        runtime_agent::StopTheWorldQuiescer quiescer;
+        auto lease = quiescer.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&spin), 256}, error);
+        check(lease != nullptr,
+              "a thread inside a call it made from the range is not standing in the range");
+        lease.reset();
 
-        check(where != nullptr, "and the position was read");
-        if (where != nullptr) {
-            runtime_agent::StopTheWorldQuiescer refusing;
-            std::string refusal;
-            auto denied = refusing.acquire(runtime_agent::WriteRegion{where, 8}, refusal);
-            check(denied == nullptr, "writing where a thread stands is refused");
-            check(refusal.find("standing inside") != std::string::npos,
-                  refusal.empty() ? "with a reason" : refusal.c_str());
+        keepSpinning.store(false, std::memory_order_release);
+        worker.join();
+    }
+
+    std::printf("a stop that is abandoned does not disturb the next one\n");
+    {
+        // A signal sent to a thread that never took it stays pending. If a
+        // later stop counted it, or the handler ran with the old disposition
+        // restored, this is where it would show.
+        keepSpinning.store(true, std::memory_order_release);
+        spinning.store(0, std::memory_order_release);
+        std::thread worker(&spin);
+        while (spinning.load(std::memory_order_acquire) < 1) {
+            std::this_thread::yield();
         }
+
+        for (int round = 0; round < 20; ++round) {
+            runtime_agent::StopTheWorldQuiescer quiescer;
+            std::string error;
+            auto lease = quiescer.acquire(
+                runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, error);
+            if (lease == nullptr || quiescer.parked().size() != 1) {
+                check(false, error.empty() ? "a round stopped the wrong number of threads"
+                                           : error.c_str());
+                break;
+            }
+        }
+        check(true, "twenty stops in a row each account for exactly one thread");
 
         keepSpinning.store(false, std::memory_order_release);
         worker.join();

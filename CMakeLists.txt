@@ -117,8 +117,6 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/agent/patch_registry.cpp
         src/agent/write_admission.cpp
         src/agent/quiescence_providers.cpp
-    src/agent/stop_the_world.h
-    src/agent/stop_the_world.cpp
         src/agent/stop_the_world.cpp
     )
     target_include_directories(hotpatch_selftest PRIVATE include src ${CMAKE_BINARY_DIR}/generated)

@@ -17,6 +17,8 @@
 // suppress a call.
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -33,10 +35,21 @@ struct WriteRegion {
     const void* start = nullptr;
     std::size_t bytes = 0;
 
+    // Compared as integers. Relational operators on pointers into different
+    // objects are not defined, and these two are exactly that: an address a
+    // thread happened to stop at, and the start of some other range.
     [[nodiscard]] bool contains(const void* address) const noexcept
     {
-        const auto* at = static_cast<const unsigned char*>(address);
-        const auto* from = static_cast<const unsigned char*>(start);
+        if (start == nullptr || bytes == 0) {
+            return false;
+        }
+        const auto at = reinterpret_cast<std::uintptr_t>(address);
+        const auto from = reinterpret_cast<std::uintptr_t>(start);
+        // A range that wraps past the top of the address space describes
+        // nothing real, so it contains nothing.
+        if (from > std::numeric_limits<std::uintptr_t>::max() - bytes) {
+            return false;
+        }
         return at >= from && at < from + bytes;
     }
 };

@@ -3,9 +3,8 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
-#include <thread>
 
-#include <dirent.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/syscall.h>
 #include <ucontext.h>
@@ -14,33 +13,52 @@
 namespace runtime_agent {
 namespace {
 
-// Shared with the signal handler, so everything here is either atomic or only
-// touched while no handler can be running.
-//
-// One arrangement at a time. Two overlapping stops would have handlers reading
-// one set of flags and reporting into another, and a caller wanting that is
-// asking for something this cannot describe.
-std::atomic<bool> arranging{false};
-std::atomic<int> arrivals{0};
-std::atomic<bool> released{true};
+// Everything a handler touches. Lock-free is checked, not assumed: a handler
+// that blocked on a lock inside an atomic would be the deadlock this exists to
+// avoid, written by the compiler.
+static_assert(std::atomic<int>::is_always_lock_free);
+static_assert(std::atomic<unsigned>::is_always_lock_free);
+static_assert(std::atomic<const void*>::is_always_lock_free);
 
-// Where each parked thread stood. Written by the handlers, one slot each, so no
-// two handlers touch the same memory.
 constexpr std::size_t maxParked = 1024;
+
+// Which stop a handler belongs to.
+//
+// A signal sent to a thread that never accepted it stays pending, and arrives
+// whenever that thread next becomes interruptible. That can be long after the
+// stop it belonged to was abandoned. Every handler compares the generation it
+// wakes into against the one it was sent for, so a late arrival counts for
+// nothing and parks nobody.
+std::atomic<unsigned> generation{0};
+std::atomic<unsigned> arrivals{0};
+std::atomic<unsigned> departures{0};
+std::atomic<bool> released{true};
+std::atomic<bool> arranging{false};
+
+// One slot per parked thread, written by that thread alone.
 std::atomic<const void*> parkedAt[maxParked];
 std::atomic<int> parkedTid[maxParked];
-std::atomic<std::size_t> nextSlot{0};
+std::atomic<unsigned> nextSlot{0};
 
-int gettid() noexcept
+int currentTid() noexcept
 {
     return static_cast<int>(::syscall(SYS_gettid));
 }
 
-// Runs on a thread doing arbitrary work, so it allocates nothing, locks
-// nothing, and calls nothing that might.
-void parkHandler(int, siginfo_t*, void* contextPointer)
+// Runs on a thread doing arbitrary work. It allocates nothing, takes no lock,
+// and calls nothing that might do either. Even yielding is done by a direct
+// system call: std::this_thread::yield is not promised to be safe here.
+void parkHandler(int signalNumber, siginfo_t* info, void* contextPointer)
 {
-    if (!arranging.load(std::memory_order_acquire)) {
+    // Whose stop this is. si_value carries it, set when the signal was queued.
+    const unsigned mine = info != nullptr
+        ? static_cast<unsigned>(info->si_value.sival_int)
+        : 0U;
+    if (!arranging.load(std::memory_order_acquire)
+        || mine != generation.load(std::memory_order_acquire)) {
+        // A signal left over from a stop that has finished. Its sender is gone
+        // and nobody is counting it.
+        (void)signalNumber;
         return;
     }
 
@@ -52,19 +70,97 @@ void parkHandler(int, siginfo_t*, void* contextPointer)
 #endif
     }
 
-    const std::size_t slot = nextSlot.fetch_add(1, std::memory_order_relaxed);
+    const unsigned slot = nextSlot.fetch_add(1, std::memory_order_relaxed);
     if (slot < maxParked) {
         parkedAt[slot].store(at, std::memory_order_relaxed);
-        parkedTid[slot].store(gettid(), std::memory_order_relaxed);
+        parkedTid[slot].store(currentTid(), std::memory_order_relaxed);
     }
 
     arrivals.fetch_add(1, std::memory_order_release);
 
-    // Parked until the write is done. Spinning and not waiting on anything,
-    // because every way of waiting properly takes a lock this must not take.
     while (!released.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
+        (void)::syscall(SYS_sched_yield);
     }
+
+    // Counted on the way out as well as in. A handler still returning is still
+    // inside this stop, and the next one must not begin underneath it.
+    departures.fetch_add(1, std::memory_order_release);
+}
+
+// The thread ids this process has, read into storage the caller already owns.
+//
+// Read with system calls only, because this runs while other threads are
+// parked and one of them may be holding the allocator's lock or the loader's.
+// opendir and readdir take both.
+bool readThreadIds(int* into, std::size_t capacity, std::size_t& count, int& failure) noexcept
+{
+    count = 0;
+    failure = 0;
+    const int directory = static_cast<int>(
+        ::syscall(SYS_open, "/proc/self/task", O_RDONLY | O_DIRECTORY, 0));
+    if (directory < 0) {
+        failure = errno;
+        return false;
+    }
+
+    // getdents64's own record layout, which is stable and documented.
+    struct LinuxDirent64 {
+        std::uint64_t inode;
+        std::int64_t offset;
+        unsigned short recordLength;
+        unsigned char type;
+        char name[1];
+    };
+
+    alignas(8) char buffer[8192];
+    bool ok = true;
+    for (;;) {
+        const long got = ::syscall(SYS_getdents64, directory, buffer, sizeof(buffer));
+        if (got < 0) {
+            failure = errno;
+            ok = false;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        for (long offset = 0; offset < got;) {
+            auto* entry = reinterpret_cast<LinuxDirent64*>(buffer + offset);
+            offset += entry->recordLength;
+            if (entry->name[0] == '.') {
+                continue;
+            }
+            int value = 0;
+            for (const char* digit = entry->name; *digit >= '0' && *digit <= '9'; ++digit) {
+                value = value * 10 + (*digit - '0');
+            }
+            if (count < capacity) {
+                into[count] = value;
+            }
+            ++count;
+        }
+    }
+    (void)::syscall(SYS_close, directory);
+    return ok && count <= capacity;
+}
+
+bool sameThreads(const int* a, std::size_t aCount, const int* b, std::size_t bCount) noexcept
+{
+    if (aCount != bCount) {
+        return false;
+    }
+    // Membership, not order: the kernel lists them in whatever order it likes,
+    // and one thread exiting while another starts keeps the count identical.
+    for (std::size_t i = 0; i < aCount; ++i) {
+        bool found = false;
+        for (std::size_t j = 0; j < bCount && !found; ++j) {
+            found = a[i] == b[j];
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
 }
 
 class ParkedLease final : public QuiescenceLease {
@@ -72,35 +168,32 @@ public:
     ~ParkedLease() override
     {
         released.store(true, std::memory_order_release);
-        arranging.store(false, std::memory_order_release);
-        if (m_restore) {
-            (void)::sigaction(m_signal, &m_previous, nullptr);
+
+        // Every handler has to be out before the next stop may begin. One still
+        // returning would otherwise be caught by the next generation clearing
+        // released, and park in a stop nobody sent it to.
+        while (departures.load(std::memory_order_acquire) < m_expected) {
+            (void)::syscall(SYS_sched_yield);
         }
+        arranging.store(false, std::memory_order_release);
     }
 
-    int m_signal = 0;
-    struct sigaction m_previous {};
-    bool m_restore = false;
+    unsigned m_expected = 0;
 };
 
 } // namespace
 
 bool currentThreadIds(std::vector<int>& tids, std::string& error)
 {
-    tids.clear();
-    DIR* directory = ::opendir("/proc/self/task");
-    if (directory == nullptr) {
+    int storage[maxParked + 1];
+    std::size_t count = 0;
+    int failure = 0;
+    if (!readThreadIds(storage, maxParked + 1, count, failure)) {
         error = std::string("could not read this process's thread list: ")
-            + std::strerror(errno);
+            + std::strerror(failure);
         return false;
     }
-    while (const dirent* entry = ::readdir(directory)) {
-        if (entry->d_name[0] == '.') {
-            continue;
-        }
-        tids.push_back(std::atoi(entry->d_name));
-    }
-    (void)::closedir(directory);
+    tids.assign(storage, storage + count);
     return true;
 }
 
@@ -128,6 +221,37 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         return nullptr;
     }
 
+    // The handler stays installed for the life of the process, so a signal that
+    // arrives after this stop is abandoned finds a handler that recognises it
+    // as late and returns. Restoring the old disposition while a signal may
+    // still be pending would let the default action run, and for a real-time
+    // signal the default action ends the process.
+    static std::atomic<bool> handlerInstalled{false};
+    if (!handlerInstalled.load(std::memory_order_acquire)) {
+        struct sigaction parking {};
+        parking.sa_sigaction = &parkHandler;
+        parking.sa_flags = SA_SIGINFO | SA_RESTART;
+        ::sigfillset(&parking.sa_mask);
+        if (::sigaction(m_signal, &parking, nullptr) != 0) {
+            const int failure = errno;
+            arranging.store(false, std::memory_order_release);
+            error = std::string("could not install the parking handler: ")
+                + std::strerror(failure);
+            return nullptr;
+        }
+        handlerInstalled.store(true, std::memory_order_release);
+    }
+
+    // Everything the stopped phase needs, allocated before anything stops. A
+    // parked thread may hold the allocator's lock, so allocating after that is
+    // a deadlock waiting for a thread that is waiting for this one.
+    m_parked.reserve(maxParked);
+    int before[maxParked + 1];
+    int after[maxParked + 1];
+    std::size_t beforeCount = 0;
+    std::size_t afterCount = 0;
+    int failure = 0;
+
     auto giveUp = [&](std::string why) -> std::unique_ptr<QuiescenceLease> {
         released.store(true, std::memory_order_release);
         arranging.store(false, std::memory_order_release);
@@ -135,86 +259,95 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         return nullptr;
     };
 
-    std::vector<int> before;
-    if (!currentThreadIds(before, error)) {
-        return giveUp(error);
+    if (!readThreadIds(before, maxParked + 1, beforeCount, failure)) {
+        return giveUp(std::string("could not read this process's thread list: ")
+                      + std::strerror(failure));
     }
 
-    const int self = gettid();
-    std::size_t others = 0;
-    for (const int tid : before) {
-        if (tid != self) {
+    const int self = currentTid();
+    unsigned others = 0;
+    for (std::size_t i = 0; i < beforeCount; ++i) {
+        if (before[i] != self) {
             ++others;
         }
     }
-    if (others >= maxParked) {
+    if (beforeCount > maxParked) {
         return giveUp("this process has more threads than this policy can account for");
     }
 
+    const unsigned mine = generation.fetch_add(1, std::memory_order_acq_rel) + 1;
     arrivals.store(0, std::memory_order_relaxed);
+    departures.store(0, std::memory_order_relaxed);
     nextSlot.store(0, std::memory_order_relaxed);
     released.store(false, std::memory_order_release);
 
-    struct sigaction parking {};
-    parking.sa_sigaction = &parkHandler;
-    parking.sa_flags = SA_SIGINFO | SA_RESTART;
-    ::sigfillset(&parking.sa_mask);
-    struct sigaction previous {};
-    if (::sigaction(m_signal, &parking, &previous) != 0) {
-        return giveUp(std::string("could not install the parking handler: ")
-                      + std::strerror(errno));
-    }
-
     auto lease = std::make_unique<ParkedLease>();
-    lease->m_signal = m_signal;
-    lease->m_previous = previous;
-    lease->m_restore = true;
+    lease->m_expected = others;
 
     const int pid = ::getpid();
-    for (const int tid : before) {
-        if (tid == self) {
+    // The whole structure, because that is what the system call takes. si_code
+    // has to say the signal was queued by a process, or the kernel refuses it.
+    siginfo_t carried{};
+    carried.si_signo = m_signal;
+    carried.si_code = SI_QUEUE;
+    carried.si_pid = pid;
+    carried.si_uid = static_cast<uid_t>(::getuid());
+    carried.si_value.sival_int = static_cast<int>(mine);
+    for (std::size_t i = 0; i < beforeCount; ++i) {
+        if (before[i] == self) {
             continue;
         }
-        if (::syscall(SYS_tgkill, pid, tid, m_signal) != 0 && errno != ESRCH) {
-            return giveUp("could not signal thread " + std::to_string(tid) + ": "
-                          + std::strerror(errno));
+        // Queued with the generation, so a handler can tell a signal meant for
+        // this stop from one left over.
+        if (::syscall(SYS_rt_tgsigqueueinfo, pid, before[i], m_signal, &carried) != 0) {
+            if (errno == ESRCH) {
+                continue;
+            }
+            return giveUp("could not signal a thread");
         }
     }
 
     const auto until = std::chrono::steady_clock::now() + m_deadline;
-    while (static_cast<std::size_t>(arrivals.load(std::memory_order_acquire)) < others) {
+    while (arrivals.load(std::memory_order_acquire) < others) {
         if (std::chrono::steady_clock::now() >= until) {
-            return giveUp("only " + std::to_string(arrivals.load(std::memory_order_relaxed))
-                          + " of " + std::to_string(others)
-                          + " other threads stopped before the deadline. A thread inside a "
-                            "blocking call arrives when the call returns, and one that never "
-                            "returns never arrives");
+            // The lease releases whoever did arrive and waits for them to
+            // leave, so the abandoned stop does not overlap the next one.
+            lease->m_expected = arrivals.load(std::memory_order_acquire);
+            lease.reset();
+            error = "not every thread stopped before the deadline. A thread inside a "
+                    "blocking call arrives when the call returns, and one that never "
+                    "returns never arrives";
+            return nullptr;
         }
-        std::this_thread::yield();
+        (void)::syscall(SYS_sched_yield);
     }
 
-    // Asked again, because a thread created while this was arranging itself was
-    // never signalled and is running now.
-    std::vector<int> after;
-    if (!currentThreadIds(after, error)) {
-        return giveUp(error);
+    if (!readThreadIds(after, maxParked + 1, afterCount, failure)) {
+        lease.reset();
+        return giveUp(std::string("could not read this process's thread list: ")
+                      + std::strerror(failure));
     }
-    if (after.size() != before.size()) {
-        return giveUp("the thread list changed while this was stopping them, so at least one "
-                      "thread was never asked where it stands");
+    if (!sameThreads(before, beforeCount, after, afterCount)) {
+        lease.reset();
+        return giveUp("the threads changed while this was stopping them, so at least one "
+                      "was never asked where it stands");
     }
 
-    const std::size_t recorded =
-        std::min(nextSlot.load(std::memory_order_relaxed), maxParked);
-    m_parked.reserve(recorded);
-    for (std::size_t i = 0; i < recorded; ++i) {
+    const unsigned recorded = nextSlot.load(std::memory_order_relaxed);
+    if (recorded != others) {
+        lease.reset();
+        return giveUp("a different number of threads reported in than were asked");
+    }
+    for (unsigned i = 0; i < recorded; ++i) {
         m_parked.push_back(ParkedThread{parkedTid[i].load(std::memory_order_relaxed),
                                         parkedAt[i].load(std::memory_order_relaxed)});
     }
 
     for (const ParkedThread& thread : m_parked) {
         if (region.contains(thread.instructionPointer)) {
-            return giveUp("thread " + std::to_string(thread.tid)
+            const int standing = thread.tid;
+            lease.reset();
+            return giveUp("thread " + std::to_string(standing)
                           + " is standing inside the bytes about to change, so writing them "
                             "would change the instruction it is about to execute");
         }
