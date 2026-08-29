@@ -99,7 +99,18 @@ bool PatchManager::installGateway(const PatchSite& site,
 
     if (!stillAcceptsGateway) {
         // Asked again now that everything is running, for the reason.
-        (void)siteAcceptsGateway(site, error);
+        //
+        // The two forms ask the same questions in the same order, so this
+        // normally fills in why. It can still come back saying the site is fine:
+        // the threads are running again by now, and whatever made the site
+        // unacceptable can have been undone in between. Refusing with an empty
+        // error would leave a caller with a failure and nothing to print, so
+        // that case says what happened instead.
+        if (siteAcceptsGateway(site, error)) {
+            error = "the prepared area was not usable at the moment the write would have "
+                    "happened, and it is usable again now, so nothing was written and there "
+                    "is no lasting reason to report";
+        }
         return false;
     }
 

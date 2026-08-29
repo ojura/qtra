@@ -76,6 +76,56 @@ CubeStepOutput replacementStep(const CubeStepInput* input) noexcept
     return output;
 }
 
+// A policy that makes the site unusable for exactly as long as it holds
+// execution.
+//
+// Installing checks the site twice: once with everything parked, in the form
+// that answers without allocating, and again afterwards to say why when the
+// first said no. Between those two the lease is released, so the site can
+// become usable again in between, and then the second check has nothing to
+// report. That is the state this stages, by scribbling on the prepared area
+// while the lease exists and putting it back when the lease goes.
+class BreaksTheSiteWhileParked : public runtime_agent::Quiescer {
+public:
+    class Lease : public runtime_agent::QuiescenceLease {
+    public:
+        explicit Lease(std::uint8_t* const area) : m_area(area)
+        {
+            // Not a NOP, so the site refuses.
+            const std::uint8_t breaking = 0xCCU;
+            (void)runtime_agent::writeText(m_area, &breaking, 1, nullptr);
+        }
+        ~Lease() override
+        {
+            const std::uint8_t nop = 0x90U;
+            (void)runtime_agent::writeText(m_area, &nop, 1, nullptr);
+        }
+
+    private:
+        std::uint8_t* m_area;
+    };
+
+    explicit BreaksTheSiteWhileParked(void* const area)
+        : m_area(static_cast<std::uint8_t*>(area))
+    {
+    }
+
+    std::unique_ptr<runtime_agent::QuiescenceLease> acquire(const runtime_agent::WriteRegion&,
+                                                            std::string& error) override
+    {
+        error.clear();
+        return std::make_unique<Lease>(m_area);
+    }
+
+    [[nodiscard]] const char* name() const noexcept override
+    {
+        return "breaks-the-site-while-parked";
+    }
+
+private:
+    std::uint8_t* m_area;
+};
+
 } // namespace
 
 int main()
@@ -107,6 +157,29 @@ int main()
         "this test is the only thread there is");
 
     std::string error;
+
+    // First, the refusal that has nothing lasting to report.
+    //
+    // This runs before the install below because it writes nothing: the site is
+    // usable again by the time it returns, and the entry is as the compiler left
+    // it, which is what the rest of this needs.
+    {
+        BreaksTheSiteWhileParked awkward(site.patchAddress);
+        const runtime_agent::LiveTextWriteAdmission staged(
+            runtime_agent::WriteAdmissionBasis::AlreadyQuiescent,
+            awkward.name(),
+            site.name.empty() ? std::string("cube_step_builtin") : site.name,
+            "this test is the only thread there is");
+        std::string staging;
+        check(!faulted.installGateway(site, staged, awkward, staging),
+              "a site that stops being usable only while parked is refused");
+        check(!staging.empty(), "and the refusal says something rather than nothing");
+        check(staging.find("usable again now") != std::string::npos,
+              staging.empty() ? "and says the reason did not last" : staging.c_str());
+        check(runtime_agent::siteAcceptsGateway(site),
+              "with the prepared area left as it was found");
+    }
+
     check(faulted.installGateway(site, admission, quiet, error),
           error.empty() ? "the install reports success, because the gateway is complete"
                         : error.c_str());
