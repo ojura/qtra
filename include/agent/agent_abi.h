@@ -27,7 +27,7 @@ extern "C" {
 // This is a prototype under active development: there is no compatibility path
 // and none is wanted. A refused load fails where the caller can see it, and a
 // mismatched one fails somewhere inside the process.
-inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0005'0000u;
+inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0006'0000u;
 
 // RUNTIME_AGENT_ABI covers this interface. It says nothing about the
 // application's own types, which a module compiled with -fno-access-control
@@ -79,6 +79,17 @@ enum RuntimeAgentLogLevel : std::int32_t {
 // a wrong effect is not the same as consenting to a write nobody established
 // was safe.
 inline constexpr std::uint32_t RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE = 1u << 0;
+
+// Named results keep providers and modules from assigning meaning by matching an
+// error message. Bind and unbind use separate names because -1 and -2 describe
+// different facts for the two operations.
+inline constexpr std::int32_t RUNTIME_AGENT_PATCH_OK = 0;
+inline constexpr std::int32_t RUNTIME_AGENT_PATCH_BIND_TARGET_UNPATCHABLE = -1;
+inline constexpr std::int32_t RUNTIME_AGENT_PATCH_BIND_REPLACEMENT_UNREACHABLE = -2;
+inline constexpr std::int32_t RUNTIME_AGENT_PATCH_BIND_REFUSED = -3;
+inline constexpr std::int32_t RUNTIME_AGENT_PATCH_UNBIND_NOT_LIVE = -1;
+inline constexpr std::int32_t RUNTIME_AGENT_PATCH_UNBIND_WRONG_OWNER = -2;
+inline constexpr std::int32_t RUNTIME_AGENT_PATCH_UNBIND_REFUSED = -3;
 
 // What a module gets back when it binds a replacement.
 struct RuntimeAgentPatchBinding {
@@ -225,10 +236,11 @@ struct RuntimeAgentHost {
     // else, because doing that work on the wrong thread fails as a race rather
     // than as an error.
     //
-    // Returns 0 on success, filling *out. Negative on failure: -1 for a target
-    // that cannot be patched, -2 for a replacement the target cannot reach, and
-    // -3 when the host refused for a reason of its own, including being called
-    // from the wrong thread.
+    // Returns RUNTIME_AGENT_PATCH_OK on success, filling *out.
+    // RUNTIME_AGENT_PATCH_BIND_TARGET_UNPATCHABLE means the target cannot be
+    // patched, RUNTIME_AGENT_PATCH_BIND_REPLACEMENT_UNREACHABLE means its gateway
+    // cannot reach the replacement, and RUNTIME_AGENT_PATCH_BIND_REFUSED means
+    // the host refused for another reason, including the calling thread.
     // flags is zero or RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE. Zero means the
     // host answers to whatever its build recorded about this target, the same
     // way a request over the socket does, so a module cannot reach a write the
@@ -239,8 +251,11 @@ struct RuntimeAgentHost {
                                std::uint32_t flags,
                                RuntimeAgentPatchBinding* out);
 
-    // Returns 0 on success, -1 for an unknown binding, and -2 for one belonging
-    // to another module.
+    // Returns RUNTIME_AGENT_PATCH_OK on success.
+    // RUNTIME_AGENT_PATCH_UNBIND_NOT_LIVE means the id is unknown or was already
+    // released, RUNTIME_AGENT_PATCH_UNBIND_WRONG_OWNER means another module owns
+    // it, and RUNTIME_AGENT_PATCH_UNBIND_REFUSED means the host could not finish
+    // the release, including a wrong-thread call or a failed publication.
     std::int32_t (*patch_unbind)(void* agent_context, std::uint64_t binding_id);
 };
 

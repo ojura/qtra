@@ -49,6 +49,12 @@ struct PatchBinding {
     void* previous = nullptr;
 };
 
+enum class PatchUnbindResult {
+    Released,
+    NotLive,
+    WrongOwner,
+};
+
 struct PatchStatus {
     PatchState state = PatchState::NoGateway;
     std::optional<PatchSite> site;
@@ -162,6 +168,12 @@ public:
     // is not the selected one leaves the slot alone, and one that is selects the
     // nearest predecessor still live. Without that, an old module letting go
     // would overwrite a replacement chosen after it.
+    [[nodiscard]] PatchUnbindResult unbindWithResult(std::uint64_t id,
+                                                     std::uint64_t owner,
+                                                     std::string& error);
+
+    // Convenience for callers that only distinguish success from failure. The
+    // adapter uses unbindWithResult so ABI results do not depend on error prose.
     [[nodiscard]] bool unbind(std::uint64_t id, std::uint64_t owner, std::string& error);
 
     [[nodiscard]] PatchStatus status() const;

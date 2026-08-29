@@ -14,7 +14,6 @@
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QJsonValue>
-#include <QLocalSocket>
 #include <QString>
 
 #include <cstdint>
@@ -75,7 +74,7 @@ bool registerCubeProtocol(RuntimeAgent& agent, MainWindow& window, ModuleManager
                              target, replacement, owner,
                              (flags & RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE) != 0,
                              binding, error);
-                         if (result == 0) {
+                         if (result == RUNTIME_AGENT_PATCH_OK) {
                              out.id = binding.id;
                              out.original = binding.original;
                              out.previous = binding.previous;
@@ -89,54 +88,54 @@ bool registerCubeProtocol(RuntimeAgent& agent, MainWindow& window, ModuleManager
                      })
         && registered;
 
-    add("cube.state", {}, [&agent, &cube](QLocalSocket* socket,
+    add("cube.state", {}, [&agent, &cube](RuntimeAgent::Client client,
                                           const QJsonValue& requestId,
                                           const QJsonObject&) {
-        agent.sendSuccess(socket, requestId, cubeState(cube));
+        agent.sendSuccess(client, requestId, cubeState(cube));
     });
 
-    add("cube.pause", {}, [&agent, &cube](QLocalSocket* socket,
+    add("cube.pause", {}, [&agent, &cube](RuntimeAgent::Client client,
                                           const QJsonValue& requestId,
                                           const QJsonObject&) {
         cube.setRunning(false);
-        agent.sendSuccess(socket, requestId, cubeState(cube));
+        agent.sendSuccess(client, requestId, cubeState(cube));
     });
 
-    add("cube.resume", {}, [&agent, &cube](QLocalSocket* socket,
+    add("cube.resume", {}, [&agent, &cube](RuntimeAgent::Client client,
                                            const QJsonValue& requestId,
                                            const QJsonObject&) {
         cube.setRunning(true);
-        agent.sendSuccess(socket, requestId, cubeState(cube));
+        agent.sendSuccess(client, requestId, cubeState(cube));
     });
 
-    add("cube.reset", {}, [&agent, &cube](QLocalSocket* socket,
+    add("cube.reset", {}, [&agent, &cube](RuntimeAgent::Client client,
                                           const QJsonValue& requestId,
                                           const QJsonObject&) {
         cube.resetCube();
-        agent.sendSuccess(socket, requestId, cubeState(cube));
+        agent.sendSuccess(client, requestId, cubeState(cube));
     });
 
-    add("cube.speed", {"degreesPerSecond"}, [&agent, &cube](QLocalSocket* socket,
+    add("cube.speed", {"degreesPerSecond"}, [&agent, &cube](RuntimeAgent::Client client,
                                                             const QJsonValue& requestId,
                                                             const QJsonObject& parameters) {
         if (!parameters.contains(QStringLiteral("degreesPerSecond"))) {
-            agent.sendError(socket, requestId, QStringLiteral("missing_parameter"),
+            agent.sendError(client, requestId, QStringLiteral("missing_parameter"),
                             QStringLiteral("degreesPerSecond is required"));
             return;
         }
         cube.setAngularVelocity(
             static_cast<float>(parameters.value(QStringLiteral("degreesPerSecond")).toDouble()));
-        agent.sendSuccess(socket, requestId, cubeState(cube));
+        agent.sendSuccess(client, requestId, cubeState(cube));
     });
 
-    add("cube.wireframe", {"enabled"}, [&agent, &cube](QLocalSocket* socket,
+    add("cube.wireframe", {"enabled"}, [&agent, &cube](RuntimeAgent::Client client,
                                                        const QJsonValue& requestId,
                                                        const QJsonObject& parameters) {
         cube.setWireframe(parameters.value(QStringLiteral("enabled")).toBool());
-        agent.sendSuccess(socket, requestId, cubeState(cube));
+        agent.sendSuccess(client, requestId, cubeState(cube));
     });
 
-    add("cube.capture", {"path"}, [&agent, &cube](QLocalSocket* socket,
+    add("cube.capture", {"path"}, [&agent, &cube](RuntimeAgent::Client client,
                                                   const QJsonValue& requestId,
                                                   const QJsonObject& parameters) {
         QString path = parameters.value(QStringLiteral("path")).toString();
@@ -152,7 +151,7 @@ bool registerCubeProtocol(RuntimeAgent& agent, MainWindow& window, ModuleManager
         path = QFileInfo(path).absoluteFilePath();
         QString error;
         if (!cube.captureFramebuffer(path, &error)) {
-            agent.sendError(socket, requestId, QStringLiteral("capture_failed"), error);
+            agent.sendError(client, requestId, QStringLiteral("capture_failed"), error);
             return;
         }
         QFile file(path);
@@ -166,17 +165,17 @@ bool registerCubeProtocol(RuntimeAgent& agent, MainWindow& window, ModuleManager
             {QStringLiteral("sha256"), QString::fromLatin1(digest)},
         };
         agent.publishEvent(QStringLiteral("cube.capture.finished"), result);
-        agent.sendSuccess(socket, requestId, result);
+        agent.sendSuccess(client, requestId, result);
     });
 
-    add("patch.load", {"path"}, [&agent, &modules](QLocalSocket* socket,
+    add("patch.load", {"path"}, [&agent, &modules](RuntimeAgent::Client client,
                                                    const QJsonValue& requestId,
                                                    const QJsonObject& parameters) {
         QString error;
         ModuleManager::LoadedModule* module = modules.loadEntryPatch(
             parameters.value(QStringLiteral("path")).toString(), error);
         if (module == nullptr) {
-            agent.sendError(socket, requestId, QStringLiteral("load_failed"), error);
+            agent.sendError(client, requestId, QStringLiteral("load_failed"), error);
             return;
         }
         const QJsonObject result{
@@ -185,17 +184,17 @@ bool registerCubeProtocol(RuntimeAgent& agent, MainWindow& window, ModuleManager
             {QStringLiteral("path"), module->path},
         };
         agent.publishEvent(QStringLiteral("patch.loaded"), result);
-        agent.sendSuccess(socket, requestId, result);
+        agent.sendSuccess(client, requestId, result);
     });
 
     add("patch.activate", {"moduleId", "acceptIncompleteCoverage"},
-        [&agent, &modules](QLocalSocket* socket,
+        [&agent, &modules](RuntimeAgent::Client client,
                           const QJsonValue& requestId,
                           const QJsonObject& parameters) {
             quint64 moduleId = 0;
             if (!RuntimeAgent::parseUnsignedInteger(
                     parameters.value(QStringLiteral("moduleId")), moduleId)) {
-                agent.sendError(socket, requestId, QStringLiteral("invalid_module_id"),
+                agent.sendError(client, requestId, QStringLiteral("invalid_module_id"),
                                 QStringLiteral("moduleId must be an unsigned integer"));
                 return;
             }
@@ -204,31 +203,31 @@ bool registerCubeProtocol(RuntimeAgent& agent, MainWindow& window, ModuleManager
                 .toBool(false);
             QString error;
             if (!modules.activateEntryPatch(moduleId, acceptIncomplete, error)) {
-                agent.sendError(socket, requestId, QStringLiteral("patch_failed"), error);
+                agent.sendError(client, requestId, QStringLiteral("patch_failed"), error);
                 return;
             }
             const QJsonObject result = modules.patchStatus();
             agent.publishEvent(QStringLiteral("patch.activated"), result);
-            agent.sendSuccess(socket, requestId, result);
+            agent.sendSuccess(client, requestId, result);
         });
 
-    add("patch.rollback", {}, [&agent, &modules](QLocalSocket* socket,
+    add("patch.rollback", {}, [&agent, &modules](RuntimeAgent::Client client,
                                                  const QJsonValue& requestId,
                                                  const QJsonObject&) {
         QString error;
         if (!modules.rollback(error)) {
-            agent.sendError(socket, requestId, QStringLiteral("rollback_failed"), error);
+            agent.sendError(client, requestId, QStringLiteral("rollback_failed"), error);
             return;
         }
         const QJsonObject result = modules.patchStatus();
         agent.publishEvent(QStringLiteral("patch.rolledBack"), result);
-        agent.sendSuccess(socket, requestId, result);
+        agent.sendSuccess(client, requestId, result);
     });
 
-    add("patch.status", {}, [&agent, &modules](QLocalSocket* socket,
+    add("patch.status", {}, [&agent, &modules](RuntimeAgent::Client client,
                                                const QJsonValue& requestId,
                                                const QJsonObject&) {
-        agent.sendSuccess(socket, requestId, modules.patchStatus());
+        agent.sendSuccess(client, requestId, modules.patchStatus());
     });
 
     // A snippet asking for the render executor runs with the widget's context

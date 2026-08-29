@@ -89,11 +89,10 @@ public:
         bool hadAttemptedRun = false;
 
         // The host build this module reports having been compiled against, and
-        // whether it reported one at all. A module that reports a different
-        // build never gets this far, so a stamped module here agrees with the
-        // running executable. An unstamped one was built without the define the
-        // build supplies, and nothing about its offsets into application types
-        // has been checked.
+        // whether that value was actually compared with this process. A module
+        // reporting a different non-empty build never gets this far. Stamped is
+        // false when either side reports no build id, because no agreement was
+        // established in that case.
         QString targetBuildId;
         bool stamped = false;
 
@@ -129,17 +128,24 @@ public:
     [[nodiscard]] LoadedModule* loadSnippet(const QString& path, QString& error);
 
     // Opens a module and checks it was built against the running host, leaving
-    // what its descriptor means to the caller.
+    // what its descriptor means to the caller. buildId is what the module
+    // reported; stamped is true only when that value was compared with a
+    // non-empty host id and matched.
     //
     // On success the handle belongs to the caller until it either adopts a
     // module holding it or gives it back through closeUnadopted. A caller that
     // resolves no usable descriptor must do the latter, because a handle
     // nothing refers to is the one case where closing is right.
-    [[nodiscard]] void* open(const QString& path, QString& buildId, QString& error);
+    [[nodiscard]] void* open(const QString& path,
+                             QString& buildId,
+                             bool& stamped,
+                             QString& error);
     static void closeUnadopted(void* handle);
 
-    // Takes ownership of a module the caller has finished describing, giving it
-    // an id no other module in this process will have.
+    // Takes ownership of a module the caller has finished describing. If the
+    // dynamic loader returned a handle already registered here, balances the
+    // extra loader reference and returns that existing record instead of minting
+    // a second identity for one module instance.
     [[nodiscard]] LoadedModule* adopt(std::unique_ptr<LoadedModule> module);
 
     // An id nothing reuses for the life of the process. A binding outlives the
@@ -150,12 +156,14 @@ public:
     [[nodiscard]] static quint64 nextId();
 
     [[nodiscard]] LoadedModule* module(quint64 id) const;
+    [[nodiscard]] LoadedModule* moduleForHandle(void* handle) const;
     [[nodiscard]] QJsonArray list() const;
 
     [[nodiscard]] static QJsonObject describe(const LoadedModule& module);
 
 private:
     std::unordered_map<quint64, std::unique_ptr<LoadedModule>> m_modules;
+    std::unordered_map<void*, LoadedModule*> m_modulesByHandle;
 };
 
 } // namespace runtime_agent

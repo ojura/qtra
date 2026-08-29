@@ -38,8 +38,12 @@ QString pointerString(const void* pointer)
 // A module that reports nothing is accepted. The host cannot tell one built
 // outside this build system from a stale one, and refusing both would rule out
 // toolchains without answering the question, so the caller reports it instead.
-bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
+bool targetBuildMatches(void* handle,
+                        QString& moduleBuildId,
+                        bool& stamped,
+                        QString& error)
 {
+    stamped = false;
     ::dlerror();
     auto reportBuildId = reinterpret_cast<const char* (*)()>(
         ::dlsym(handle, "runtime_agent_target_build_id"));
@@ -52,7 +56,11 @@ bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
     moduleBuildId = reported != nullptr ? QString::fromLatin1(reported) : QString();
 
     const QString host = hostBuildId();
-    if (host.isEmpty() || moduleBuildId.isEmpty() || moduleBuildId == host) {
+    if (host.isEmpty() || moduleBuildId.isEmpty()) {
+        return true;
+    }
+    if (moduleBuildId == host) {
+        stamped = true;
         return true;
     }
 
@@ -89,7 +97,10 @@ void ModuleRegistry::closeUnadopted(void* const handle)
     }
 }
 
-void* ModuleRegistry::open(const QString& path, QString& buildId, QString& error)
+void* ModuleRegistry::open(const QString& path,
+                           QString& buildId,
+                           bool& stamped,
+                           QString& error)
 {
     const QString absolutePath = QFileInfo(path).absoluteFilePath();
     if (path.isEmpty() || !QFileInfo(absolutePath).isFile()) {
@@ -104,39 +115,68 @@ void* ModuleRegistry::open(const QString& path, QString& buildId, QString& error
         error = dynamicLoaderError(QStringLiteral("dlopen(%1) failed").arg(absolutePath));
         return nullptr;
     }
+    if (LoadedModule* existing = moduleForHandle(handle); existing != nullptr) {
+        buildId = existing->targetBuildId;
+        stamped = existing->stamped;
+        return handle;
+    }
 
     // Checked before any descriptor, because a module whose offsets do not
     // describe this process should be refused on that ground and told so.
-    if (!targetBuildMatches(handle, buildId, error)) {
+    if (!targetBuildMatches(handle, buildId, stamped, error)) {
         closeUnadopted(handle);
         return nullptr;
     }
 
-    // Said here, so every kind of module gets the same warning. Only the
-    // snippet loader used to say it, so a cube patch built without the define
-    // loaded in silence while a snippet said so, and the two cube patch
-    // targets are in fact not stamped.
-    if (buildId.isEmpty()) {
-        qWarning().noquote()
-            << "runtime-agent: loaded unstamped module" << absolutePath
-            << "which reports no host build id, so its offsets into application types are"
-            << "unchecked against this process";
+    // Said here, so every kind of module receives the same diagnosis.
+    if (!stamped) {
+        if (buildId.isEmpty()) {
+            qWarning().noquote()
+                << "runtime-agent: loaded unstamped module" << absolutePath
+                << "which reports no host build id, so its offsets into application types are"
+                << "unchecked against this process";
+        } else {
+            qWarning().noquote()
+                << "runtime-agent: loaded unstamped module" << absolutePath
+                << "which reports host build" << buildId
+                << "because this process reports no build id to compare with it";
+        }
     }
     return handle;
 }
 
 ModuleRegistry::LoadedModule* ModuleRegistry::adopt(std::unique_ptr<LoadedModule> module)
 {
+    Q_ASSERT(module != nullptr);
+    Q_ASSERT(module->handle != nullptr);
+    if (LoadedModule* existing = moduleForHandle(module->handle); existing != nullptr) {
+        closeUnadopted(module->handle);
+        return existing;
+    }
+
     const quint64 id = module->id;
+    LoadedModule* const stored = module.get();
     m_modules.emplace(id, std::move(module));
-    return m_modules.at(id).get();
+    m_modulesByHandle.emplace(stored->handle, stored);
+    return stored;
 }
 
 ModuleRegistry::LoadedModule* ModuleRegistry::loadSnippet(const QString& path, QString& error)
 {
     QString buildId;
-    void* handle = open(path, buildId, error);
+    bool stamped = false;
+    void* handle = open(path, buildId, stamped, error);
     if (handle == nullptr) {
+        return nullptr;
+    }
+    if (LoadedModule* existing = moduleForHandle(handle); existing != nullptr) {
+        closeUnadopted(handle);
+        if (existing->kind == QLatin1String("snippet")) {
+            return existing;
+        }
+        error = QStringLiteral(
+                    "this loaded object is already registered as module %1 of kind %2")
+                    .arg(QString::number(existing->id), existing->kind);
         return nullptr;
     }
 
@@ -170,7 +210,7 @@ ModuleRegistry::LoadedModule* ModuleRegistry::loadSnippet(const QString& path, Q
     module->snippet = descriptor;
     module->descriptor = descriptor;
     module->targetBuildId = buildId;
-    module->stamped = !buildId.isEmpty();
+    module->stamped = stamped;
     return adopt(std::move(module));
 }
 
@@ -178,6 +218,12 @@ ModuleRegistry::LoadedModule* ModuleRegistry::module(const quint64 id) const
 {
     const auto it = m_modules.find(id);
     return it != m_modules.end() ? it->second.get() : nullptr;
+}
+
+ModuleRegistry::LoadedModule* ModuleRegistry::moduleForHandle(void* const handle) const
+{
+    const auto it = m_modulesByHandle.find(handle);
+    return it != m_modulesByHandle.end() ? it->second : nullptr;
 }
 
 QJsonObject ModuleRegistry::describe(const LoadedModule& module)
@@ -196,7 +242,7 @@ QJsonObject ModuleRegistry::describe(const LoadedModule& module)
         {QStringLiteral("hadSuccessfulRun"), module.hadSuccessfulRun},
         {QStringLiteral("hadAttemptedRun"), module.hadAttemptedRun},
     };
-    if (module.stamped) {
+    if (!module.targetBuildId.isEmpty()) {
         json.insert(QStringLiteral("targetBuildId"), module.targetBuildId);
     }
     if (module.hadSuccessfulRun) {

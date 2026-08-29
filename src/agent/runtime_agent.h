@@ -26,7 +26,26 @@ class QLocalSocket;
 class RuntimeAgent final : public QObject {
     Q_OBJECT
 
+    struct CallbackLifetime;
+    class CallbackLease;
+
 public:
+    // A guarded client reference for command handlers. It may be copied into a
+    // delayed callback: replies check both the guarded socket and the agent's
+    // current client table instead of dereferencing a retained raw pointer.
+    class Client final {
+    public:
+        Client() = default;
+
+    private:
+        friend class RuntimeAgent;
+        Client(RuntimeAgent* owner, QLocalSocket* socket);
+
+        RuntimeAgent* m_owner = nullptr;
+        std::shared_ptr<CallbackLifetime> m_lifetime;
+        QPointer<QObject> m_socket;
+    };
+
     explicit RuntimeAgent(QObject* root,
                           QString socketName,
                           QObject* parent = nullptr);
@@ -46,14 +65,15 @@ public:
     // application writes the commands that reach it and connects its own
     // signals to publishEvent.
 
-    using CommandHandler = std::function<void(QLocalSocket* socket,
+    using CommandHandler = std::function<void(Client client,
                                               const QJsonValue& requestId,
                                               const QJsonObject& parameters)>;
 
     // Adds one command. parameters lists every key the handler reads, and a
     // request naming anything else is refused before the handler runs, so the
     // list is what the refusal quotes back. The handler answers with
-    // sendSuccess or sendError, once, and may do it later than it is called.
+    // sendSuccess or sendError, once, and may do it later than it is called. A
+    // copied Client stays safe after disconnect: the reply is simply dropped.
     //
     // Returns false and registers nothing if the name is taken, because a
     // second entry under one name is unreachable and help would list the name
@@ -102,10 +122,10 @@ public:
     [[nodiscard]] static bool parseUnsignedInteger(const QJsonValue& value,
                                                    quint64& result);
 
-    void sendSuccess(QLocalSocket* socket,
+    void sendSuccess(Client client,
                      const QJsonValue& requestId,
                      const QJsonValue& result = {});
-    void sendError(QLocalSocket* socket,
+    void sendError(Client client,
                    const QJsonValue& requestId,
                    const QString& code,
                    const QString& message);
@@ -125,12 +145,12 @@ private:
     enum class SnippetEntry { Run, Release };
 
     struct SnippetInvocation {
-        RuntimeAgent* agent = nullptr;
         quint64 operationId = 0;
         QByteArray requestJson;
         QByteArray resultJson;
         QString error;
         bool completed = false;
+        bool enteredModule = false;
         SnippetEntry entry = SnippetEntry::Run;
         QString executor;
         QPointer<QObject> target;
@@ -145,7 +165,7 @@ private:
     // modules are never unloaded, so retaining the registry entry avoids a
     // second copy of its identity and keeps this pointer valid.
     struct ModuleContext {
-        RuntimeAgent* agent = nullptr;
+        std::shared_ptr<CallbackLifetime> lifetime;
         const LoadedModule* module = nullptr;
     };
 
@@ -155,10 +175,10 @@ private:
 
         // Both stamped by the host, never supplied by the depositor, which is
         // what makes them worth checking. The id is exact provenance: which
-        // load wrote this. The name is identity across generations, because a
-        // reload gives the same source a new id, and a rule keyed on the id
-        // would refuse the successor its predecessor's record, which is the
-        // handover the stash exists to support.
+        // load wrote this. The name is identity across distinct generations of
+        // the same source, which have different loader instances and ids. A rule
+        // keyed on the id would refuse the successor its predecessor's record,
+        // which is the handover the stash exists to support.
         quint64 moduleId = 0;
         QString moduleName;
     };
@@ -172,7 +192,15 @@ private:
                          const QString& command,
                          const QJsonObject& parameters);
 
-    static void sendObject(QLocalSocket* socket, const QJsonObject& object);
+    void sendSuccess(QLocalSocket* socket,
+                     const QJsonValue& requestId,
+                     const QJsonValue& result = {});
+    void sendError(QLocalSocket* socket,
+                   const QJsonValue& requestId,
+                   const QString& code,
+                   const QString& message);
+    void sendObject(Client client, QJsonObject object);
+    void sendObject(QLocalSocket* socket, const QJsonObject& object);
 
     // One entry per command. dispatchRequest looks the name up in m_commands
     // and calls through; nothing else selects on a command name.
@@ -296,6 +324,9 @@ private:
     [[nodiscard]] QJsonValue parseSnippetResult(const QByteArray& json) const;
     [[nodiscard]] bool executorExists(const QString& name) const;
     [[nodiscard]] QString executorChoices() const;
+    [[nodiscard]] static bool parseEventPrefixes(const QJsonValue& value,
+                                                 QStringList& prefixes,
+                                                 QString& error);
     [[nodiscard]] bool clientWantsEvent(const ClientState& state,
                                         const QString& eventName) const;
 
@@ -327,13 +358,18 @@ private:
     static std::int64_t hostStashList(void* agentContext, char* buffer, std::int64_t capacity);
 
     [[nodiscard]] ModuleContext* contextForModule(const LoadedModule* module);
-    [[nodiscard]] static RuntimeAgent* agentOf(void* agentContext);
+    [[nodiscard]] static CallbackLease agentOf(void* agentContext);
     [[nodiscard]] QJsonArray stashEntries() const;
     [[nodiscard]] bool stashDrop(const QString& key);
 
     // Process-lifetime storage for every native module. Descriptor-specific
     // loaders remain in the application layer and adopt their records here.
     runtime_agent::ModuleRegistry& m_modules;
+
+    // Native callbacks and executor work acquire this before using agent-owned
+    // state. Destruction closes it and waits for calls already inside, while work
+    // that starts later receives a defined refusal.
+    std::shared_ptr<CallbackLifetime> m_callbackLifetime;
 
     QString m_socketName;
     QLocalServer m_server;
@@ -352,7 +388,9 @@ private:
     quint64 m_nextOperationId = (quint64{1} << 63);
     bool m_unsafeEnabled = false;
 
-    std::unordered_map<quint64, std::unique_ptr<ModuleContext>> m_moduleContexts;
+    // The pointed-to contexts are allocated once and retained for the process.
+    // This map is only this agent's lookup table and does not own them.
+    std::unordered_map<quint64, ModuleContext*> m_moduleContexts;
 
     // Reachable from any thread, since a module may stash from a worker-thread
     // callback as easily as from the GUI thread.

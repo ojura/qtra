@@ -133,8 +133,19 @@ ModuleManager::~ModuleManager()
 ModuleManager::LoadedModule* ModuleManager::loadEntryPatch(const QString& path, QString& error)
 {
     QString buildId;
-    void* handle = m_registry.open(path, buildId, error);
+    bool stamped = false;
+    void* handle = m_registry.open(path, buildId, stamped, error);
     if (handle == nullptr) {
+        return nullptr;
+    }
+    if (LoadedModule* existing = m_registry.moduleForHandle(handle); existing != nullptr) {
+        runtime_agent::ModuleRegistry::closeUnadopted(handle);
+        if (existing->kind == QLatin1String("cubePatch")) {
+            return existing;
+        }
+        error = QStringLiteral(
+                    "this loaded object is already registered as module %1 of kind %2")
+                    .arg(QString::number(existing->id), existing->kind);
         return nullptr;
     }
 
@@ -166,7 +177,7 @@ ModuleManager::LoadedModule* ModuleManager::loadEntryPatch(const QString& path, 
     module->handle = handle;
     module->descriptor = descriptor;
     module->targetBuildId = buildId;
-    module->stamped = !buildId.isEmpty();
+    module->stamped = stamped;
     return m_registry.adopt(std::move(module));
 }
 
@@ -380,7 +391,7 @@ int ModuleManager::bindReplacement(void* target,
             "patch_bind reaches the target's own widget, so it has to be called from "
             "the thread that owns it. A snippet should bind from the executor its "
             "target runs on");
-        return -3;
+        return RUNTIME_AGENT_PATCH_BIND_REFUSED;
     }
 
     if (target != reinterpret_cast<void*>(&cube_step_builtin)) {
@@ -390,7 +401,7 @@ int ModuleManager::bindReplacement(void* target,
             "function's prepared area and to stop whatever might be running it")
             .arg(QStringLiteral("0x%1").arg(
                 reinterpret_cast<quintptr>(&cube_step_builtin), 0, 16));
-        return -1;
+        return RUNTIME_AGENT_PATCH_BIND_TARGET_UNPATCHABLE;
     }
 
     // The same admission the protocol answers to. Without this a module reaches
@@ -398,7 +409,7 @@ int ModuleManager::bindReplacement(void* target,
     // decision only binds whoever happened to ask the other way.
     runtime_agent::CoverageDecision decision;
     if (!admits(acceptIncompleteCoverage, decision, error)) {
-        return -1;
+        return RUNTIME_AGENT_PATCH_BIND_REFUSED;
     }
 
     runtime_agent::PatchSite site;
@@ -410,7 +421,7 @@ int ModuleManager::bindReplacement(void* target,
                                                 site,
                                                 nativeError)) {
         error = QString::fromStdString(nativeError);
-        return -1;
+        return RUNTIME_AGENT_PATCH_BIND_TARGET_UNPATCHABLE;
     } else {
         site.name = QStringLiteral("cube_step_builtin").toStdString();
     }
@@ -423,20 +434,20 @@ int ModuleManager::bindReplacement(void* target,
     // the one the jump is taken from.
     if (!runtime_agent::replacementIsReachable(site, replacement, nativeError)) {
         error = QString::fromStdString(nativeError);
-        return -1;
+        return RUNTIME_AGENT_PATCH_BIND_REPLACEMENT_UNREACHABLE;
     }
 
     SameThreadRequestBoundary quiescer(m_cube);
     if (!installIfNeeded(site, decision, quiescer, nativeError)) {
         error = QString::fromStdString(nativeError);
-        return -2;
+        return RUNTIME_AGENT_PATCH_BIND_REFUSED;
     }
     if (!m_patches.bind(replacement, owner, binding, nativeError)) {
         error = QString::fromStdString(nativeError);
-        return -2;
+        return RUNTIME_AGENT_PATCH_BIND_REFUSED;
     }
     refreshLabel();
-    return 0;
+    return RUNTIME_AGENT_PATCH_OK;
 }
 
 int ModuleManager::releaseBinding(const std::uint64_t bindingId,
@@ -449,16 +460,20 @@ int ModuleManager::releaseBinding(const std::uint64_t bindingId,
         error = QStringLiteral(
             "patch_unbind reaches the target's own widget, so it has to be called from "
             "the thread that owns it");
-        return -3;
+        return RUNTIME_AGENT_PATCH_UNBIND_REFUSED;
     }
 
     std::string nativeError;
-    if (!m_patches.unbind(bindingId, owner, nativeError)) {
+    const runtime_agent::PatchUnbindResult result =
+        m_patches.unbindWithResult(bindingId, owner, nativeError);
+    if (result != runtime_agent::PatchUnbindResult::Released) {
         error = QString::fromStdString(nativeError);
-        return error.contains(QStringLiteral("another module")) ? -2 : -1;
+        return result == runtime_agent::PatchUnbindResult::WrongOwner
+            ? RUNTIME_AGENT_PATCH_UNBIND_WRONG_OWNER
+            : RUNTIME_AGENT_PATCH_UNBIND_NOT_LIVE;
     }
     refreshLabel();
-    return 0;
+    return RUNTIME_AGENT_PATCH_OK;
 }
 
 bool ModuleManager::rollback(QString& error)

@@ -268,7 +268,9 @@ bool PatchManager::bind(void* replacement,
     return true;
 }
 
-bool PatchManager::unbind(const std::uint64_t id, const std::uint64_t owner, std::string& error)
+PatchUnbindResult PatchManager::unbindWithResult(const std::uint64_t id,
+                                                 const std::uint64_t owner,
+                                                 std::string& error)
 {
     error.clear();
     for (Generation& generation : m_generations) {
@@ -277,21 +279,28 @@ bool PatchManager::unbind(const std::uint64_t id, const std::uint64_t owner, std
         }
         if (generation.owner != owner) {
             error = "this binding belongs to another module";
-            return false;
+            return PatchUnbindResult::WrongOwner;
         }
         if (generation.released) {
             error = "this binding was already released";
-            return false;
+            return PatchUnbindResult::NotLive;
         }
         generation.released = true;
         // Recomputed from what is still live, so releasing something that was
         // not selected leaves the slot alone and releasing the selected one
         // falls back to the newest predecessor, not to the original.
         publishSelection();
-        return true;
+        return PatchUnbindResult::Released;
     }
     error = "no such binding";
-    return false;
+    return PatchUnbindResult::NotLive;
+}
+
+bool PatchManager::unbind(const std::uint64_t id,
+                          const std::uint64_t owner,
+                          std::string& error)
+{
+    return unbindWithResult(id, owner, error) == PatchUnbindResult::Released;
 }
 
 PatchStatus PatchManager::status() const

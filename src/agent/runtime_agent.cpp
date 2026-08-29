@@ -6,25 +6,30 @@
 #include <QAbstractButton>
 #include <QAction>
 #include <QCoreApplication>
-#include <QFileInfo>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QLocalSocket>
 #include <QMetaMethod>
 #include <QMetaProperty>
+#include <QThread>
 #include <QTimer>
 
-#include <cerrno>
-#include <cmath>
-#include <cstring>
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstring>
+#include <exception>
+#include <mutex>
+#include <utility>
 
 #include <dlfcn.h>
-#include <exception>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
-#include <utility>
 
 namespace {
 
@@ -79,13 +84,153 @@ QString failedCall(const char* operation, const int errorNumber)
              QString::fromStdString(runtime_agent::errnoText(errorNumber)));
 }
 
+QByteArray compactJsonValue(const QJsonValue& value)
+{
+    if (value.isUndefined()) {
+        return "{}";
+    }
+    if (value.isObject()) {
+        return QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact);
+    }
+    if (value.isArray()) {
+        return QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact);
+    }
+
+    const QByteArray wrapped =
+        QJsonDocument(QJsonArray{value}).toJson(QJsonDocument::Compact);
+    return wrapped.mid(1, wrapped.size() - 2);
+}
+
 } // namespace
+
+struct RuntimeAgent::CallbackLifetime {
+    explicit CallbackLifetime(RuntimeAgent* owner)
+        : agent(owner)
+    {
+    }
+
+    RuntimeAgent* acquire()
+    {
+        std::lock_guard lock(mutex);
+        if (stopping || agent == nullptr) {
+            return nullptr;
+        }
+        ++active;
+        return agent;
+    }
+
+    void release()
+    {
+        std::lock_guard lock(mutex);
+        Q_ASSERT(active > 0);
+        --active;
+        if (stopping && active == 0) {
+            idle.notify_all();
+        }
+    }
+
+    void stop()
+    {
+        std::unique_lock lock(mutex);
+        stopping = true;
+        agent = nullptr;
+        while (active != 0) {
+            if (idle.wait_for(lock, std::chrono::seconds(5))
+                == std::cv_status::timeout) {
+                qWarning().noquote()
+                    << "runtime-agent: shutdown is waiting for" << active
+                    << "native callback or executor invocation(s) still using agent state";
+            }
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable idle;
+    RuntimeAgent* agent = nullptr;
+    std::size_t active = 0;
+    bool stopping = false;
+};
+
+class RuntimeAgent::CallbackLease final {
+public:
+    CallbackLease() = default;
+
+    explicit CallbackLease(std::shared_ptr<CallbackLifetime> lifetime)
+        : m_lifetime(std::move(lifetime))
+        , m_agent(m_lifetime != nullptr ? m_lifetime->acquire() : nullptr)
+    {
+        if (m_agent == nullptr) {
+            m_lifetime.reset();
+        }
+    }
+
+    CallbackLease(const CallbackLease&) = delete;
+    CallbackLease& operator=(const CallbackLease&) = delete;
+
+    CallbackLease(CallbackLease&& other) noexcept
+        : m_lifetime(std::move(other.m_lifetime))
+        , m_agent(std::exchange(other.m_agent, nullptr))
+    {
+    }
+
+    CallbackLease& operator=(CallbackLease&& other) noexcept
+    {
+        if (this == &other) {
+            return *this;
+        }
+        reset();
+        m_lifetime = std::move(other.m_lifetime);
+        m_agent = std::exchange(other.m_agent, nullptr);
+        return *this;
+    }
+
+    ~CallbackLease()
+    {
+        reset();
+    }
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return m_agent != nullptr;
+    }
+
+    [[nodiscard]] RuntimeAgent* get() const noexcept
+    {
+        return m_agent;
+    }
+
+    RuntimeAgent* operator->() const noexcept
+    {
+        return m_agent;
+    }
+
+private:
+    void reset()
+    {
+        if (m_lifetime != nullptr) {
+            m_lifetime->release();
+            m_lifetime.reset();
+        }
+        m_agent = nullptr;
+    }
+
+    std::shared_ptr<CallbackLifetime> m_lifetime;
+    RuntimeAgent* m_agent = nullptr;
+};
+
+RuntimeAgent::Client::Client(RuntimeAgent* owner, QLocalSocket* socket)
+    : m_owner(owner)
+    , m_lifetime(owner != nullptr ? owner->m_callbackLifetime : nullptr)
+    , m_socket(socket)
+{
+}
 
 RuntimeAgent::RuntimeAgent(QObject* root,
                            QString socketName,
                            QObject* parent)
     : QObject(parent)
     , m_modules(runtime_agent::ModuleRegistry::instance())
+    , m_callbackLifetime(std::make_shared<CallbackLifetime>(this))
     , m_socketName(std::move(socketName))
     , m_registry(root, this)
     , m_unsafeEnabled(qEnvironmentVariableIntValue("QT_RUNTIME_AGENT_UNSAFE") == 1)
@@ -114,6 +259,10 @@ RuntimeAgent::RuntimeAgent(QObject* root,
 
 RuntimeAgent::~RuntimeAgent()
 {
+    // Stop new native callbacks and executor work, then wait until anything that
+    // already entered has stopped using agent-owned state.
+    m_callbackLifetime->stop();
+
     // The client sockets are children of m_server, so ~QLocalServer deletes
     // them, and that runs after m_clients has already been destroyed. Each
     // socket aborts on the way out and emits disconnected, which would reach
@@ -137,10 +286,18 @@ bool RuntimeAgent::start(QString& error)
         return false;
     }
 
-    // Do not unlink another live agent's endpoint. QLocalServer::removeServer()
-    // is appropriate only after a failed probe indicates a stale filesystem
-    // socket left by a crashed process.
-    if (QFileInfo::exists(m_socketName)) {
+    // Only a filesystem socket that definitively has no listener may be removed.
+    // A timeout or resource error says nothing about whether a live server owns
+    // it, and QLocalServer::removeServer would also unlink a regular file.
+    const QByteArray encodedSocketName = QFile::encodeName(m_socketName);
+    struct stat endpointStatus {};
+    if (::lstat(encodedSocketName.constData(), &endpointStatus) == 0) {
+        if (!S_ISSOCK(endpointStatus.st_mode)) {
+            error = QStringLiteral("runtime-agent socket path exists and is not a Unix socket: %1")
+                        .arg(m_socketName);
+            return false;
+        }
+
         QLocalSocket probe;
         probe.connectToServer(m_socketName);
         if (probe.waitForConnected(100)) {
@@ -149,11 +306,22 @@ bool RuntimeAgent::start(QString& error)
                         .arg(m_socketName);
             return false;
         }
+        const QLocalSocket::LocalSocketError probeError = probe.error();
+        if (probeError != QLocalSocket::ConnectionRefusedError
+            && probeError != QLocalSocket::ServerNotFoundError) {
+            error = QStringLiteral(
+                        "could not prove that the existing runtime-agent socket is stale: %1")
+                        .arg(probe.errorString());
+            return false;
+        }
         if (!QLocalServer::removeServer(m_socketName)) {
             error = QStringLiteral("could not remove stale runtime-agent socket: %1")
                         .arg(m_socketName);
             return false;
         }
+    } else if (errno != ENOENT) {
+        error = failedCall("lstat(runtime-agent socket)", errno);
+        return false;
     }
     m_server.setSocketOptions(QLocalServer::UserAccessOption);
     if (!m_server.listen(m_socketName)) {
@@ -175,6 +343,18 @@ QObject* RuntimeAgent::findObject(const QString& objectName) const
 
 void RuntimeAgent::publishEvent(const QString& name, const QJsonObject& data)
 {
+    CallbackLease lease(m_callbackLifetime);
+    if (!lease || lease.get() != this) {
+        return;
+    }
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, name, data] { publishEvent(name, data); },
+            Qt::QueuedConnection);
+        return;
+    }
+
     QJsonObject message{
         {QStringLiteral("event"), name},
         {QStringLiteral("sequence"), QString::number(++m_eventSequence)},
@@ -289,10 +469,13 @@ void RuntimeAgent::registerCoreCommands()
                                                           const QJsonObject&)) {
         const bool added = registerCommand(
             QString::fromLatin1(name), std::move(parameters),
-            [this, handler](QLocalSocket* socket,
+            [this, handler](Client client,
                             const QJsonValue& requestId,
                             const QJsonObject& parameters) {
-                (this->*handler)(socket, requestId, parameters);
+                auto* socket = qobject_cast<QLocalSocket*>(client.m_socket.data());
+                if (socket != nullptr) {
+                    (this->*handler)(socket, requestId, parameters);
+                }
             });
         Q_ASSERT_X(added, "registerCoreCommands", name);
         Q_UNUSED(added);
@@ -312,8 +495,8 @@ void RuntimeAgent::registerCoreCommands()
     add("event.history", {"afterSequence", "limit", "prefixes"}, &RuntimeAgent::handleEventHistory);
     add("module.list", {}, &RuntimeAgent::handleModuleList);
     add("snippet.load", {"path"}, &RuntimeAgent::handleSnippetLoad);
-    add("snippet.run", {"moduleId", "executor", "objectName", "id", "target", "request"}, &RuntimeAgent::handleSnippetRun);
-    add("snippet.release", {"moduleId", "executor", "objectName", "id", "target", "request"}, &RuntimeAgent::handleSnippetRelease);
+    add("snippet.run", {"moduleId", "executor", "target", "request"}, &RuntimeAgent::handleSnippetRun);
+    add("snippet.release", {"moduleId", "executor", "target", "request"}, &RuntimeAgent::handleSnippetRelease);
     add("stash.list", {}, &RuntimeAgent::handleStashList);
     add("stash.get", {"key"}, &RuntimeAgent::handleStashGet);
     add("stash.drop", {"key"}, &RuntimeAgent::handleStashDrop);
@@ -426,7 +609,7 @@ void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
                 return;
             }
         }
-        entry.handler(socket, requestId, parameters);
+        entry.handler(Client(this, socket), requestId, parameters);
         return;
     }
     sendError(socket, requestId, QStringLiteral("unknown_command"), command);
@@ -639,11 +822,14 @@ void RuntimeAgent::handleEventSubscribe(QLocalSocket* socket,
         sendError(socket, requestId, QStringLiteral("client_gone"), QStringLiteral("client not found"));
         return;
     }
-    iterator->allEvents = parameters.value(QStringLiteral("all")).toBool(false);
-    iterator->eventPrefixes.clear();
-    for (const QJsonValue& value : parameters.value(QStringLiteral("prefixes")).toArray()) {
-        iterator->eventPrefixes.append(value.toString());
+    QStringList prefixes;
+    QString error;
+    if (!parseEventPrefixes(parameters.value(QStringLiteral("prefixes")), prefixes, error)) {
+        sendError(socket, requestId, QStringLiteral("invalid_prefixes"), error);
+        return;
     }
+    iterator->allEvents = parameters.value(QStringLiteral("all")).toBool(false);
+    iterator->eventPrefixes = std::move(prefixes);
     sendSuccess(socket, requestId, QJsonObject{
         {QStringLiteral("all"), iterator->allEvents},
         {QStringLiteral("prefixes"), QJsonArray::fromStringList(iterator->eventPrefixes)},
@@ -670,8 +856,11 @@ void RuntimeAgent::handleEventHistory(QLocalSocket* socket,
         parameters.value(QStringLiteral("limit")).toInt(256),
         static_cast<int>(maximumEventHistory));
     QStringList prefixes;
-    for (const QJsonValue& value : parameters.value(QStringLiteral("prefixes")).toArray()) {
-        prefixes.append(value.toString());
+    QString prefixError;
+    if (!parseEventPrefixes(
+            parameters.value(QStringLiteral("prefixes")), prefixes, prefixError)) {
+        sendError(socket, requestId, QStringLiteral("invalid_prefixes"), prefixError);
+        return;
     }
 
     QJsonArray events;
@@ -727,14 +916,20 @@ void RuntimeAgent::handleSnippetLoad(QLocalSocket* socket,
         {QStringLiteral("path"), module->path},
         {QStringLiteral("stamped"), module->stamped},
     };
+    if (!module->targetBuildId.isEmpty()) {
+        result.insert(QStringLiteral("targetBuildId"), module->targetBuildId);
+    }
     if (!module->stamped) {
-        // A stamped module was checked against this build. This one reports no
-        // build id, so nothing has been checked, and a caller deciding whether
-        // to run it should be told.
+        // A stamped module was compared with this process. Say which side made
+        // that comparison impossible so callers do not mistake reported data for
+        // verified agreement.
         result.insert(
             QStringLiteral("note"),
-            QStringLiteral("this module reports no host build id, so whether its offsets "
-                           "into application types describe this process is unchecked"));
+            module->targetBuildId.isEmpty()
+                ? QStringLiteral("this module reports no host build id, so whether its offsets "
+                                 "into application types describe this process is unchecked")
+                : QStringLiteral("this process reports no host build id, so the module's "
+                                 "reported target build could not be checked"));
     }
     publishEvent(QStringLiteral("snippet.loaded"), result);
     sendSuccess(socket, requestId, result);
@@ -1062,23 +1257,23 @@ void RuntimeAgent::handleProcessQuit(QLocalSocket* socket,
 }
 
 
-void RuntimeAgent::sendSuccess(QLocalSocket* socket,
+void RuntimeAgent::sendSuccess(Client client,
                                const QJsonValue& requestId,
                                const QJsonValue& result)
 {
-    sendObject(socket, QJsonObject{
+    sendObject(std::move(client), QJsonObject{
         {QStringLiteral("id"), requestId},
         {QStringLiteral("ok"), true},
         {QStringLiteral("result"), result},
     });
 }
 
-void RuntimeAgent::sendError(QLocalSocket* socket,
+void RuntimeAgent::sendError(Client client,
                              const QJsonValue& requestId,
                              const QString& code,
                              const QString& message)
 {
-    sendObject(socket, QJsonObject{
+    sendObject(std::move(client), QJsonObject{
         {QStringLiteral("id"), requestId},
         {QStringLiteral("ok"), false},
         {QStringLiteral("error"), QJsonObject{
@@ -1088,13 +1283,48 @@ void RuntimeAgent::sendError(QLocalSocket* socket,
     });
 }
 
-void RuntimeAgent::sendObject(QLocalSocket* socket, const QJsonObject& object)
+void RuntimeAgent::sendSuccess(QLocalSocket* socket,
+                               const QJsonValue& requestId,
+                               const QJsonValue& result)
 {
-    if (socket == nullptr || socket->state() == QLocalSocket::UnconnectedState) {
+    sendSuccess(Client(this, socket), requestId, result);
+}
+
+void RuntimeAgent::sendError(QLocalSocket* socket,
+                             const QJsonValue& requestId,
+                             const QString& code,
+                             const QString& message)
+{
+    sendError(Client(this, socket), requestId, code, message);
+}
+
+void RuntimeAgent::sendObject(Client client, QJsonObject object)
+{
+    CallbackLease lease(client.m_lifetime);
+    if (!lease || lease.get() != this || client.m_owner != this) {
+        return;
+    }
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, client = std::move(client), object = std::move(object)]() mutable {
+                sendObject(std::move(client), std::move(object));
+            },
+            Qt::QueuedConnection);
+        return;
+    }
+    auto* socket = qobject_cast<QLocalSocket*>(client.m_socket.data());
+    if (socket == nullptr || !m_clients.contains(socket)
+        || socket->state() == QLocalSocket::UnconnectedState) {
         return;
     }
     socket->write(QJsonDocument(object).toJson(QJsonDocument::Compact));
     socket->write("\n");
+}
+
+void RuntimeAgent::sendObject(QLocalSocket* socket, const QJsonObject& object)
+{
+    sendObject(Client(this, socket), object);
 }
 
 QObject* RuntimeAgent::resolveObject(const QJsonObject& parameters, QString& error) const
@@ -1169,19 +1399,34 @@ RuntimeAgent::ModuleContext* RuntimeAgent::contextForModule(const LoadedModule* 
     if (module == nullptr) {
         return nullptr;
     }
-    auto found = m_moduleContexts.find(module->id);
-    if (found == m_moduleContexts.end()) {
-        auto context = std::make_unique<ModuleContext>();
-        context->agent = this;
-        context->module = module;
-        found = m_moduleContexts.emplace(module->id, std::move(context)).first;
+    if (const auto found = m_moduleContexts.find(module->id);
+        found != m_moduleContexts.end()) {
+        return found->second;
     }
-    return found->second.get();
+
+    // A module may retain this pointer in callbacks for the rest of the process.
+    // The owning agent can stop accepting callbacks, but the context itself is
+    // never freed.
+    static auto* const contexts =
+        new std::vector<std::unique_ptr<ModuleContext>>();
+    static auto* const contextsMutex = new std::mutex();
+
+    auto context = std::make_unique<ModuleContext>();
+    context->lifetime = m_callbackLifetime;
+    context->module = module;
+    ModuleContext* const result = context.get();
+    {
+        std::lock_guard lock(*contextsMutex);
+        contexts->push_back(std::move(context));
+    }
+    m_moduleContexts.emplace(module->id, result);
+    return result;
 }
 
-RuntimeAgent* RuntimeAgent::agentOf(void* agentContext)
+RuntimeAgent::CallbackLease RuntimeAgent::agentOf(void* agentContext)
 {
-    return static_cast<ModuleContext*>(agentContext)->agent;
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    return context != nullptr ? CallbackLease(context->lifetime) : CallbackLease();
 }
 
 void RuntimeAgent::runSnippet(RuntimeAgent::LoadedModule* module,
@@ -1192,18 +1437,11 @@ void RuntimeAgent::runSnippet(RuntimeAgent::LoadedModule* module,
                               const SnippetEntry entry)
 {
     auto invocation = std::make_shared<SnippetInvocation>();
-    invocation->agent = this;
     invocation->operationId = operationId;
     invocation->entry = entry;
     invocation->executor = executor;
     invocation->target = target;
-    if (request.isObject()) {
-        invocation->requestJson = QJsonDocument(request.toObject()).toJson(QJsonDocument::Compact);
-    } else if (request.isArray()) {
-        invocation->requestJson = QJsonDocument(request.toArray()).toJson(QJsonDocument::Compact);
-    } else {
-        invocation->requestJson = "{}";
-    }
+    invocation->requestJson = compactJsonValue(request);
 
     invocation->host = RuntimeAgentHost{
         RUNTIME_AGENT_ABI,
@@ -1238,8 +1476,11 @@ void RuntimeAgent::runSnippet(RuntimeAgent::LoadedModule* module,
         {QStringLiteral("executor"), executor},
     });
 
-    auto callback = [this, module, invocation] {
-        executeSnippet(module, invocation);
+    auto callback = [lifetime = m_callbackLifetime, module, invocation] {
+        CallbackLease lease(lifetime);
+        if (lease) {
+            lease->executeSnippet(module, invocation);
+        }
     };
 
     bool scheduled = true;
@@ -1264,14 +1505,7 @@ void RuntimeAgent::runSnippet(RuntimeAgent::LoadedModule* module,
 void RuntimeAgent::executeSnippet(RuntimeAgent::LoadedModule* module,
                                   const std::shared_ptr<SnippetInvocation>& invocation)
 {
-    // Recorded before the call, and for every attempt: this is the only witness
-    // to where an install ran when the run that made it went on to fail.
-    if (invocation->entry == SnippetEntry::Run) {
-        module->lastAttemptedExecutor = invocation->executor;
-        module->lastAttemptedTarget = invocation->target;
-        module->hadAttemptedRun = true;
-    }
-
+    invocation->enteredModule = true;
     try {
         if (invocation->entry == SnippetEntry::Release) {
             module->snippet->release(&invocation->host);
@@ -1288,13 +1522,36 @@ void RuntimeAgent::executeSnippet(RuntimeAgent::LoadedModule* module,
         invocation->error = QStringLiteral(
             "snippet returned without calling complete_json() or fail()");
     }
-    finishSnippet(module, invocation);
+
+    if (QThread::currentThread() == thread()) {
+        finishSnippet(module, invocation);
+        return;
+    }
+    QMetaObject::invokeMethod(
+        this,
+        [lifetime = m_callbackLifetime, module, invocation] {
+            CallbackLease lease(lifetime);
+            if (lease) {
+                lease->finishSnippet(module, invocation);
+            }
+        },
+        Qt::QueuedConnection);
 }
 
 void RuntimeAgent::finishSnippet(
     RuntimeAgent::LoadedModule* module,
     const std::shared_ptr<SnippetInvocation>& invocation)
 {
+    Q_ASSERT(QThread::currentThread() == thread());
+
+    // All process-lifetime module bookkeeping belongs to the agent thread. The
+    // native entry may have run elsewhere, but its observed result arrives here.
+    if (invocation->enteredModule && invocation->entry == SnippetEntry::Run) {
+        module->lastAttemptedExecutor = invocation->executor;
+        module->lastAttemptedTarget = invocation->target;
+        module->hadAttemptedRun = true;
+    }
+
     QJsonObject event{
         {QStringLiteral("operationId"), QString::number(invocation->operationId)},
         {QStringLiteral("kind"), invocation->entry == SnippetEntry::Release
@@ -1349,6 +1606,28 @@ QString RuntimeAgent::executorChoices() const
     return choices.join(QStringLiteral(", "));
 }
 
+bool RuntimeAgent::parseEventPrefixes(const QJsonValue& value,
+                                      QStringList& prefixes,
+                                      QString& error)
+{
+    prefixes.clear();
+    if (value.isUndefined()) {
+        return true;
+    }
+    if (!value.isArray()) {
+        error = QStringLiteral("prefixes must be an array of non-empty strings");
+        return false;
+    }
+    for (const QJsonValue& item : value.toArray()) {
+        if (!item.isString() || item.toString().isEmpty()) {
+            error = QStringLiteral("every event prefix must be a non-empty string");
+            return false;
+        }
+        prefixes.append(item.toString());
+    }
+    return true;
+}
+
 bool RuntimeAgent::clientWantsEvent(const ClientState& state, const QString& eventName) const
 {
     if (state.allEvents) {
@@ -1366,34 +1645,53 @@ void RuntimeAgent::hostLog(void* agentContext,
                            const std::int32_t level,
                            const char* message)
 {
-    auto* agent = agentOf(agentContext);
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    const QString moduleName = context != nullptr && context->module != nullptr
+        ? context->module->name : QStringLiteral("unknown");
+    const QString prefix = QStringLiteral("[snippet:%1]").arg(moduleName);
     const QString text = QString::fromUtf8(message != nullptr ? message : "");
     switch (level) {
-    case RUNTIME_AGENT_LOG_ERROR: qCritical().noquote() << "[snippet]" << text; break;
-    case RUNTIME_AGENT_LOG_WARNING: qWarning().noquote() << "[snippet]" << text; break;
-    case RUNTIME_AGENT_LOG_DEBUG: qDebug().noquote() << "[snippet]" << text; break;
-    default: qInfo().noquote() << "[snippet]" << text; break;
+    case RUNTIME_AGENT_LOG_ERROR: qCritical().noquote() << prefix << text; break;
+    case RUNTIME_AGENT_LOG_WARNING: qWarning().noquote() << prefix << text; break;
+    case RUNTIME_AGENT_LOG_DEBUG: qDebug().noquote() << prefix << text; break;
+    default: qInfo().noquote() << prefix << text; break;
     }
-    agent->publishEvent(QStringLiteral("snippet.log"), QJsonObject{
+
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease) {
+        return;
+    }
+    QJsonObject event{
         {QStringLiteral("level"), level},
         {QStringLiteral("message"), text},
-    });
+        {QStringLiteral("moduleName"), moduleName},
+    };
+    if (context->module != nullptr) {
+        event.insert(QStringLiteral("moduleId"), QString::number(context->module->id));
+    }
+    lease->publishEvent(QStringLiteral("snippet.log"), event);
 }
 
 void RuntimeAgent::hostEmitEvent(void* agentContext,
                                  const char* name,
                                  const char* objectJson)
 {
-    auto* agent = agentOf(agentContext);
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease) {
+        return;
+    }
     const QString eventName = QString::fromUtf8(name != nullptr ? name : "snippet.event");
-    agent->publishEvent(eventName,
-                        parseObjectOrRaw(QByteArray(objectJson != nullptr ? objectJson : "{}")));
+    lease->publishEvent(
+        eventName,
+        parseObjectOrRaw(QByteArray(objectJson != nullptr ? objectJson : "{}")));
 }
 
 void* RuntimeAgent::hostFindQObject(void* agentContext, const char* objectName)
 {
-    auto* agent = agentOf(agentContext);
-    return agent->findObject(QString::fromUtf8(objectName != nullptr ? objectName : ""));
+    CallbackLease lease = agentOf(agentContext);
+    return lease
+        ? lease->findObject(QString::fromUtf8(objectName != nullptr ? objectName : ""))
+        : nullptr;
 }
 
 void* RuntimeAgent::hostFindSymbol(void*, const char* symbolName)
@@ -1459,8 +1757,10 @@ void RuntimeAgent::hostFail(void* invocationContext, const char* error)
 
 std::uint64_t RuntimeAgent::hostMonotonicTimeNs(void* agentContext)
 {
-    auto* agent = agentOf(agentContext);
-    return static_cast<std::uint64_t>(agent->m_monotonicClock.nsecsElapsed());
+    CallbackLease lease = agentOf(agentContext);
+    return lease
+        ? static_cast<std::uint64_t>(lease->m_monotonicClock.nsecsElapsed())
+        : 0;
 }
 
 std::int32_t RuntimeAgent::hostPatchBind(void* agentContext,
@@ -1470,18 +1770,19 @@ std::int32_t RuntimeAgent::hostPatchBind(void* agentContext,
                                          RuntimeAgentPatchBinding* out)
 {
     auto* context = static_cast<ModuleContext*>(agentContext);
-    if (context == nullptr || context->agent == nullptr || context->module == nullptr
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease || context == nullptr || context->module == nullptr
         || out == nullptr || target == nullptr || replacement == nullptr
-        || !context->agent->m_patchBind) {
-        return -3;
+        || !lease->m_patchBind) {
+        return RUNTIME_AGENT_PATCH_BIND_REFUSED;
     }
 
     QString error;
     RuntimeAgentPatchBinding binding{};
-    const std::int32_t result = context->agent->m_patchBind(
+    const std::int32_t result = lease->m_patchBind(
         target, replacement, context->module->id, flags, binding, error);
-    if (result != 0) {
-        context->agent->publishEvent(QStringLiteral("patch.bindRefused"), QJsonObject{
+    if (result != RUNTIME_AGENT_PATCH_OK) {
+        lease->publishEvent(QStringLiteral("patch.bindRefused"), QJsonObject{
             {QStringLiteral("moduleId"), QString::number(context->module->id)},
             {QStringLiteral("error"), error},
         });
@@ -1489,18 +1790,19 @@ std::int32_t RuntimeAgent::hostPatchBind(void* agentContext,
     }
 
     *out = binding;
-    return 0;
+    return RUNTIME_AGENT_PATCH_OK;
 }
 
 std::int32_t RuntimeAgent::hostPatchUnbind(void* agentContext, const std::uint64_t bindingId)
 {
     auto* context = static_cast<ModuleContext*>(agentContext);
-    if (context == nullptr || context->agent == nullptr || context->module == nullptr
-        || !context->agent->m_patchUnbind) {
-        return -1;
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease || context == nullptr || context->module == nullptr
+        || !lease->m_patchUnbind) {
+        return RUNTIME_AGENT_PATCH_UNBIND_REFUSED;
     }
     QString error;
-    return context->agent->m_patchUnbind(bindingId, context->module->id, error);
+    return lease->m_patchUnbind(bindingId, context->module->id, error);
 }
 
 std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
@@ -1510,12 +1812,13 @@ std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
                                         const std::int32_t overwrite)
 {
     auto* context = static_cast<ModuleContext*>(agentContext);
-    if (context == nullptr || context->agent == nullptr || context->module == nullptr
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease || context == nullptr || context->module == nullptr
         || key == nullptr || *key == '\0' || size < 0
         || (bytes == nullptr && size > 0)) {
         return -2;
     }
-    auto* agent = context->agent;
+    RuntimeAgent* const agent = lease.get();
     const QString name = QString::fromUtf8(key);
 
     QMutexLocker lock(&agent->m_stashMutex);
@@ -1524,7 +1827,7 @@ std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
         return -1;
     }
     // Overwrite rights are the one thing identity decides. A record belongs to
-    // a snippet, not to a load of it, so a reloaded generation may
+    // a snippet, not to one loaded generation of it, so a distinct successor may
     // replace its predecessor's entry while an unrelated module may not. Reads
     // stay open on purpose: a repair module written after the fact has a
     // different name by construction, and shutting it out would remove the
@@ -1553,7 +1856,11 @@ std::int64_t RuntimeAgent::hostStashGet(void* agentContext,
     if (key == nullptr || capacity < 0 || (buffer == nullptr && capacity > 0)) {
         return -1;
     }
-    auto* agent = agentOf(agentContext);
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease) {
+        return -1;
+    }
+    RuntimeAgent* const agent = lease.get();
 
     QMutexLocker lock(&agent->m_stashMutex);
     const auto found = agent->m_stash.constFind(QString::fromUtf8(key));
@@ -1571,13 +1878,14 @@ std::int64_t RuntimeAgent::hostStashGet(void* agentContext,
 std::int32_t RuntimeAgent::hostStashDrop(void* agentContext, const char* key)
 {
     auto* context = static_cast<ModuleContext*>(agentContext);
-    if (context == nullptr || context->agent == nullptr || context->module == nullptr) {
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease || context == nullptr || context->module == nullptr) {
         return -2;
     }
     if (key == nullptr) {
         return 0;
     }
-    auto* agent = context->agent;
+    RuntimeAgent* const agent = lease.get();
     const QString name = QString::fromUtf8(key);
 
     // The same rule the overwrite check applies, for the same reason. Without
@@ -1589,17 +1897,16 @@ std::int32_t RuntimeAgent::hostStashDrop(void* agentContext, const char* key)
     // The protocol-level stash.drop stays unrestricted. Deciding that a
     // restore worked, or that a dead module's claim should be released, is the
     // driver's judgement, and it is not a module.
-    {
-        QMutexLocker lock(&agent->m_stashMutex);
-        const auto found = agent->m_stash.constFind(name);
-        if (found == agent->m_stash.constEnd()) {
-            return 0;
-        }
-        if (!found->moduleName.isEmpty() && found->moduleName != context->module->name) {
-            return -2;
-        }
+    QMutexLocker lock(&agent->m_stashMutex);
+    const auto found = agent->m_stash.find(name);
+    if (found == agent->m_stash.end()) {
+        return 0;
     }
-    return agent->stashDrop(name) ? 1 : 0;
+    if (!found->moduleName.isEmpty() && found->moduleName != context->module->name) {
+        return -2;
+    }
+    agent->m_stash.erase(found);
+    return 1;
 }
 
 std::int64_t RuntimeAgent::hostStashList(void* agentContext,
@@ -1609,9 +1916,12 @@ std::int64_t RuntimeAgent::hostStashList(void* agentContext,
     if (capacity < 0 || (buffer == nullptr && capacity > 0)) {
         return -1;
     }
-    auto* agent = agentOf(agentContext);
+    CallbackLease lease = agentOf(agentContext);
+    if (!lease) {
+        return -1;
+    }
     const QByteArray json =
-        QJsonDocument(agent->stashEntries()).toJson(QJsonDocument::Compact);
+        QJsonDocument(lease->stashEntries()).toJson(QJsonDocument::Compact);
     const std::int64_t total = json.size();
     if (capacity > 0) {
         std::memcpy(buffer, json.constData(), static_cast<std::size_t>(std::min(total, capacity)));
