@@ -1,4 +1,4 @@
-# Validation record
+# Validating a build
 
 Three builds, differing in the codegen the patcher has to survive:
 
@@ -61,10 +61,9 @@ readelf -SW build/release/hotpatch_selftest \
   | grep __patchable_function_entries
 ```
 
-Build a fresh patch module using the build oracle rather than CMake's patch
-target, then exercise redirect and rollback. The application and the self-test
-each compile `src/cube_step.cpp`, so the context names the object rather than
-the source:
+Build a fresh patch module through the build oracle, then exercise redirect and
+rollback. The application and the self-test each compile `src/cube_step.cpp`, so
+the context names the object:
 
 ```bash
 python3 tools/compile_snippet.py \
