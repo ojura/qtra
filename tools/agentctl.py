@@ -456,7 +456,12 @@ def build_parser() -> argparse.ArgumentParser:
     patch.add_argument("path")
     # One way to replace a function: rewrite its entry. The application holds
     # no pointer to swap.
-    patch.add_argument("--mode", choices=("entry",), default="entry")
+    patch.add_argument(
+        "--accept-incomplete",
+        action="store_true",
+        help="activate even where the build could not show the replacement reaches "
+        "every call, taking a replacement some callers may not run",
+    )
 
     snippet = subparsers.add_parser("snippet", help="load, run, and optionally await a snippet")
     snippet.add_argument("path")
@@ -603,7 +608,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 activated = client.request(
                     "patch.activate",
-                    {"moduleId": loaded["moduleId"], "mode": args.mode},
+                    {
+                        "moduleId": loaded["moduleId"],
+                        "acceptIncompleteCoverage": args.accept_incomplete,
+                    },
                     on_event=show_event,
                 )
                 print_json({"loaded": loaded, "activated": activated}, args.compact)

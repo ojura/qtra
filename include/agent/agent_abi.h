@@ -69,8 +69,15 @@ enum RuntimeAgentLogLevel : std::int32_t {
 // application's C++ headers, but its entry point and host callbacks remain easy
 // to validate and version.
 // Proceed even when the build did not establish that replacing the target
-// reaches every call, or did not establish which threads reach it. A module
-// asking for this is accepting that some callers may keep running the original.
+// reaches every call. A module asking for this accepts that some callers may
+// keep running the original, which is a wrong effect it has decided it can
+// live with.
+//
+// It reaches that question and no other. Whether the entry's bytes may be
+// written while the process runs is decided by what the build recorded about
+// which threads reach the target, and nothing here overrides it: consenting to
+// a wrong effect is not the same as consenting to a write nobody established
+// was safe.
 inline constexpr std::uint32_t RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE = 1u << 0;
 
 // What a module gets back when it binds a replacement.

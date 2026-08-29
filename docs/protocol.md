@@ -238,6 +238,7 @@ leaves it collapsed and unclaimed, so the restore has to come first.
   | `quiescedBy` | the policy that made the one code write safe |
   | `threadsAtInstall` | threads observed then, or null if they could not be counted |
   | `coverage` | the build's decision, and whether it allows activation |
+  | `recoveryAdmission` | what the write that needs finishing was admitted under, present only in `recovery-required` |
 - `patch.rollback`
 - `patch.status`
 

@@ -648,6 +648,25 @@ QJsonObject ModuleManager::patchStatus() const
             ? QJsonValue(static_cast<qint64>(*patch.threadsAtInstall))
             : QJsonValue()},
     };
+    // What the write that left this entry needing recovery was admitted under.
+    // Present only then, because that is the only write anyone still has to
+    // finish, and a caller looking at a stuck process can say what it was made
+    // under without asking a file that may have changed since.
+    if (patch.recoveryAdmission.has_value()) {
+        const runtime_agent::LiveTextWriteAdmission& admitted = *patch.recoveryAdmission;
+        result.insert(QStringLiteral("recoveryAdmission"),
+                      QJsonObject{
+                          {QStringLiteral("basis"),
+                           QString::fromLatin1(runtime_agent::describe(admitted.basis()))},
+                          {QStringLiteral("provider"),
+                           QString::fromStdString(admitted.provider())},
+                          {QStringLiteral("target"), QString::fromStdString(admitted.target())},
+                          {QStringLiteral("buildId"), admitted.buildId().empty()
+                              ? QJsonValue()
+                              : QJsonValue(QString::fromStdString(admitted.buildId()))},
+                          {QStringLiteral("detail"), QString::fromStdString(admitted.detail())},
+                      });
+    }
     if (LoadedModule* loaded = module(moduleId); loaded != nullptr) {
         result.insert(QStringLiteral("module"), moduleJson(*loaded));
     }

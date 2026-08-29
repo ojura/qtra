@@ -7,7 +7,7 @@ ctl=(python3 "$root/tools/agentctl.py")
 
 "${ctl[@]}" call hello
 "${ctl[@]}" call object.tree --params '{"maxDepth":2}'
-"${ctl[@]}" patch "$build/cube_patch_wobble.so" --mode dispatch
+"${ctl[@]}" patch "$build/cube_patch_wobble.so"
 "${ctl[@]}" call cube.state
 "${ctl[@]}" call patch.rollback
 "${ctl[@]}" snippet "$build/agent_snippet_inspect.so" \

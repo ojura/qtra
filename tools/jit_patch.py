@@ -35,10 +35,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="O3",
         choices=("O0", "Og", "O1", "O2", "O3", "Os", "Oz"),
     )
-    parser.add_argument("--mode", default="entry", choices=("dispatch", "entry"))
     parser.add_argument("--respect-access-control", action="store_true")
     parser.add_argument("--extra", action="append", default=[])
     parser.add_argument("--compile-only", action="store_true")
+    parser.add_argument(
+        "--accept-incomplete",
+        action="store_true",
+        help="activate even where the build could not show the replacement reaches "
+        "every call, taking a replacement some callers may not run",
+    )
     parser.add_argument("--compact", action="store_true")
     return parser
 
@@ -86,7 +91,10 @@ def main(argv: list[str] | None = None) -> int:
                 loaded = client.request("patch.load", {"path": str(output)})
                 activated = client.request(
                     "patch.activate",
-                    {"moduleId": loaded["moduleId"], "mode": args.mode},
+                    {
+                        "moduleId": loaded["moduleId"],
+                        "acceptIncompleteCoverage": args.accept_incomplete,
+                    },
                 )
                 result["runtime"] = {"loaded": loaded, "activated": activated}
 
