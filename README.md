@@ -168,7 +168,6 @@ clean exit. A process killed with `SIGKILL` leaves a stale
 | `patch.activate` refused with "no coverage manifest" | the build did not record whether replacing the function reaches every call. Use a preset with `PATCH_READY` on, which the three GUI presets are. |
 | `patch.activate` refused naming two build ids | the manifest beside the binary describes a different build. Rebuild, or run the binary its manifest describes. |
 | a module refused naming two build ids | the module was compiled against a different build of the application. Rebuild the module. |
-| `invalid RuntimeAgentSnippet descriptor` | the module was built against a different `RUNTIME_AGENT_ABI`. The match is exact by design, so rebuild every module in the tree; a partial rebuild leaves the stale ones refusing. |
 | `snippet.run` succeeded and nothing changed | the value you wrote is recomputed every tick by its owner. See [Writing through the seam that owns the value](#writing-through-the-seam-that-owns-the-value). |
 | a rebuilt snippet runs its old code | `dlopen()` keys objects by pathname and returned the resident handle. Use `agentctl.py reload`. |
 | queued `render` work never runs | the window is hidden and the compositor has stopped sending frame callbacks. A 100 ms watchdog drains the queue through `grabFramebuffer()`, so this resolves itself. |
@@ -895,12 +894,14 @@ const RuntimeAgentSnippet descriptor{
 `release` receives a host and reports through `complete_json`/`fail` exactly as
 `run` does, so a release that fails is an error a program can act on.
 
-`RUNTIME_AGENT_ABI` is bumped whenever either ABI struct changes layout or a
-published answer changes meaning, which v6 did by naming the patch result codes
-and giving a failed release its own answer rather than reporting it as unknown.
-The loader accepts only an exact match, and a module carrying a different
-version fails to load, so it cannot run against fields the host never wrote or
-read an answer whose meaning has moved. There is no adaptation path and none is intended. Rebuild the
+`RUNTIME_AGENT_ABI` is 1 and stays 1. It would earn its keep by refusing a
+module built against a header this host no longer has, and nothing is in that
+position: every module here is compiled by the same cmake run as the host, from
+the same file. What catches a stale module is the build id, which the linker
+changes on every link without anyone deciding to.
+
+The loader accepts only an exact match, so a module that somehow carries another
+number fails to load rather than reading fields the host never wrote. Rebuild the
 snippets when the header changes; a stale `.so` under `runtime-snippets/` is
 rejected at load.
 

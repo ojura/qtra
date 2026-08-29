@@ -13,21 +13,25 @@
 
 extern "C" {
 
-// Bumped whenever either struct below grows or changes shape, and also whenever
-// an existing call changes what it can return or what a return value means. The
-// loader rejects any module that does not match exactly.
+// One, and it stays one.
 //
-// Both halves matter. A module compiled against a different layout reads fields
-// at offsets the host never wrote. A module compiled against a different meaning
-// links, runs, and is still wrong: a caller that ignores the refusal stash_put
-// returns for an entry owned by another snippet carries on as though its deposit
-// happened. What a call promises is as much a part of this interface as the
-// shape of the structs.
+// A version number earns its keep by refusing a module built against a header
+// the host no longer has. Nothing here is in that position: every module in this
+// tree, the snippets, the patch modules and the test fixtures, is compiled by
+// the same cmake run that compiles the host, from this file. There are no
+// releases, nothing is distributed, and nobody holds a module built last week.
+// Bumping it refuses nothing that would otherwise load and costs a full rebuild
+// to get back to where it was.
 //
-// This is a prototype under active development: there is no compatibility path
-// and none is wanted. A refused load fails where the caller can see it, and a
-// mismatched one fails somewhere inside the process.
-inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0006'0000u;
+// What does catch a stale module is the build id below, which the linker
+// changes on every link without anyone deciding to. That is the check with a
+// population to protect: a module compiled against one build of the application
+// reads its types at offsets the next build may have moved.
+//
+// So this field exists because the descriptor has it and a loader should read
+// something, not because it is maintained. If the structs below ever change
+// shape, rebuilding is what fixes it, the same as any other header in the tree.
+inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0001'0000u;
 
 // RUNTIME_AGENT_ABI covers this interface. It says nothing about the
 // application's own types, which a module compiled with -fno-access-control
