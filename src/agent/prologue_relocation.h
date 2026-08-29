@@ -248,6 +248,19 @@ struct RelocatedPrologue {
     std::size_t trampolineBytes = 0;
 
     // The whole mapping, which is the copy's pages and the word's page.
+    //
+    // Kept for the life of the process once an install succeeds, and not
+    // because nobody got round to freeing it. A replacement was handed the
+    // copy's address as what to call to reach the original, and may have stored
+    // it; a thread can be executing inside the copy at any instant. Neither is
+    // observable, so there is no moment at which giving these pages back is
+    // known to be safe. Restoring the entry's bytes does not change that, which
+    // is why restoring does not unmap either.
+    //
+    // An install that refuses does give them back, since nothing has been handed
+    // out yet. That makes the failure paths the only ones where a leak is
+    // possible, and hotpatch_selftest measures the process's mapped bytes across
+    // a refused install to keep it that way.
     std::size_t mappedBytes = 0;
 
     // What the entry held, so restoring is a copy and not a reconstruction.

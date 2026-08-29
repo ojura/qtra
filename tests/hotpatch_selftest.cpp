@@ -17,6 +17,7 @@
 #include <iostream>
 #include <string>
 #include <chrono>
+#include <fstream>
 #include <thread>
 #include <atomic>
 
@@ -25,6 +26,36 @@ namespace {
 bool approximatelyEqual(float a, float b)
 {
     return std::abs(a - b) < 0.0001F;
+}
+
+// How much of the address space this process has mapped, in bytes.
+//
+// Compared before and after an install that refuses, to check the pages it took
+// went back. A count of mappings would not do: a returned mapping can leave the
+// count unchanged by splitting or merging a neighbour. Returns 0 if the file
+// cannot be read, which the caller treats as not having measured rather than as
+// nothing being mapped.
+std::size_t mappedByteCount()
+{
+    std::ifstream maps("/proc/self/maps");
+    if (!maps) {
+        return 0;
+    }
+    std::size_t total = 0;
+    std::string line;
+    while (std::getline(maps, line)) {
+        const std::size_t dash = line.find('-');
+        const std::size_t space = line.find(' ');
+        if (dash == std::string::npos || space == std::string::npos || dash > space) {
+            continue;
+        }
+        const auto from = std::stoull(line.substr(0, dash), nullptr, 16);
+        const auto to = std::stoull(line.substr(dash + 1, space - dash - 1), nullptr, 16);
+        if (to > from) {
+            total += static_cast<std::size_t>(to - from);
+        }
+    }
+    return total;
 }
 
 int replacementMemcpyCalls = 0;
@@ -606,6 +637,67 @@ int main(int argc, char** argv)
         if (fixtureAddsOne(10) != 11) {
             std::cerr << "the refused second restore wrote anyway\n";
             return 109;
+        }
+
+        // An install that maps pages and then refuses gives them back.
+        //
+        // The copy is mapped before the entry is revalidated, so every refusal
+        // after that point has pages to return. Nothing reclaims them later:
+        // once an install succeeds the mapping is kept for the life of the
+        // process, because a replacement was handed the copy's address and a
+        // thread can be inside it. That makes the failure paths the only ones
+        // that can give anything back, and the only place a leak would go
+        // unnoticed.
+        //
+        // Staged by writing a byte into the body between planning and
+        // installing, which is what the body digest is compared for.
+        why.clear();
+        {
+            runtime_agent::ProloguePlan stalePlan;
+            if (!runtime_agent::planPrologueRelocation(
+                    reinterpret_cast<void*>(&fixtureAddsOne), stalePlan, why)) {
+                std::cerr << "the fixture could not be planned for the leak check: "
+                          << why << '\n';
+                return 110;
+            }
+
+            const std::size_t mappedBefore = mappedByteCount();
+            if (mappedBefore == 0) {
+                std::cerr << "this process's mappings could not be measured\n";
+                return 111;
+            }
+
+            // Late in the body, past the bytes the plan takes, so what changes
+            // is the digest and not the opening.
+            auto* const body = static_cast<std::uint8_t*>(stalePlan.entry)
+                + stalePlan.functionBytes - 1U;
+            const std::uint8_t was = *body;
+            const std::uint8_t scribble = static_cast<std::uint8_t>(was ^ 0xFFU);
+            if (!runtime_agent::writeText(body, &scribble, 1, nullptr).complete()) {
+                std::cerr << "the body could not be changed to stage the refusal\n";
+                return 112;
+            }
+
+            runtime_agent::RelocatedPrologue refused;
+            const bool installed = runtime_agent::installRelocatedPrologue(
+                stalePlan, nullptr, quiet, *writer, refused, why);
+            (void)runtime_agent::writeText(body, &was, 1, nullptr);
+
+            if (installed || why.find("Plan again") == std::string::npos) {
+                std::cerr << "an install against a changed body was not refused: "
+                          << why << '\n';
+                return 113;
+            }
+            const std::size_t mappedAfter = mappedByteCount();
+            if (mappedAfter != mappedBefore) {
+                std::cerr << "a refused install kept its pages: " << mappedBefore
+                          << " bytes mapped before, " << mappedAfter << " after\n";
+                return 114;
+            }
+            if (fixtureAddsOne(10) != 11) {
+                std::cerr << "staging the refusal left the fixture changed\n";
+                return 115;
+            }
         }
 
         // An operand naming its address as a distance has to name the same
