@@ -163,15 +163,10 @@ fixtureCallsThroughARegister:
 
 // A symbol that is not a function, for the planner's type check.
 //
-// Exported and sized exactly like the functions above, so it reaches the type
-// check rather than being refused earlier for want of a symbol or a size. Its
-// bytes are an ordinary value, which is the point: decoding them as a prologue
-// would be decoding data.
-asm(R"(
-.data
-.globl fixtureNotAFunction
-.type fixtureNotAFunction, @object
-fixtureNotAFunction:
-    .quad 0x1122334455667788
-.size fixtureNotAFunction, .-fixtureNotAFunction
-)");
+// An ordinary definition rather than assembly like the fixtures above, because
+// the compiler already emits exactly what this needs: an exported symbol of
+// type STT_OBJECT with a size, which is what the planner reads. Writing it as a
+// .data block instead cost an LTO build, where the debug line information GCC
+// attaches to inline assembly has nowhere to go in a data section and the
+// assembler rejects the result.
+unsigned long long fixtureNotAFunction = 0x1122334455667788ULL;
