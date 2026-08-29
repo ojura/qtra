@@ -22,9 +22,11 @@ namespace runtime_agent {
 // nothing has been written there.
 //
 // availableBytes is a measurement taken at resolve time: the count of untouched
-// NOPs starting at patchAddress. Installing anything destroys the evidence, so
-// a site is a snapshot. Resolve before writing, carry the result, and confirm it
-// again under quiescence.
+// NOPs starting at patchAddress. Anything else there, including the 0xCC a
+// uprobe writes over an instruction it is measuring, shortens the count and the
+// site is refused. Installing anything destroys the evidence, so a site is a
+// snapshot. Resolve before writing, carry the result, and confirm it again
+// under quiescence.
 struct PatchSite {
     void* entry = nullptr;
     void* patchAddress = nullptr;

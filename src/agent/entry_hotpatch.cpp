@@ -136,6 +136,14 @@ bool siteAcceptsGateway(const PatchSite& site, std::string& error)
 
     // Confirmed against what is there now. The site is a measurement taken
     // earlier and this is the last moment before the write.
+    //
+    // This is also what stops an instrumented target being overwritten.
+    // Measuring a function usually costs a byte of it: a uprobe writes 0xCC
+    // over an instruction, and only a hardware execution breakpoint leaves the
+    // text alone, of which there are four. So a target being measured does not
+    // hold its reserved NOPs, and refusing here is correct: measurement ends
+    // before installation begins, and a probe left in place is a reason to stop
+    // rather than something to write through.
     const auto* bytes = static_cast<const std::uint8_t*>(site.patchAddress);
     for (std::size_t index = 0; index < site.availableBytes; ++index) {
         if (bytes[index] != 0x90U) {
