@@ -884,7 +884,7 @@ the continuation, and `entryState` reports which of those is true:
 | `recovery-required` | an install changed bytes and could not finish |
 
 ```bash
-python3 tools/agentctl.py patch build/release-patch-ready/cube_patch_wobble.so
+python3 tools/agentctl.py patch build/release/cube_patch_wobble.so
 python3 tools/agentctl.py call patch.status
 python3 tools/agentctl.py call patch.rollback
 ```
@@ -919,15 +919,19 @@ the function somewhere, made a specialised copy, or folded it together with an
 identical function, those keep running the original code and the entry never
 sees them. None of that survives into an optimised binary.
 
-So the build works it out and writes it down. `PATCH_READY=ON` keeps split
-DWARF and GCC's clone dumps, and `tools/analyze_coverage.py` combines them with
-the final ELF symbols and the flags above into a manifest keyed by the binary's
+So the build works it out and writes it down. `PATCH_READY` keeps split DWARF
+and GCC's clone dumps, and `tools/analyze_coverage.py` combines them with the
+final ELF symbols and the flags above into a manifest keyed by the binary's
 build id:
 
 ```bash
-cmake --preset release-patch-ready
-python3 -m json.tool build/release-patch-ready/coverage-manifest.json
+python3 -m json.tool build/release/coverage-manifest.json
 ```
+
+`PATCH_READY` is on for the three GUI presets, so an ordinary build carries
+this evidence and replacing the function is admitted. Turning it off produces a
+build where the question was never asked, and both the socket and a module's
+`patch_bind` refuse.
 
 Activation reads it, checks it describes this build and this function, and
 refuses unless it says coverage is complete. A missing manifest is also a

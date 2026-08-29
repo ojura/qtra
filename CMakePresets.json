@@ -14,7 +14,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "BUILD_QT_APP": "ON"
+        "BUILD_QT_APP": "ON",
+        "PATCH_READY": "ON"
       }
     },
     {
@@ -37,7 +38,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
-        "BUILD_QT_APP": "ON"
+        "BUILD_QT_APP": "ON",
+        "PATCH_READY": "ON"
       }
     },
     {
@@ -49,7 +51,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "ENABLE_CET": "ON",
-        "BUILD_QT_APP": "ON"
+        "BUILD_QT_APP": "ON",
+        "PATCH_READY": "ON"
       }
     },
     {
@@ -74,18 +77,6 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "ENABLE_CET": "ON",
         "BUILD_QT_APP": "OFF"
-      }
-    },
-    {
-      "name": "release-patch-ready",
-      "displayName": "Optimized Qt runtime-agent demo, keeping coverage evidence",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/release-patch-ready",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "BUILD_QT_APP": "ON",
-        "PATCH_READY": "ON"
       }
     }
   ],
@@ -113,10 +104,6 @@
     {
       "name": "release-cet",
       "configurePreset": "release-cet"
-    },
-    {
-      "name": "release-patch-ready",
-      "configurePreset": "release-patch-ready"
     }
   ],
   "testPresets": [
