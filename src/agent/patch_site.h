@@ -14,9 +14,18 @@
 // declared by the build that set the flag and confirmed against the image.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace runtime_agent {
+
+// ENDBR64, which is what an indirect branch is allowed to land on where the
+// build asks for landing pads.
+//
+// Here because the requirement is a property of a site, which is what
+// requiresEndbr64 below records. Three files had their own copy of these four
+// bytes, and a landing pad is one fact about one instruction encoding.
+inline constexpr std::uint8_t endbr64Bytes[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
 
 // One resolved site, valid for the image that produced it and for as long as
 // nothing has been written there.

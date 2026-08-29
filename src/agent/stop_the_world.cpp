@@ -1,5 +1,7 @@
 #include "agent/stop_the_world.h"
 
+#include "agent/errno_text.h"
+
 #include <atomic>
 #include <cerrno>
 #include <cstring>
@@ -320,7 +322,7 @@ bool currentThreadIds(std::vector<int>& tids, std::string& error)
     int failure = 0;
     if (!readThreadIds(storage, maxParked + 1, count, failure)) {
         error = std::string("could not read this process's thread list: ")
-            + std::strerror(failure);
+            + errnoText(failure);
         return false;
     }
     tids.clear();
@@ -388,7 +390,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
             const int failure = errno;
             controllerBusy.store(false, std::memory_order_release);
             error = std::string("could not install the parking handler: ")
-                + std::strerror(failure);
+                + errnoText(failure);
             return nullptr;
         }
 
@@ -469,7 +471,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
 
     if (!readThreadIds(before, maxParked + 1, beforeCount, failure)) {
         return giveUp(std::string("could not read this process's threads: ")
-                      + std::strerror(failure));
+                      + errnoText(failure));
     }
 
     const int self = currentTid();
@@ -511,7 +513,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     if (::sigaction(m_signal, nullptr, &current) != 0) {
         const int why = errno;
         return giveUp(std::string("could not read what this signal currently reaches: ")
-                      + std::strerror(why));
+                      + errnoText(why));
     }
     if ((current.sa_flags & SA_SIGINFO) == 0 || current.sa_sigaction != &parkHandler) {
         return giveUp("something has installed over the parking handler since it was "
@@ -612,7 +614,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     if (!readThreadIds(after, maxParked + 1, afterCount, failure)) {
         lease.reset();
         error = std::string("could not read this process's threads: ")
-            + std::strerror(failure);
+            + errnoText(failure);
         return nullptr;
     }
     if (!sameThreads(before, beforeCount, after, afterCount)) {

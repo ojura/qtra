@@ -1,5 +1,8 @@
 #include "agent/got_site.h"
 
+#include "agent/errno_text.h"
+#include "agent/patch_site.h"
+
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
@@ -299,7 +302,7 @@ SlotWriteResult storeIntoSlot(void** slot, void* value, const int protection,
 
     if (!alreadyWritable && protect(page, span, protection | PROT_WRITE) != 0) {
         result.error = std::string("could not make the slot writable: ")
-            + std::strerror(errno);
+            + errnoText(errno);
         return result;
     }
 
@@ -314,7 +317,7 @@ SlotWriteResult storeIntoSlot(void** slot, void* value, const int protection,
         result.error = std::string("the slot now names the new destination and the mapping "
                                    "could not be put back to the permissions the loader "
                                    "chose: ")
-            + std::strerror(errno);
+            + errnoText(errno);
     }
     return result;
 }
@@ -342,7 +345,7 @@ bool pageProtectionOf(const void* address, int& protection, std::string& error)
 {
     std::FILE* maps = std::fopen("/proc/self/maps", "re");
     if (maps == nullptr) {
-        error = std::string("could not read this process's mappings: ") + std::strerror(errno);
+        error = std::string("could not read this process's mappings: ") + errnoText(errno);
         return false;
     }
     const auto wanted = reinterpret_cast<std::uintptr_t>(address);
@@ -378,9 +381,8 @@ bool hasLandingPad(const void* destination) noexcept
         return false;
     }
     // endbr64, which is what an indirect branch is permitted to land on.
-    static constexpr std::uint8_t marker[] = {0xF3U, 0x0FU, 0x1EU, 0xFAU};
     const auto* bytes = static_cast<const std::uint8_t*>(destination);
-    return std::memcmp(bytes, marker, sizeof(marker)) == 0;
+    return std::memcmp(bytes, endbr64Bytes, sizeof(endbr64Bytes)) == 0;
 }
 
 bool resolveGotSlots(const CallerQuery& caller,

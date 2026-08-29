@@ -1,5 +1,8 @@
 #include "agent/prologue_relocation.h"
 
+#include "agent/errno_text.h"
+#include "agent/patch_site.h"
+
 #include <atomic>
 #include <new>
 #include <cerrno>
@@ -22,7 +25,9 @@ namespace {
 using runtime_agent::entryJumpBytes;
 
 // endbr64, which a function begins with on a build asking for landing pads.
-constexpr std::uint8_t landingPad[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
+// The bytes are declared beside the site rule that requires them; this is the
+// name they go by here, where what matters is that the copy starts with one.
+constexpr auto& landingPad = runtime_agent::endbr64Bytes;
 
 // A direct relative jump, which is what the tail of the copy uses.
 //
@@ -461,8 +466,21 @@ bool decodeInstruction(const std::uint8_t* at,
         decoded.transfer = (!escaped && primaryOpcode == 0xE8U)
             ? DecodedInstruction::Transfer::Call
             : DecodedInstruction::Transfer::Exit;
-        decoded.branchTarget = reinterpret_cast<std::uintptr_t>(origin + offset)
-            + static_cast<std::uintptr_t>(delta);
+        // Formed as integers, not by advancing the pointer.
+        //
+        // origin points into a function's instructions. Those are bytes this
+        // program never declared as an array, so how far a pointer into them may
+        // legally be advanced is not something the language defines, and a
+        // compiler is entitled to assume it stays within an object that is not
+        // there. Casting to an integer first asks the same arithmetic of the
+        // machine and leaves nothing for it to assume.
+        //
+        // delta is signed and often negative. Converting it to the unsigned type
+        // and adding wraps, which is exactly the two's-complement result wanted,
+        // and unlike signed overflow it is defined.
+        const auto instructionEnd =
+            reinterpret_cast<std::uintptr_t>(origin) + static_cast<std::uintptr_t>(offset);
+        decoded.branchTarget = instructionEnd + static_cast<std::uintptr_t>(delta);
     }
 
     // XBEGIN, which shares its opcode with an ordinary move and is told apart
@@ -933,14 +951,17 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
             return false;
         }
         if (decoded.ripRelative) {
-            const std::uint8_t* const originalAt = patchAt + offset;
             std::uint8_t* const copiedAt = copy + sizeof(landingPad) + offset;
             std::int32_t displacement = 0;
             std::memcpy(&displacement, plannedAt + decoded.displacementOffset,
                         sizeof(displacement));
 
-            const auto originalEnd =
-                reinterpret_cast<std::intptr_t>(originalAt + decoded.length);
+            // The original's end is formed as an integer for the same reason as
+            // the branch target above: patchAt points into the function being
+            // moved, which is not an array object this program declared. The
+            // copy is our own mapping, so that one stays a pointer.
+            const auto originalEnd = static_cast<std::intptr_t>(
+                reinterpret_cast<std::uintptr_t>(patchAt) + offset + decoded.length);
             const auto copiedEnd = reinterpret_cast<std::intptr_t>(copiedAt + decoded.length);
             const std::intptr_t corrected =
                 static_cast<std::intptr_t>(displacement) + originalEnd - copiedEnd;
@@ -964,7 +985,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     }
 
     if (::mprotect(trampoline, codeBytes, PROT_READ | PROT_EXEC) != 0) {
-        const std::string reason = std::strerror(errno);
+        const std::string reason = errnoText(errno);
         (void)::munmap(trampoline, mappedBytes);
         error = "the copy could not be made executable: " + reason;
         return false;

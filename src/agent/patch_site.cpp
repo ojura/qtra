@@ -15,8 +15,6 @@ extern const std::uint8_t __stop___patchable_function_entries[] __attribute__((w
 
 namespace {
 
-constexpr std::uint8_t endbr64[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
-
 std::string addressString(const void* address)
 {
     std::ostringstream stream;
@@ -39,8 +37,9 @@ bool associatedWith(const std::uint8_t* function,
         behindLandingPad = false;
         return true;
     }
-    if (recorded == address + sizeof(endbr64)
-        && __builtin_memcmp(function, endbr64, sizeof(endbr64)) == 0) {
+    if (recorded == address + sizeof(runtime_agent::endbr64Bytes)
+        && __builtin_memcmp(function, runtime_agent::endbr64Bytes,
+                            sizeof(runtime_agent::endbr64Bytes)) == 0) {
         behindLandingPad = true;
         return true;
     }

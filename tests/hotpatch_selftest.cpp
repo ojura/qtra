@@ -22,8 +22,6 @@
 
 namespace {
 
-constexpr std::array<std::uint8_t, 4> endbr64{0xF3U, 0x0FU, 0x1EU, 0xFAU};
-
 bool approximatelyEqual(float a, float b)
 {
     return std::abs(a - b) < 0.0001F;
@@ -164,9 +162,10 @@ int main(int argc, char** argv)
 
     const auto* targetBytes = reinterpret_cast<const std::uint8_t*>(
         reinterpret_cast<void*>(&cube_step_builtin));
-    const bool cetTarget = std::equal(endbr64.begin(), endbr64.end(), targetBytes);
+    const bool cetTarget = std::equal(std::begin(runtime_agent::endbr64Bytes),
+                                      std::end(runtime_agent::endbr64Bytes), targetBytes);
     const auto expectedPatchAddress = reinterpret_cast<std::uintptr_t>(targetBytes)
-        + (cetTarget ? endbr64.size() : 0U);
+        + (cetTarget ? sizeof(runtime_agent::endbr64Bytes) : 0U);
     if (reinterpret_cast<std::uintptr_t>(site.patchAddress) != expectedPatchAddress
         || site.availableBytes != runtime_agent::patchAreaBytes
         || site.requiresEndbr64 != cetTarget) {
@@ -946,7 +945,8 @@ int main(int argc, char** argv)
         std::cerr << "activate did not select a replacement\n";
         return 18;
     }
-    if (cetTarget && !std::equal(endbr64.begin(), endbr64.end(), targetBytes)) {
+    if (cetTarget && !std::equal(std::begin(runtime_agent::endbr64Bytes),
+                                 std::end(runtime_agent::endbr64Bytes), targetBytes)) {
         std::cerr << "the CET landing pad was overwritten\n";
         return 19;
     }

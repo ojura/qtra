@@ -1,10 +1,11 @@
 #include "agent/entry_hotpatch.h"
 
+#include "agent/errno_text.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <limits>
-#include <sstream>
 #include <string>
 
 #if defined(__linux__)
@@ -17,10 +18,9 @@ namespace {
 
 std::string errnoMessage(const char* operation)
 {
-    std::ostringstream stream;
-    stream << operation << " failed: " << std::strerror(errno)
-           << " (errno=" << errno << ')';
-    return stream.str();
+    // Saved first. Building the string is allowed to touch errno itself.
+    const int number = errno;
+    return std::string(operation) + " failed: " + errnoText(number);
 }
 
 } // namespace
@@ -126,10 +126,8 @@ std::vector<std::uint8_t> encodeGateway(void* slotAddress, const std::size_t are
 
     // endbr64, the continuation. Reached only through the indirect jump above,
     // so under CET it has to be a landing pad.
-    bytes[13] = 0xF3U;
-    bytes[14] = 0x0FU;
-    bytes[15] = 0x1EU;
-    bytes[16] = 0xFAU;
+    static_assert(sizeof(endbr64Bytes) == 4);
+    std::memcpy(bytes.data() + 13, endbr64Bytes, sizeof(endbr64Bytes));
     return bytes;
 }
 
@@ -195,9 +193,8 @@ bool replacementIsReachable(const PatchSite& site, const void* replacement, std:
         return false;
     }
 
-    constexpr std::uint8_t endbr64[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
     if (site.requiresEndbr64
-        && std::memcmp(replacement, endbr64, sizeof(endbr64)) != 0) {
+        && std::memcmp(replacement, endbr64Bytes, sizeof(endbr64Bytes)) != 0) {
         error = "this entry sits behind a CET landing pad, so the jump to it is indirect "
                 "and anything it reaches has to begin with ENDBR64";
         return false;
