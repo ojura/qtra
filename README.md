@@ -172,6 +172,29 @@ clean exit. A process killed with `SIGKILL` leaves a stale
 | a rebuilt snippet runs its old code | `dlopen()` keys objects by pathname and returned the resident handle. Use `agentctl.py reload`. |
 | queued `render` work never runs | the window is hidden and the compositor has stopped sending frame callbacks. A 100 ms watchdog drains the queue through `grabFramebuffer()`, so this resolves itself. |
 | `unknown_parameter` | the command does not read that parameter, and the error names what it does read. |
+| `agentctl.py` cannot connect | the application prints the path it is listening on. Both sides default to `/tmp/qt-runtime-cube-<uid>.sock`; a custom one has to be given to both with `--agent-socket`. |
+| cmake cannot find Qt | install the distribution's Qt 6 development packages, or point `CMAKE_PREFIX_PATH` at another installation. |
+| no display, or no OpenGL context | `./scripts/run_xvfb.sh` starts one with software rendering. `scripts/install_deps_debian.sh` installs Xvfb and Mesa. |
+| the build oracle calls a context ambiguous | the application and the self-test both compile `src/cube_step.cpp`, so name the object the error lists, such as `qt_runtime_cube.dir/src/cube_step.cpp.o`. |
+| a snippet refuses and names an executor | Qt widget work belongs on `gui`, work on a thread-affine object on `object`, and OpenGL work on `render`. |
+| `agent_snippet_audio_pulse` is missing | PulseAudio development files were absent when cmake ran. Install `libpulse-dev` and build again; only that one target is skipped. |
+
+## Terms
+
+| term | meaning |
+|---|---|
+| client | `agentctl.py`, another local program, or anything speaking the JSON-lines protocol |
+| host | the running application, and what it offers a native module |
+| snippet | a shared object exporting `runtime_agent_snippet_init` |
+| executor | the Qt context a snippet runs in: `gui`, `object` or `render` |
+| patch module | a shared object exporting a replacement for the step function |
+| patch site | a resolved function entry and the area prepared at it |
+| gateway | the code written at an entry, which jumps through a slot |
+| continuation | the address that carries on into the original function |
+| binding | one module's claim on what the entry reaches |
+| generation | a retained replacement and its owner. Released ones stay mapped, because a thread can be between reading the slot and jumping |
+| build oracle | the tooling that derives a module's compiler command from `compile_commands.json` |
+| coverage manifest | what the build recorded about aliases, clones, preparation, identity, and which threads reach the target |
 
 ## Validation
 
@@ -179,11 +202,14 @@ clean exit. A process killed with `SIGKILL` leaves a stale
 ./scripts/validate.sh
 ```
 
-Three Release configurations, four tests each: ordinary `-O3`, `-O3` with GCC
-LTO, and `-O3` with Intel CET/IBT. Each configuration runs the two raw hotpatch
-tests against its own binary, the admission-order checks, and the Python tests,
-which cover compilation-command transformation, retained-event replay, quiet
-event streams, socket protocol behavior, and activation over the socket. For
+Three Release configurations, eight tests each: ordinary `-O3`, `-O3` with GCC
+LTO, and `-O3` with Intel CET/IBT. Against its own binary, each configuration
+runs the two raw hotpatch tests, the admission-order checks, thread accounting,
+what a second adapter finds after the first one is gone, a redirect through the
+GOT of a function the loader already resolved, what an entry holds when its page
+cannot be made executable again, and the Python tests, which cover
+compilation-command transformation, retained-event replay, quiet event streams,
+socket protocol behavior, and activation over the socket. For
 each configuration the build oracle then derives a fresh `-O3` shared-object
 command from that build's `compile_commands.json`, compiles
 `patches/wobble_patch.cpp` with it, and puts the result through the same
@@ -971,6 +997,30 @@ is in the repository as source besides. The rule is to save what you overwrite
 The application makes an ordinary direct call to `cube_step_builtin` once per
 animation tick. It holds no pointer for the agent to swap and knows nothing
 about being patched. Everything below is done to it, not with its help.
+
+What happens, in order:
+
+```text
+read what the build recorded
+        |
+check the replacement's effect, and that the evidence names this binary
+        |
+resolve the prepared site, and that the replacement can be reached from it
+        |
+first time only: admit a write into live text, and install the gateway
+        |
+select the replacement with one store into the slot
+        |
+release it, and the slot names the newest live predecessor, or the original
+```
+
+Only the fourth step changes instruction bytes, and only it needs execution
+stopped. Selecting and releasing afterwards each change one aligned pointer.
+
+A write that copies the whole gateway and then cannot make the mapping
+executable again leaves an entry that works, because the copy does not
+half-fail. `mappingLeftWritable` reports the page, which is a permission to put
+back and needs neither a code write nor anything stopped.
 
 ### The gateway
 
