@@ -673,7 +673,7 @@ int main(int argc, char** argv)
 
         // Recovering through the second reference proves it is the same state
         // and not a copy that merely reports the same thing.
-        if (!successor.recover(faultError)) {
+        if (!successor.recover(quiet, faultError)) {
             std::cerr << "recovery failed: " << faultError << '\n';
             return 20;
         }

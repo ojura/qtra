@@ -144,7 +144,15 @@ public:
     // Puts the entry back to its own bytes. Only possible while recovering from
     // an install that never finished, which still holds the lease that stopped
     // execution.
-    [[nodiscard]] bool recover(std::string& error);
+// Takes its own quiescer, and does not reuse the install's.
+    //
+    // This writes the entry's own bytes back, which is a code write happening
+    // now and not a continuation of the one that failed. What admitted that
+    // write is history: it says what was true then. Whether these bytes may be
+    // written at this moment is a fresh question, and a policy that parked
+    // every thread cannot have kept its lease this long anyway, since nothing
+    // could have run to ask for recovery.
+    [[nodiscard]] bool recover(Quiescer& quiescer, std::string& error);
 
     [[nodiscard]] PatchStatus status() const;
     [[nodiscard]] PatchState state() const noexcept { return m_state; }

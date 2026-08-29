@@ -583,7 +583,8 @@ bool ModuleManager::resetActivePatch(QString& error)
         // What makes recovery safe is the lease that install is still holding
         // and the check above, which is a fact about this instant.
         std::string nativeError;
-        if (!m_patches.recover(nativeError)) {
+        SameThreadRequestBoundary recoveryQuiescer(m_cube);
+        if (!m_patches.recover(recoveryQuiescer, nativeError)) {
             error = QString::fromStdString(nativeError);
             return false;
         }

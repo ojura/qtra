@@ -261,11 +261,22 @@ bool PatchManager::unbind(const std::uint64_t id, const std::uint64_t owner, std
     return false;
 }
 
-bool PatchManager::recover(std::string& error)
+bool PatchManager::recover(Quiescer& quiescer, std::string& error)
 {
     error.clear();
     if (m_state != PatchState::RecoveryRequired) {
         error = "there is nothing to recover";
+        return false;
+    }
+
+    // Its own stop. The install's lease may still be held, in which case this
+    // asks for a second one over the same bytes and a policy that stopped
+    // nothing gives it freely; or it was let go because it could not be held,
+    // in which case threads have been running and nothing about the earlier
+    // stop says anything about now.
+    std::unique_ptr<QuiescenceLease> lease = quiescer.acquire(
+        WriteRegion{m_record->site.patchAddress, m_recovery->original.size()}, error);
+    if (lease == nullptr) {
         return false;
     }
 
