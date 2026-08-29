@@ -252,6 +252,16 @@ struct RelocatedPrologue {
 
     // What the entry held, so restoring is a copy and not a reconstruction.
     std::vector<std::uint8_t> savedBytes;
+
+    // What installing wrote there, so restoring can tell whether the entry is
+    // still the one this record describes.
+    //
+    // Without it a restore is unconditional, and a record kept past the point
+    // where something else claimed the entry would put these bytes over that
+    // claim. Compared under the lease, for the same reason the install compares
+    // the opening and the body: the answer has to be about the bytes at the
+    // moment nothing is running in them.
+    std::vector<std::uint8_t> installedBytes;
 };
 
 // Moves the prologue and points the entry at the replacement.

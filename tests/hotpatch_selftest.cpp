@@ -587,6 +587,27 @@ int main(int argc, char** argv)
             return 61;
         }
 
+        // The same record, used a second time.
+        //
+        // After the restore above, the entry holds the function's own bytes and
+        // not what installing wrote. This record no longer describes it. A
+        // restore that only checks its own fields would write the saved bytes
+        // over whatever holds the entry now, and report success. Here that is
+        // the original, so nothing visible breaks; the case worth refusing is
+        // the one where something else has claimed the entry in between, and
+        // the check that refuses this refuses that.
+        why.clear();
+        if (runtime_agent::restoreRelocatedPrologue(moved, quiet, *writer, why)
+            || why.find("no longer holds what installing wrote") == std::string::npos) {
+            std::cerr << "a record whose entry had already been restored was used again: "
+                      << why << '\n';
+            return 108;
+        }
+        if (fixtureAddsOne(10) != 11) {
+            std::cerr << "the refused second restore wrote anyway\n";
+            return 109;
+        }
+
         // An operand naming its address as a distance has to name the same
         // address once moved. The copy sits somewhere else entirely, so an
         // uncorrected distance would read whatever happens to be near it.

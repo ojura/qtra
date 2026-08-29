@@ -1114,6 +1114,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     }
 
     installed.plan = plan;
+    installed.installedBytes = written;
     installed.trampoline = trampoline;
     installed.trampolineBytes = trampolineBytes;
     installed.mappedBytes = mappedBytes;
@@ -1140,11 +1141,35 @@ bool restoreRelocatedPrologue(const RelocatedPrologue& installed,
         error = "there is nothing recorded to put back";
         return false;
     }
+    if (installed.installedBytes.size() != installed.savedBytes.size()) {
+        error = "this record does not say what installing wrote, so there is no way to tell "
+                "whether the entry is still the one it describes";
+        return false;
+    }
 
     // The same bytes going back, so the same question about them.
     std::unique_ptr<QuiescenceLease> lease = quiescer.acquire(
         WriteRegion{installed.plan.patchAddress, installed.plan.takenBytes}, error);
     if (lease == nullptr) {
+        return false;
+    }
+
+    // The entry has to still hold what this record's install put there.
+    //
+    // Installing compares the opening and the body before writing, and restore
+    // had no equivalent: it wrote savedBytes back whenever the record looked
+    // filled in. A record outliving its claim on the entry would then put its
+    // bytes over whatever holds the entry now, which is the newer install, and
+    // the caller would be told it succeeded.
+    if (std::memcmp(installed.plan.patchAddress, installed.installedBytes.data(),
+                    installed.installedBytes.size())
+        != 0) {
+        // Threads first: building the message can wait on a lock a parked
+        // thread holds.
+        lease.reset();
+        error = "this entry no longer holds what installing wrote, so this record is not the "
+                "one describing it and putting these bytes back would overwrite whatever "
+                "does";
         return false;
     }
 
