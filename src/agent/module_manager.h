@@ -111,6 +111,10 @@ public:
     // it, and a status that read the file separately could say one thing
     // while an activation in the next breath answered to another.
     [[nodiscard]] QJsonObject coverage();
+    // Puts the label back in step with what the entry actually reaches.
+    // Called after anything that can change that, so the window never shows
+    // a claim the manager would contradict.
+    void refreshLabel();
 
 private:
     // The one place that decides whether a write may go ahead, so both the

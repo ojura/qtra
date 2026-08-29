@@ -169,6 +169,90 @@ class PatchActivation(unittest.TestCase):
     BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and HAS_DISPLAY,
     f"needs a display and a built, manifest-bearing {BUILD}",
 )
+class MixedGenerations(unittest.TestCase):
+    """What the entry reaches, said twice, through a stack bound both ways.
+
+    The window's label and patch.status answer one question. They were written
+    from separate places, so releasing a host generation could leave the label
+    naming the released binding while status named the protocol one underneath,
+    and a protocol rollback left the label naming a module that no longer ran.
+    """
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        print(f"driving {BINARY.resolve()}", flush=True)
+        self.agent = Agent(Path(directory.name) / "agent.sock")
+        self.addCleanup(self.agent.close)
+
+    def label(self) -> str:
+        # object.get answers with the value itself.
+        return self.agent.ok("object.get", objectName="cubeView", property="activePatch")
+
+    def module_names(self) -> dict:
+        return {m["id"]: m["name"] for m in self.agent.ok("module.list")}
+
+    def assert_agrees(self, where: str) -> dict:
+        """The label names exactly the module status says is running.
+
+        Checking only that it is not "builtin" would pass while the label named
+        a module that had just let go, which is the defect.
+        """
+        status = self.agent.ok("patch.status")
+        label = self.label()
+        if status["mode"] == "builtin":
+            self.assertEqual(label, "builtin", where)
+        else:
+            expected = self.module_names().get(status["moduleId"])
+            self.assertIsNotNone(expected, f"{where}: status named an unknown module")
+            self.assertEqual(label, f"entry: {expected}", where)
+        return status
+
+    def test_label_and_status_agree_through_a_mixed_stack(self) -> None:
+        snippet_path = BUILD / "agent_snippet_audio_pulse.so"
+        if not snippet_path.exists():
+            self.skipTest("built without PulseAudio, so nothing binds through the host")
+
+        self.assert_agrees("before anything")
+
+        # The protocol's own binding first.
+        module = self.agent.ok("patch.load", path=str(PATCH_MODULE))["moduleId"]
+        self.agent.ok("patch.activate", moduleId=module, acceptIncompleteCoverage=False)
+        after_protocol = self.assert_agrees("after the protocol bind")
+        self.assertEqual(after_protocol["moduleId"], str(module))
+
+        # A host binding stacked on top of it.
+        snippet = self.agent.ok("snippet.load", path=str(snippet_path))["moduleId"]
+        self.agent.ok("snippet.run", moduleId=snippet, executor="render", request={})
+        for _ in range(100):
+            if self.agent.ok("patch.status")["moduleId"] == str(snippet):
+                break
+            time.sleep(0.05)
+        stacked = self.assert_agrees("with both bound")
+        self.assertEqual(stacked["moduleId"], str(snippet))
+
+        # Releasing the selected host generation reveals the protocol one
+        # underneath, which is where the label used to keep naming the module
+        # that had just let go.
+        self.agent.ok("snippet.release", moduleId=snippet)
+        for _ in range(100):
+            if self.agent.ok("patch.status")["moduleId"] == str(module):
+                break
+            time.sleep(0.05)
+        revealed = self.assert_agrees("after releasing the host binding")
+        self.assertEqual(revealed["moduleId"], str(module))
+
+        # And rolling the protocol one back leaves nothing selected.
+        self.agent.ok("patch.rollback")
+        final = self.assert_agrees("after rolling back")
+        self.assertEqual(final["mode"], "builtin")
+        self.assertEqual(final["entryState"], "original")
+
+
+@unittest.skipUnless(
+    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and HAS_DISPLAY,
+    f"needs a display and a built, manifest-bearing {BUILD}",
+)
 class RetainedEvidence(unittest.TestCase):
     """What answers a later request once the manifest has been read.
 

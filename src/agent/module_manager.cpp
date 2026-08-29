@@ -382,6 +382,35 @@ runtime_agent::CoverageDecision ModuleManager::readDecision() const
         manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
 }
 
+void ModuleManager::refreshLabel()
+{
+    // From the manager, for the same reason status is. The label was written
+    // imperatively at each call site, so releasing a host generation could
+    // reveal a protocol predecessor while the window still named the released
+    // one, and a release that changed no selection left whatever was written
+    // last.
+    if (m_cube == nullptr) {
+        return;
+    }
+    const runtime_agent::PatchStatus patch = m_patches.status();
+    QString label = QStringLiteral("builtin");
+    if (patch.state == runtime_agent::PatchState::RecoveryRequired) {
+        label = QStringLiteral("entry (recovery required)");
+        if (const LoadedModule* owner = module(m_activeEntryModule); owner != nullptr) {
+            label += QStringLiteral(": %1").arg(owner->name);
+        }
+    } else if (m_patches.replacementSelected()) {
+        // Named by whoever owns the selected generation, which is the module
+        // whose code the entry reaches, on either path.
+        const LoadedModule* owner = module(patch.selectedOwner);
+        label = owner != nullptr
+            ? QStringLiteral("entry: %1").arg(owner->name)
+            : QStringLiteral("entry: binding %1").arg(patch.selectedBinding);
+    }
+    m_cube->setActivePatchLabel(label);
+    m_cube->update();
+}
+
 QJsonObject ModuleManager::coverage()
 {
     const runtime_agent::CoverageDecision decision = latestEvidence();
@@ -485,9 +514,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         error = QString::fromStdString(nativeError);
         if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
             m_activeEntryModule = id;
-            m_cube->setActivePatchLabel(
-                QStringLiteral("entry (recovery required): %1").arg(loaded->name));
-            m_cube->update();
+            refreshLabel();
         }
         return false;
     }
@@ -500,8 +527,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
             // The manager is holding execution stopped. Recording the module
             // keeps rollback able to name what is installed.
             m_activeEntryModule = id;
-            m_cube->setActivePatchLabel(
-                QStringLiteral("entry (recovery required): %1").arg(loaded->name));
+            refreshLabel();
         }
         return false;
     }
@@ -523,7 +549,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
 
     m_entryBinding = binding.id;
     m_activeEntryModule = id;
-    m_cube->setActivePatchLabel(QStringLiteral("entry: %1").arg(loaded->name));
+    refreshLabel();
     return true;
 #endif
 }
@@ -601,7 +627,7 @@ int ModuleManager::bindReplacement(void* target,
         error = QString::fromStdString(nativeError);
         return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;
     }
-    m_cube->setActivePatchLabel(QStringLiteral("entry: binding %1").arg(binding.id));
+    refreshLabel();
     return 0;
 }
 
@@ -623,9 +649,7 @@ int ModuleManager::releaseBinding(const std::uint64_t bindingId,
         error = QString::fromStdString(nativeError);
         return error.contains(QStringLiteral("another module")) ? -2 : -1;
     }
-    if (!m_patches.replacementSelected()) {
-        m_cube->setActivePatchLabel(QStringLiteral("builtin"));
-    }
+    refreshLabel();
     return 0;
 }
 
@@ -749,7 +773,7 @@ bool ModuleManager::resetActivePatch(QString& error)
         }
         m_entryBinding = 0;
         m_activeEntryModule = 0;
-        m_cube->setActivePatchLabel(QStringLiteral("builtin"));
+        refreshLabel();
         return true;
     }
 
@@ -763,6 +787,10 @@ bool ModuleManager::resetActivePatch(QString& error)
     }
 
     m_activeEntryModule = 0;
+    // Releasing the protocol's binding can reveal a host generation bound
+    // underneath it, so what the entry reaches has to be asked again rather
+    // than assumed to be the built-in one.
+    refreshLabel();
     return true;
 }
 
