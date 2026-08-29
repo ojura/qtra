@@ -223,7 +223,8 @@ int main(int argc, char** argv)
     {
         std::string gotError;
         runtime_agent::GotSite site;
-        if (!runtime_agent::resolveGotSlot("", "memcpy", site, gotError)) {
+        if (!runtime_agent::resolveGotSlot(runtime_agent::CallerQuery::byName(""), "memcpy",
+                                           site, gotError)) {
             std::cerr << "could not find the slot memcpy is called through: " << gotError << '\n';
             return 40;
         }
@@ -240,8 +241,8 @@ int main(int argc, char** argv)
         }
 
         if (!runtime_agent::redirectGotSlot(
-                site, reinterpret_cast<void*>(&countingMemcpy), gotError)) {
-            std::cerr << "could not redirect the slot: " << gotError << '\n';
+                 site, reinterpret_cast<void*>(&countingMemcpy)).complete()) {
+            std::cerr << "could not redirect the slot\n";
             return 43;
         }
         copyThroughTheTable(gotScratch, "redirected", 11);
@@ -254,8 +255,8 @@ int main(int argc, char** argv)
             return 45;
         }
 
-        if (!runtime_agent::restoreGotSlot(site, gotError)) {
-            std::cerr << "could not put the slot back: " << gotError << '\n';
+        if (!runtime_agent::restoreGotSlot(site).complete()) {
+            std::cerr << "could not put the slot back\n";
             return 46;
         }
         if (*site.slot != site.resolved) {
@@ -279,14 +280,14 @@ int main(int argc, char** argv)
         {
             runtime_agent::GotSite inModule;
             std::string moduleError;
-            if (runtime_agent::resolveGotSlot(patchModuleName, "fmodf", inModule,
-                                              moduleError)) {
+            if (runtime_agent::resolveGotSlot(
+                    runtime_agent::CallerQuery::byName(patchModuleName), "fmodf", inModule,
+                    moduleError)) {
                 const int chosen = inModule.pageProtection;
                 if (!runtime_agent::redirectGotSlot(
-                        inModule, reinterpret_cast<void*>(&countingMemcpy), moduleError)
-                    || !runtime_agent::restoreGotSlot(inModule, moduleError)) {
-                    std::cerr << "the module's slot could not be redirected and put back: "
-                              << moduleError << '\n';
+                         inModule, reinterpret_cast<void*>(&countingMemcpy)).complete()
+                    || !runtime_agent::restoreGotSlot(inModule).complete()) {
+                    std::cerr << "the module's slot could not be redirected and put back\n";
                     return 50;
                 }
                 int nowIs = 0;
@@ -301,7 +302,8 @@ int main(int argc, char** argv)
         // Naming something the caller never calls has to say so, not guess.
         runtime_agent::GotSite absent;
         gotError.clear();
-        if (runtime_agent::resolveGotSlot("", "no_such_function_anywhere", absent, gotError)
+        if (runtime_agent::resolveGotSlot(runtime_agent::CallerQuery::byName(""),
+                                          "no_such_function_anywhere", absent, gotError)
             || gotError.empty()) {
             std::cerr << "a symbol nobody calls resolved anyway\n";
             return 49;

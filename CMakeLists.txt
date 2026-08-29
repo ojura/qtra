@@ -458,15 +458,44 @@ if(BUILD_TESTING)
     add_test(NAME module-teardown
              COMMAND module_teardown_selftest $<TARGET_FILE:teardown_module>)
 
+    # A caller whose calls go straight through a slot with no stub in between,
+    # so the relocations that fill them are in the object's ordinary data
+    # relocations and not in the table kept for stubs. Reading only one of those
+    # tables makes this object's calls invisible, which is what the test checks.
+    add_library(no_plt_caller SHARED tests/no_plt_caller.cpp)
+    target_include_directories(no_plt_caller PRIVATE tests)
+    target_compile_options(no_plt_caller PRIVATE -fno-plt -Wall -Wextra -Wpedantic)
+
+    # A second one, named so that both end in the same characters. Asking for a
+    # caller by suffix then matches two loaded objects, which is the case where
+    # taking the first would be a choice nobody made.
+    add_library(second_no_plt_caller SHARED tests/no_plt_caller.cpp)
+    target_include_directories(second_no_plt_caller PRIVATE tests)
+    target_compile_options(second_no_plt_caller PRIVATE -fno-plt -Wall -Wextra -Wpedantic)
+    set_target_properties(second_no_plt_caller PROPERTIES
+        OUTPUT_NAME "second_no_plt_caller")
+
     # Links Qt so the redirect can be pointed at Qt's own calls, which is the
     # case the unprepared backends exist for. No display and no window.
     add_executable(got_reach_selftest
         tests/got_reach_selftest.cpp
         src/agent/got_site.cpp
+        src/agent/got_registry.cpp
     )
-    target_include_directories(got_reach_selftest PRIVATE include src)
-    target_link_libraries(got_reach_selftest PRIVATE Qt6::Core)
-    target_compile_options(got_reach_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    target_include_directories(got_reach_selftest PRIVATE include src tests)
+    target_link_libraries(got_reach_selftest PRIVATE
+        Qt6::Core no_plt_caller second_no_plt_caller)
+    # Built so its own functions carry the marker an indirect branch may land
+    # on, because a slot's destination is always reached by one. The test needs
+    # replacements that satisfy the default rule and one that deliberately does
+    # not, which is what the nocf_check attribute is for.
+    target_compile_options(got_reach_selftest PRIVATE
+        -Wall -Wextra -Wpedantic -fcf-protection=branch)
+    # Both no-stub objects stay loaded even though the test calls into only one.
+    # The linker drops a library nothing references, and the second one exists
+    # to be a second match for a suffix, which is a reason the linker cannot
+    # see.
+    target_link_options(got_reach_selftest PRIVATE -Wl,--no-as-needed)
     add_test(NAME got-reach COMMAND got_reach_selftest)
 
     add_executable(coverage_admission_selftest

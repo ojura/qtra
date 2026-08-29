@@ -14,17 +14,24 @@
 namespace runtime_agent {
 namespace {
 
-// What one loaded object's dynamic section says about its own relocations.
+// One object's relocations, from its own dynamic section.
+//
+// Two tables, because a caller reaches a function in two ways. The jump slots
+// are what a call through the procedure linkage table uses. The ordinary data
+// relocations hold the rest, and among them are the slots a call reaches
+// straight through when the object was built without stubs.
 struct DynamicTables {
-    const ElfW(Rela)* relocations = nullptr;
-    std::size_t relocationBytes = 0;
+    const ElfW(Rela)* jumpSlots = nullptr;
+    std::size_t jumpSlotBytes = 0;
+    const ElfW(Rela)* data = nullptr;
+    std::size_t dataBytes = 0;
+    std::size_t dataEntryBytes = sizeof(ElfW(Rela));
     const ElfW(Sym)* symbols = nullptr;
     const char* strings = nullptr;
 
-    [[nodiscard]] bool complete() const noexcept
+    [[nodiscard]] bool usable() const noexcept
     {
-        return relocations != nullptr && symbols != nullptr && strings != nullptr
-            && relocationBytes >= sizeof(ElfW(Rela));
+        return symbols != nullptr && strings != nullptr;
     }
 };
 
@@ -55,21 +62,28 @@ DynamicTables tablesOf(const dl_phdr_info& object)
         return tables;
     }
 
-    // Only the table used by the procedure linkage table. DT_RELA covers other
-    // relocations, and a store into one of those would be redirecting something
-    // that is not a call through the table.
-    bool pltIsRela = false;
+    bool jumpSlotsAreRela = false;
     for (const ElfW(Dyn)* entry = dynamic; entry->d_tag != DT_NULL; ++entry) {
         switch (entry->d_tag) {
         case DT_JMPREL:
-            tables.relocations = static_cast<const ElfW(Rela)*>(
+            tables.jumpSlots = static_cast<const ElfW(Rela)*>(
                 asLoadedAddress(entry->d_un.d_ptr, object.dlpi_addr));
             break;
         case DT_PLTRELSZ:
-            tables.relocationBytes = entry->d_un.d_val;
+            tables.jumpSlotBytes = entry->d_un.d_val;
             break;
         case DT_PLTREL:
-            pltIsRela = entry->d_un.d_val == DT_RELA;
+            jumpSlotsAreRela = entry->d_un.d_val == DT_RELA;
+            break;
+        case DT_RELA:
+            tables.data = static_cast<const ElfW(Rela)*>(
+                asLoadedAddress(entry->d_un.d_ptr, object.dlpi_addr));
+            break;
+        case DT_RELASZ:
+            tables.dataBytes = entry->d_un.d_val;
+            break;
+        case DT_RELAENT:
+            tables.dataEntryBytes = entry->d_un.d_val;
             break;
         case DT_SYMTAB:
             tables.symbols = static_cast<const ElfW(Sym)*>(
@@ -84,113 +98,183 @@ DynamicTables tablesOf(const dl_phdr_info& object)
         }
     }
 
-    if (!pltIsRela) {
+    if (!jumpSlotsAreRela) {
         // Every x86-64 object uses addend-carrying relocations. One that does
         // not is a shape this has not been written for, and guessing at it
         // would be reading a different struct through the same pointer.
-        return DynamicTables{};
+        tables.jumpSlots = nullptr;
+        tables.jumpSlotBytes = 0;
+    }
+    if (tables.dataEntryBytes != sizeof(ElfW(Rela))) {
+        tables.data = nullptr;
+        tables.dataBytes = 0;
     }
     return tables;
 }
 
-bool namesObject(const char* loaderName, const std::string& wanted)
+// Where an object's code is, which is what a resolver stub sits in.
+struct Span {
+    ElfW(Addr) lowest = ~ElfW(Addr){0};
+    ElfW(Addr) highest = 0;
+
+    [[nodiscard]] bool contains(const void* address) const noexcept
+    {
+        const auto value = reinterpret_cast<ElfW(Addr)>(address);
+        return value >= lowest && value < highest;
+    }
+};
+
+Span executableSpanOf(const dl_phdr_info& object)
 {
-    const std::string name = loaderName != nullptr ? loaderName : "";
-    if (wanted.empty()) {
+    Span span;
+    for (int i = 0; i < object.dlpi_phnum; ++i) {
+        const ElfW(Phdr)& header = object.dlpi_phdr[i];
+        if (header.p_type != PT_LOAD || (header.p_flags & PF_X) == 0) {
+            continue;
+        }
+        const ElfW(Addr) from = object.dlpi_addr + header.p_vaddr;
+        span.lowest = from < span.lowest ? from : span.lowest;
+        const ElfW(Addr) to = from + header.p_memsz;
+        span.highest = to > span.highest ? to : span.highest;
+    }
+    return span;
+}
+
+bool namesObject(const dl_phdr_info& object, const CallerQuery& query)
+{
+    if (query.identity.known()) {
+        return reinterpret_cast<const void*>(object.dlpi_addr) == query.identity.base;
+    }
+    const std::string name = object.dlpi_name != nullptr ? object.dlpi_name : "";
+    if (query.nameSuffix.empty()) {
         // The loader calls the main executable by an empty name.
         return name.empty();
     }
-    return name.size() >= wanted.size()
-        && name.compare(name.size() - wanted.size(), wanted.size(), wanted) == 0;
+    return name.size() >= query.nameSuffix.size()
+        && name.compare(name.size() - query.nameSuffix.size(), query.nameSuffix.size(),
+                        query.nameSuffix)
+            == 0;
 }
 
-// Whether a relocation's symbol is the one asked for.
-//
-// Compared whole. The dynamic string table holds a bare name, so there is no
-// version to strip: what a disassembler prints as "memcpy@GLIBC_2.14" is the
-// bare name plus a tag it read from tables this does not.
-bool namesSymbol(const char* relocationSymbol, const std::string& wanted)
+CallerIdentity identityOf(const dl_phdr_info& object)
 {
-    return relocationSymbol != nullptr && wanted == relocationSymbol;
+    CallerIdentity who;
+    who.name = object.dlpi_name != nullptr ? object.dlpi_name : "";
+    who.base = reinterpret_cast<const void*>(object.dlpi_addr);
+    return who;
 }
 
 struct Search {
-    bool unresolved = false;
-    std::string protectionError;
-    const std::string* object = nullptr;
+    const CallerQuery* caller = nullptr;
     const std::string* symbol = nullptr;
-    GotSite* found = nullptr;
-    std::vector<std::string>* names = nullptr;
+    std::vector<GotSite>* sites = nullptr;
+    std::vector<CallableSymbol>* names = nullptr;
     bool sawObject = false;
+    bool sawUnbound = false;
+    std::string failure;
 };
+
+// One relocation, offered to whatever the search is collecting.
+void consider(const dl_phdr_info& object,
+              const DynamicTables& tables,
+              const Span& code,
+              const ElfW(Rela)& relocation,
+              const CallKind kind,
+              Search& search)
+{
+    const ElfW(Sym)& symbol = tables.symbols[ELF64_R_SYM(relocation.r_info)];
+    const char* name = tables.strings + symbol.st_name;
+    if (name == nullptr || name[0] == '\0') {
+        return;
+    }
+
+    if (search.names != nullptr) {
+        search.names->push_back(CallableSymbol{identityOf(object), name, kind});
+        return;
+    }
+    if (*search.symbol != name) {
+        return;
+    }
+
+    auto** slot = reinterpret_cast<void**>(object.dlpi_addr + relocation.r_offset);
+
+    GotSite site;
+    site.caller = identityOf(object);
+    site.symbol = name;
+    site.kind = kind;
+    site.slot = slot;
+    site.resolved = *slot;
+
+    // Recorded at resolve time, so a restore puts back what the loader chose.
+    // Failing to read it fails the resolve: defaulting to read-only is how the
+    // permissions get downgraded, which is the thing this field exists to
+    // prevent, and a site that cannot be restored correctly is not one anybody
+    // should be handed.
+    if (!pageProtectionOf(slot, site.pageProtection, search.failure)) {
+        return;
+    }
+
+    // A jump slot still pointing into its own object's code holds that object's
+    // resolver stub, so the loader has not finished with it and will write the
+    // real answer there on first call. A slot reached without a stub is filled
+    // before anything runs, so there is nothing of the sort to find.
+    //
+    // An object that resolves a symbol to itself would look the same. That is a
+    // refusal where a redirect would have worked, which is the direction to be
+    // wrong in: the caller is told what was found and can say what it meant.
+    if (kind == CallKind::ProcedureLinkageTable && code.contains(site.resolved)) {
+        search.sawUnbound = true;
+        return;
+    }
+
+    search.sites->push_back(std::move(site));
+}
 
 int visit(dl_phdr_info* object, std::size_t, void* opaque)
 {
     auto& search = *static_cast<Search*>(opaque);
-    if (!namesObject(object->dlpi_name, *search.object)) {
+    if (!namesObject(*object, *search.caller)) {
         return 0;
     }
     search.sawObject = true;
 
     const DynamicTables tables = tablesOf(*object);
-    if (!tables.complete()) {
-        return 1;
+    if (!tables.usable()) {
+        return 0;
     }
+    const Span code = executableSpanOf(*object);
 
-    const std::size_t count = tables.relocationBytes / sizeof(ElfW(Rela));
-    for (std::size_t i = 0; i < count; ++i) {
-        const ElfW(Rela)& relocation = tables.relocations[i];
+    const std::size_t jumpSlots = tables.jumpSlots != nullptr
+        ? tables.jumpSlotBytes / sizeof(ElfW(Rela))
+        : 0;
+    for (std::size_t i = 0; i < jumpSlots; ++i) {
+        const ElfW(Rela)& relocation = tables.jumpSlots[i];
         if (ELF64_R_TYPE(relocation.r_info) != R_X86_64_JUMP_SLOT) {
             continue;
         }
-        const ElfW(Sym)& symbol = tables.symbols[ELF64_R_SYM(relocation.r_info)];
-        const char* name = tables.strings + symbol.st_name;
-
-        if (search.names != nullptr) {
-            search.names->emplace_back(name);
-            continue;
-        }
-        if (!namesSymbol(name, *search.symbol)) {
-            continue;
-        }
-
-        auto** slot = reinterpret_cast<void**>(object->dlpi_addr + relocation.r_offset);
-        search.found->caller = object->dlpi_name != nullptr ? object->dlpi_name : "";
-        search.found->symbol = name;
-        search.found->slot = slot;
-        search.found->resolved = *slot;
-        // Recorded at resolve time, so a restore puts back what the loader
-        // chose. Failing to read it fails the resolve: defaulting to read-only
-        // is how the permissions get downgraded, which is the thing this field
-        // exists to prevent, and a site that cannot be restored correctly is
-        // not one anybody should be handed.
-        if (!pageProtectionOf(slot, search.found->pageProtection, search.protectionError)) {
-            search.found->slot = nullptr;
-            return 1;
-        }
-
-        // A slot still pointing inside the object that owns it holds that
-        // object's own resolver stub, so the loader has not finished with it
-        // and will write the real answer there on first call.
-        const auto value = reinterpret_cast<ElfW(Addr)>(search.found->resolved);
-        ElfW(Addr) lowest = ~ElfW(Addr){0};
-        ElfW(Addr) highest = 0;
-        for (int i = 0; i < object->dlpi_phnum; ++i) {
-            if (object->dlpi_phdr[i].p_type != PT_LOAD) {
-                continue;
-            }
-            const ElfW(Addr) from = object->dlpi_addr + object->dlpi_phdr[i].p_vaddr;
-            lowest = from < lowest ? from : lowest;
-            const ElfW(Addr) to = from + object->dlpi_phdr[i].p_memsz;
-            highest = to > highest ? to : highest;
-        }
-        if (value >= lowest && value < highest) {
-            search.unresolved = true;
-            search.found->slot = nullptr;
-        }
-        return 1;
+        consider(*object, tables, code, relocation, CallKind::ProcedureLinkageTable, search);
     }
-    return 1;
+
+    // The same object's ordinary data relocations, where a build without stubs
+    // puts the slots its calls go through. Only the ones naming a function:
+    // this table also holds slots for data, and storing a function address into
+    // one of those would be redirecting something that is not a call.
+    const std::size_t dataEntries = tables.data != nullptr
+        ? tables.dataBytes / sizeof(ElfW(Rela))
+        : 0;
+    for (std::size_t i = 0; i < dataEntries; ++i) {
+        const ElfW(Rela)& relocation = tables.data[i];
+        if (ELF64_R_TYPE(relocation.r_info) != R_X86_64_GLOB_DAT) {
+            continue;
+        }
+        const ElfW(Sym)& symbol = tables.symbols[ELF64_R_SYM(relocation.r_info)];
+        if (ELF64_ST_TYPE(symbol.st_info) != STT_FUNC
+            && ELF64_ST_TYPE(symbol.st_info) != STT_GNU_IFUNC) {
+            continue;
+        }
+        consider(*object, tables, code, relocation, CallKind::DirectLoad, search);
+    }
+    return 0;
 }
 
 // Writes one pointer, leaving the mapping as the loader had it.
@@ -198,12 +282,13 @@ int visit(dl_phdr_info* object, std::size_t, void* opaque)
 // Making it writable is skipped where it already is, which is the common case
 // for a lazily bound object and the case where forcing it back to read-only
 // would break the next lazy resolution on that page.
-//
-// Failing to put the permission back leaves the slot correct and the page
-// writable, and says so: the call is redirected as asked, and something that
-// should not be writable is.
-bool storeIntoSlot(void** slot, void* value, const int protection, std::string& error)
+SlotWriteResult storeIntoSlot(void** slot, void* value, const int protection,
+                              SlotProtectFunction protect)
 {
+    if (protect == nullptr) {
+        protect = &::mprotect;
+    }
+    SlotWriteResult result;
     const auto pageSize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
     const auto address = reinterpret_cast<std::uintptr_t>(slot);
     auto* page = reinterpret_cast<void*>(address & ~(pageSize - 1));
@@ -212,26 +297,40 @@ bool storeIntoSlot(void** slot, void* value, const int protection, std::string& 
     const std::size_t span = pageSize;
     const bool alreadyWritable = (protection & PROT_WRITE) != 0;
 
-    if (!alreadyWritable && ::mprotect(page, span, protection | PROT_WRITE) != 0) {
-        error = std::string("could not make the slot writable: ") + std::strerror(errno);
-        return false;
+    if (!alreadyWritable && protect(page, span, protection | PROT_WRITE) != 0) {
+        result.error = std::string("could not make the slot writable: ")
+            + std::strerror(errno);
+        return result;
     }
 
     // One aligned pointer word, stored atomically, so a caller loading it gets
     // the old destination or the new one and never a mixture.
     static_assert(std::atomic_ref<void*>::is_always_lock_free);
     std::atomic_ref<void*>(*slot).store(value, std::memory_order_release);
+    result.outcome = SlotWriteOutcome::Written;
 
-    if (!alreadyWritable && ::mprotect(page, span, protection) != 0) {
-        error = std::string("the slot was written and the mapping could not be put back to "
-                            "the permissions the loader chose: ")
+    if (!alreadyWritable && protect(page, span, protection) != 0) {
+        result.outcome = SlotWriteOutcome::WrittenProtectionNotRestored;
+        result.error = std::string("the slot now names the new destination and the mapping "
+                                   "could not be put back to the permissions the loader "
+                                   "chose: ")
             + std::strerror(errno);
-        return false;
     }
-    return true;
+    return result;
 }
 
 } // namespace
+
+const char* describe(const CallKind kind) noexcept
+{
+    switch (kind) {
+    case CallKind::ProcedureLinkageTable:
+        return "through the procedure linkage table";
+    case CallKind::DirectLoad:
+        return "straight through the slot";
+    }
+    return "unknown";
+}
 
 // What the kernel says about the mapping holding an address.
 //
@@ -273,84 +372,129 @@ bool pageProtectionOf(const void* address, int& protection, std::string& error)
     return found;
 }
 
-bool resolveGotSlot(const std::string& callerObject,
-                    const std::string& symbol,
-                    GotSite& site,
-                    std::string& error)
+bool hasLandingPad(const void* destination) noexcept
 {
-    site = GotSite{};
+    if (destination == nullptr) {
+        return false;
+    }
+    // endbr64, which is what an indirect branch is permitted to land on.
+    static constexpr std::uint8_t marker[] = {0xF3U, 0x0FU, 0x1EU, 0xFAU};
+    const auto* bytes = static_cast<const std::uint8_t*>(destination);
+    return std::memcmp(bytes, marker, sizeof(marker)) == 0;
+}
+
+bool resolveGotSlots(const CallerQuery& caller,
+                     const std::string& symbol,
+                     std::vector<GotSite>& sites,
+                     std::string& error)
+{
+    sites.clear();
+    error.clear();
     if (symbol.empty()) {
         error = "a symbol name is required";
         return false;
     }
 
     Search search;
-    search.object = &callerObject;
+    search.caller = &caller;
     search.symbol = &symbol;
-    search.found = &site;
+    search.sites = &sites;
     ::dl_iterate_phdr(&visit, &search);
 
     if (!search.sawObject) {
-        error = "no loaded object named '" + callerObject
-            + "'; the name is matched by suffix, so a versioned file name works";
+        error = caller.identity.known()
+            ? "no object is loaded at that address any more"
+            : "no loaded object named '" + caller.nameSuffix
+                + "'; the name has to be a suffix of the loader's own, which ends in the "
+                  "version, so give the soname as the loader knows it";
         return false;
     }
-    if (search.unresolved) {
+    if (!search.failure.empty()) {
+        error = "the slot for '" + symbol + "' was found and what the loader had done to its "
+                "page could not be read, so restoring it later could not put that back: "
+            + search.failure;
+        sites.clear();
+        return false;
+    }
+    if (sites.empty() && search.sawUnbound) {
         error = "'" + symbol + "' is not bound yet in that object, so its slot holds the "
                 "loader's own stub. Storing a replacement there works until some thread "
                 "takes that path, and the resolver then writes the real function over it. "
                 "Load the object with its symbols bound before redirecting it";
         return false;
     }
-    if (!search.protectionError.empty()) {
-        error = "the slot for '" + symbol + "' was found and what the loader had done to its "
-                "page could not be read, so restoring it later could not put that back: "
-            + search.protectionError;
-        return false;
-    }
-    if (!site.valid()) {
-        error = "'" + (callerObject.empty() ? std::string("the main executable") : callerObject)
+    if (sites.empty()) {
+        error = "'"
+            + (caller.identity.known()
+                   ? (caller.identity.name.empty() ? std::string("the main executable")
+                                                   : caller.identity.name)
+                   : (caller.nameSuffix.empty() ? std::string("the main executable")
+                                                : caller.nameSuffix))
             + "' does not call '" + symbol
-            + "' through its table. Either it never calls it, or the call is inside the "
-              "object that defines it, where there is no relocation to redirect";
+            + "' through a slot. Either it never calls it, or the call is inside the object "
+              "that defines it, where there is no relocation to redirect";
         return false;
     }
     return true;
 }
 
-std::vector<std::string> callableSymbols(const std::string& callerObject, std::string& error)
+bool resolveGotSlot(const CallerQuery& caller,
+                    const std::string& symbol,
+                    GotSite& site,
+                    std::string& error)
 {
-    std::vector<std::string> names;
+    site = GotSite{};
+    std::vector<GotSite> found;
+    if (!resolveGotSlots(caller, symbol, found, error)) {
+        return false;
+    }
+    if (found.size() != 1) {
+        error = "'" + symbol + "' is reached through " + std::to_string(found.size())
+            + " slots matching that caller, so which one was meant is not something this "
+              "can decide. Ask for all of them, or name one object exactly";
+        return false;
+    }
+    site = found.front();
+    return true;
+}
+
+std::vector<CallableSymbol> callableSymbols(const CallerQuery& caller, std::string& error)
+{
+    std::vector<CallableSymbol> names;
+    error.clear();
     Search search;
-    search.object = &callerObject;
+    search.caller = &caller;
     search.names = &names;
     ::dl_iterate_phdr(&visit, &search);
     if (!search.sawObject) {
-        error = "no loaded object named '" + callerObject + "'";
+        error = "no loaded object matched";
     }
     return names;
 }
 
-bool redirectGotSlot(const GotSite& site, void* const replacement, std::string& error)
+SlotWriteResult redirectGotSlot(const GotSite& site, void* const replacement,
+                                const SlotProtectFunction protect)
 {
+    SlotWriteResult result;
     if (!site.valid()) {
-        error = "the site was never resolved";
-        return false;
+        result.error = "the site was never resolved";
+        return result;
     }
     if (replacement == nullptr) {
-        error = "a replacement is required";
-        return false;
+        result.error = "a replacement is required";
+        return result;
     }
-    return storeIntoSlot(site.slot, replacement, site.pageProtection, error);
+    return storeIntoSlot(site.slot, replacement, site.pageProtection, protect);
 }
 
-bool restoreGotSlot(const GotSite& site, std::string& error)
+SlotWriteResult restoreGotSlot(const GotSite& site, const SlotProtectFunction protect)
 {
+    SlotWriteResult result;
     if (!site.valid()) {
-        error = "the site was never resolved";
-        return false;
+        result.error = "the site was never resolved";
+        return result;
     }
-    return storeIntoSlot(site.slot, site.resolved, site.pageProtection, error);
+    return storeIntoSlot(site.slot, site.resolved, site.pageProtection, protect);
 }
 
 } // namespace runtime_agent
