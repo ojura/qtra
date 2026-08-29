@@ -19,13 +19,14 @@ no amount of reading the source can establish.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
 import unittest
 from pathlib import Path
 
-from test_patch_activation import (BINARY, CAN_DRAW, DISPLAY_FOR_TESTS, Agent,
+from test_patch_activation import (BINARY, BUILD, CAN_DRAW, DISPLAY_FOR_TESTS, Agent,
                                    requireArtifacts)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -190,6 +191,52 @@ class LiveDispatch(unittest.TestCase):
                                  request={}, objectName="mainWindow")
         self.assertFalse(answer["ok"])
         self.assertEqual(answer["error"]["code"], "unknown_parameter")
+
+    def _run_probe(self, request: object) -> dict:
+        """Runs the probe snippet and returns what it reported seeing."""
+        probe = BUILD / "agent_snippet_protocol_probe.so"
+        if not probe.exists():
+            self.fail(f"this build did not produce {probe}")
+        module = self.agent.ok("snippet.load", path=str(probe))["moduleId"]
+        started = self.agent.ok("snippet.run", moduleId=module, executor="gui",
+                                request=request)
+        finished = self.agent.connection.wait_for_operation(
+            started["operationId"], timeout=20)
+        data = finished.get("data") or {}
+        self.assertEqual(data.get("outcome"), "completed",
+                         f"the probe did not complete: {finished}")
+        return json.loads(data["result"]) if isinstance(data.get("result"), str) \
+            else data.get("result", {})
+
+    def test_a_scalar_request_reaches_the_module_as_itself(self) -> None:
+        """42 used to arrive as {}.
+
+        A module that asked what it was given got an empty object, so a caller
+        passing a number had no way to tell that from passing nothing.
+        """
+        seen = self._run_probe(42)
+        self.assertEqual(seen["sawRequest"], "42",
+                         "the module saw something other than the scalar it was sent")
+
+    def test_unbind_answers_with_the_documented_code(self) -> None:
+        """The code used to be picked by matching the text of an error."""
+        seen = self._run_probe({})
+        self.assertEqual(seen["unbindUnknownId"], -1,
+                         "an id nothing handed out should be NOT_LIVE")
+        self.assertEqual(seen["unbindZeroId"], -1,
+                         "and so should zero")
+
+    def test_a_snippet_log_says_which_module_it_came_from(self) -> None:
+        """The event carried the text and not the identity behind it."""
+        self._run_probe({})
+        history = self.agent.ok("event.history", prefixes=["snippet.log"], limit=32)
+        entries = history if isinstance(history, list) else history.get("events", [])
+        mine = [e for e in entries
+                if "protocol probe reporting" in json.dumps(e.get("data", {}))]
+        self.assertTrue(mine, "the probe's log did not reach the event history")
+        data = mine[-1].get("data", {})
+        self.assertIn("moduleId", data)
+        self.assertIn("moduleName", data)
 
     def test_a_command_the_application_registered_answers(self) -> None:
         """Listed is not the same as reachable, so ask one and read the answer."""
