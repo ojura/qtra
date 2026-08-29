@@ -164,5 +164,74 @@ class PatchActivation(unittest.TestCase):
         self.assertEqual(status["moduleId"], str(module))
 
 
+
+@unittest.skipUnless(
+    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and HAS_DISPLAY,
+    f"needs a display and a built, manifest-bearing {BUILD}",
+)
+class RetainedEvidence(unittest.TestCase):
+    """What answers a later request once the manifest has been read.
+
+    Evidence about a running process does not stop being true because the file
+    it came from was replaced. A rebuild leaves a manifest describing a
+    different binary, and refusing on that would let an unrelated build revoke
+    what this one established about itself. A rerun against the same build is
+    the same binary speaking again, so it replaces what is held, in whichever
+    direction it goes.
+
+    These edit the build's manifest and put it back. That is what they are
+    about, so there is no way to ask the question without doing it.
+    """
+
+    def setUp(self) -> None:
+        self.original = MANIFEST.read_bytes()
+        self.addCleanup(MANIFEST.write_bytes, self.original)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        print(f"driving {BINARY.resolve()}", flush=True)
+        self.agent = Agent(Path(directory.name) / "agent.sock")
+        self.addCleanup(self.agent.close)
+        self.module = self.agent.ok("patch.load", path=str(PATCH_MODULE))["moduleId"]
+
+    def rewrite(self, **fields: object) -> None:
+        report = json.loads(self.original)
+        report.update(fields)
+        MANIFEST.write_text(json.dumps(report, indent=2))
+
+    def activate(self) -> dict:
+        return self.agent.call(
+            "patch.activate", moduleId=self.module, acceptIncompleteCoverage=False
+        )
+
+    def test_a_rebuild_does_not_revoke_what_this_build_recorded(self) -> None:
+        """A manifest about another binary leaves the held verdict standing."""
+        self.assertTrue(self.agent.ok("patch.status")["coverage"]["allow"])
+        self.rewrite(buildId="00" * 20)
+        self.assertTrue(self.activate().get("ok"), "a rebuild revoked this build's evidence")
+
+    def test_a_missing_manifest_does_not_revoke_it_either(self) -> None:
+        self.assertTrue(self.agent.ok("patch.status")["coverage"]["allow"])
+        MANIFEST.unlink()
+        self.assertTrue(self.activate().get("ok"), "a deleted manifest revoked the evidence")
+
+    def test_a_rerun_against_this_build_can_withdraw_its_verdict(self) -> None:
+        """The direction nobody wants, and the one worth having.
+
+        Rereading that could only ever help would be a cache dressed as
+        evidence.
+        """
+        self.assertTrue(self.agent.ok("patch.status")["coverage"]["allow"])
+        self.rewrite(coverage="incomplete")
+        answer = self.activate()
+        self.assertFalse(answer.get("ok"), "a withdrawn verdict still admitted the write")
+        self.assertIn("coverage is incomplete", answer["error"]["message"])
+
+    def test_and_can_restore_it(self) -> None:
+        self.rewrite(coverage="incomplete")
+        self.assertFalse(self.activate().get("ok"))
+        MANIFEST.write_bytes(self.original)
+        self.assertTrue(self.activate().get("ok"), "a restored verdict was not picked up")
+
+
 if __name__ == "__main__":
     unittest.main()

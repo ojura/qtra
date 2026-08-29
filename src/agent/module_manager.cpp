@@ -350,15 +350,41 @@ bool ModuleManager::installIfNeeded(const runtime_agent::PatchSite& site,
     return m_patches.installGateway(site, admissionFor(quiescer, decision), quiescer, error);
 }
 
+runtime_agent::CoverageDecision ModuleManager::latestEvidence()
+{
+    const runtime_agent::CoverageDecision fresh = readDecision();
+
+    // A verdict that names this build and this function is about the binary
+    // now running, so it replaces what is held whether it allows or refuses.
+    // That is what lets the analyzer be run again against the same build to
+    // correct a decision, in either direction: a rerun that withdraws a verdict
+    // has to be able to stop later binds, or rereading would only ever be able
+    // to help.
+    if (fresh.describesThisTarget) {
+        m_evidence = fresh;
+        return fresh;
+    }
+
+    // Otherwise the file has nothing to say about this process. A rebuild gives
+    // the tree a manifest describing some other binary, and a missing or
+    // unreadable one says nothing at all; neither makes what this build
+    // recorded about itself untrue. So the last verdict that did describe this
+    // binary stands, and only the first admission has to find the file.
+    if (m_evidence.has_value()) {
+        return *m_evidence;
+    }
+    return fresh;
+}
+
 runtime_agent::CoverageDecision ModuleManager::readDecision() const
 {
     return runtime_agent::readCoverageManifest(
         manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
 }
 
-QJsonObject ModuleManager::coverage() const
+QJsonObject ModuleManager::coverage()
 {
-    const runtime_agent::CoverageDecision decision = readDecision();
+    const runtime_agent::CoverageDecision decision = latestEvidence();
     return QJsonObject{
         {QStringLiteral("coverage"), decision.present() ? QJsonValue(decision.coverage)
                                                         : QJsonValue()},
@@ -377,7 +403,7 @@ bool ModuleManager::admits(const bool acceptIncompleteCoverage,
     // default: a build that recorded nothing has not been asked whether the
     // replacement reaches every call, and treating silence as approval is the
     // thing the manifest exists to prevent.
-    decision = readDecision();
+    decision = latestEvidence();
 
     // Asked of every selection, because a replacement that misses callers
     // misses them however it came to be chosen.
@@ -608,7 +634,7 @@ bool ModuleManager::rollback(QString& error)
     return resetActivePatch(error);
 }
 
-QJsonObject ModuleManager::patchStatus() const
+QJsonObject ModuleManager::patchStatus()
 {
     const runtime_agent::PatchStatus patch = m_patches.status();
 

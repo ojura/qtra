@@ -240,7 +240,7 @@ private:
     [[nodiscard]] QObject* resolveObject(const QJsonObject& parameters,
                                          QString& error) const;
     [[nodiscard]] QJsonObject cubeState() const;
-    [[nodiscard]] QJsonObject hello() const;
+    [[nodiscard]] QJsonObject hello();
     [[nodiscard]] QJsonArray commandList() const;
 
     void runSnippet(ModuleManager::LoadedModule* module,

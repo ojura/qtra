@@ -1329,7 +1329,7 @@ QJsonObject RuntimeAgent::cubeState() const
     };
 }
 
-QJsonObject RuntimeAgent::hello() const
+QJsonObject RuntimeAgent::hello()
 {
 #ifdef NDEBUG
     constexpr bool optimizedBuild = true;

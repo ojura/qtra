@@ -107,7 +107,10 @@ public:
     [[nodiscard]] bool activateEntryPatch(quint64 id,
                                           bool acceptIncompleteCoverage,
                                           QString& error);
-    [[nodiscard]] QJsonObject coverage() const;
+    // Not const: reporting the evidence in force is the same act as finding
+    // it, and a status that read the file separately could say one thing
+    // while an activation in the next breath answered to another.
+    [[nodiscard]] QJsonObject coverage();
 
 private:
     // The one place that decides whether a write may go ahead, so both the
@@ -116,6 +119,7 @@ private:
                               runtime_agent::CoverageDecision& decision,
                               QString& error);
     [[nodiscard]] runtime_agent::CoverageDecision readDecision() const;
+    [[nodiscard]] runtime_agent::CoverageDecision latestEvidence();
     [[nodiscard]] bool installIfNeeded(const runtime_agent::PatchSite& site,
                                        const runtime_agent::CoverageDecision& decision,
                                        runtime_agent::Quiescer& quiescer,
@@ -133,7 +137,7 @@ public:
                                       runtime_agent::PatchBinding& binding,
                                       QString& error);
     [[nodiscard]] int releaseBinding(std::uint64_t bindingId, quint64 owner, QString& error);
-    [[nodiscard]] QJsonObject patchStatus() const;
+    [[nodiscard]] QJsonObject patchStatus();
 
 private:
     [[nodiscard]] LoadedModule* insertModule(std::unique_ptr<LoadedModule> module);
@@ -147,6 +151,20 @@ private:
     // not take it: an agent torn down and built again finds the same manager
     // with the same gateway and the same recovery state.
     runtime_agent::PatchManager& m_patches;
+    // The last verdict that described this running binary and this function.
+    //
+    // Evidence about a process does not stop being true because the file it
+    // was read from was replaced. Rebuilding the tree while this one runs
+    // leaves a manifest describing a different binary, and refusing on that
+    // would let an unrelated build revoke what this build established about
+    // itself. A rerun against the same build does replace it, allowing or
+    // refusing, since that is the same binary speaking again.
+    //
+    // Separate from what a recovery record holds, and for a different reason.
+    // This is re-asked on every request and answers what may run; that is
+    // never re-asked and says what one write was made under.
+    std::optional<runtime_agent::CoverageDecision> m_evidence;
+
     // The protocol's own binding and the module it belongs to, kept so
     // rollback can release exactly that one and nothing else. Not what status
     // reports: what the entry reaches is the manager's to answer, and a module
