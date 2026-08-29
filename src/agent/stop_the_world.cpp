@@ -311,7 +311,11 @@ public:
 
 bool currentThreadIds(std::vector<int>& tids, std::string& error)
 {
-    static ThreadIdentity storage[maxParked + 1];
+    // On the stack. The statics inside acquire are safe because one stop owns
+    // them at a time, and this is a public function with no such guard: two
+    // callers would share one buffer with nothing saying they must not. It
+    // fills a vector anyway, so shared storage bought nothing here.
+    ThreadIdentity storage[maxParked + 1];
     std::size_t count = 0;
     int failure = 0;
     if (!readThreadIds(storage, maxParked + 1, count, failure)) {
