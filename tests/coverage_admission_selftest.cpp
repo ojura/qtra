@@ -1,16 +1,18 @@
-// The order the admission questions are asked in.
+// What the build's decision answers, and to whom.
 //
-// Three questions decide whether the entry may be written, and they are not
-// interchangeable. Whether the manifest is about this binary and this function,
-// and whether the recorded claim about which threads reach it supports writing
-// while the process runs, are settled before acceptIncompleteCoverage is looked
-// at. That flag means one thing: the caller will take a replacement that some
-// callers do not reach.
+// It answers two questions. Whether this replacement may be the thing that runs
+// is about coverage, and acceptIncompleteCoverage takes a replacement that some
+// callers do not reach. Whether the entry's bytes may be rewritten while the
+// process runs is about the recorded claim on which threads reach the function,
+// and nothing accepts past it. Both refuse first on a manifest that is about
+// another build or another function, which the flag cannot reach either.
+//
+// The two come apart: a manifest with complete coverage and a domain that was
+// only observed admits the replacement and refuses the write.
 //
 // These read manifests written into a temporary directory, so no build artifact
-// is touched and being killed leaves nothing behind. readCoverageManifest and
-// admitsEntryWrite need nothing but the file, which is why they are separate
-// from ModuleManager.
+// is touched and being killed leaves nothing behind. Neither function needs
+// anything but the file, which is why they are separate from ModuleManager.
 
 #include "agent/coverage_manifest.h"
 
@@ -67,12 +69,14 @@ QString write(const QDir& directory, const QString& name, const QJsonObject& rep
     return path;
 }
 
-// Whether the entry may be written given this manifest, asked both ways.
+// Both questions asked of one manifest, the first of them both ways.
 struct Answer {
-    bool strict = false;
-    bool accepting = false;
-    QString strictError;
-    QString acceptingError;
+    bool effect = false;
+    bool effectAccepting = false;
+    bool write = false;
+    QString effectError;
+    QString effectAcceptingError;
+    QString writeError;
 };
 
 Answer ask(const QString& manifestPath)
@@ -80,8 +84,11 @@ Answer ask(const QString& manifestPath)
     const runtime_agent::CoverageDecision decision =
         runtime_agent::readCoverageManifest(manifestPath, kBuildId, kTarget);
     Answer answer;
-    answer.strict = runtime_agent::admitsEntryWrite(decision, false, answer.strictError);
-    answer.accepting = runtime_agent::admitsEntryWrite(decision, true, answer.acceptingError);
+    answer.effect =
+        runtime_agent::admitsReplacementEffect(decision, false, answer.effectError);
+    answer.effectAccepting =
+        runtime_agent::admitsReplacementEffect(decision, true, answer.effectAcceptingError);
+    answer.write = runtime_agent::authorizesLiveTextWrite(decision, answer.writeError);
     return answer;
 }
 
@@ -114,17 +121,18 @@ int main()
     std::printf("a manifest that answers every question\n");
     {
         const Answer answer = ask(write(directory, QStringLiteral("good.json"), admissible()));
-        check(answer.strict, "admitted without the flag");
-        check(answer.accepting, "admitted with it");
+        check(answer.effect, "the replacement is admitted without the flag");
+        check(answer.effectAccepting, "and with it");
+        check(answer.write, "and the entry may be written");
     }
 
     std::printf("no manifest at all\n");
     {
         const Answer answer = ask(directory.filePath(QStringLiteral("absent.json")));
-        check(!answer.strict, "refused");
-        check(!answer.accepting, "the flag does not accept it");
-        check(answer.acceptingError.contains(QStringLiteral("no coverage manifest")),
-              "and says nothing recorded the decision");
+        check(!answer.effect && !answer.effectAccepting, "no replacement is admitted");
+        check(!answer.write, "and no write is authorized");
+        check(answer.effectAcceptingError.contains(QStringLiteral("no coverage manifest")),
+              "and it says nothing recorded the decision");
     }
 
     std::printf("a manifest that is not readable as JSON\n");
@@ -135,8 +143,8 @@ int main()
         file.write("{ this is not json");
         file.close();
         const Answer answer = ask(path);
-        check(!answer.strict, "refused");
-        check(!answer.accepting, "the flag does not accept it");
+        check(!answer.effect && !answer.effectAccepting, "no replacement is admitted");
+        check(!answer.write, "and no write is authorized");
     }
 
     std::printf("a manifest about another build\n");
@@ -144,10 +152,11 @@ int main()
         QJsonObject report = admissible();
         report.insert(QStringLiteral("buildId"), QStringLiteral("0000000000000000"));
         const Answer answer = ask(write(directory, QStringLiteral("other-build.json"), report));
-        check(!answer.strict, "refused");
-        check(!answer.accepting, "the flag does not accept it");
-        check(answer.acceptingError.contains(QStringLiteral("different binary")),
-              "and says whose verdict it is");
+        check(!answer.effect && !answer.effectAccepting, "no replacement is admitted");
+        check(!answer.write, "and no write is authorized");
+        check(answer.effectAcceptingError.contains(QStringLiteral("different binary"))
+                  && answer.writeError.contains(QStringLiteral("different binary")),
+              "and both say whose verdict it is");
     }
 
     std::printf("a manifest about another function\n");
@@ -155,57 +164,62 @@ int main()
         QJsonObject report = admissible();
         report.insert(QStringLiteral("target"), QStringLiteral("some_other_function"));
         const Answer answer = ask(write(directory, QStringLiteral("other-target.json"), report));
-        check(!answer.strict, "refused");
-        check(!answer.accepting, "the flag does not accept it");
-        check(answer.acceptingError.contains(QStringLiteral("some_other_function")),
-              "and names what it decided about");
+        check(!answer.effect && !answer.effectAccepting, "no replacement is admitted");
+        check(!answer.write, "and no write is authorized");
+        check(answer.effectAcceptingError.contains(QStringLiteral("some_other_function")),
+              "and it names what it decided about");
     }
 
-    std::printf("a claim about which threads reach the target that was only observed\n");
+    std::printf("a domain claim that was only observed, with coverage complete\n");
     {
         const QJsonObject report = withDomain(admissible(), QStringLiteral("observed"), false);
         const Answer answer = ask(write(directory, QStringLiteral("observed.json"), report));
-        check(!answer.strict, "refused with complete coverage");
-        check(!answer.accepting, "the flag does not accept it");
-        check(answer.acceptingError.contains(QStringLiteral("which threads reach this function")),
-              "and says which question it failed");
+        check(!answer.write, "the entry may not be written");
+        check(answer.writeError.contains(QStringLiteral("which threads reach this function")),
+              "and it says which question failed");
+        // Coverage is complete, so there is nothing wrong with the replacement
+        // itself. On a process whose gateway is already installed, choosing it
+        // writes no bytes and this is the whole question.
+        check(answer.effect, "and the replacement is still admitted");
     }
 
-    // The combination that decides the order. Coverage is incomplete, so the
-    // flag has something to accept, and the domain claim does not support the
-    // write. Asking the flag first admits this; asking the domain first refuses.
-    std::printf("an unauthorized domain where the flag has something to accept\n");
+    // Both questions fail, each for its own reason. The flag reaches the
+    // coverage one and cannot reach the other, which is the whole distinction
+    // between them.
+    std::printf("an unauthorized domain and incomplete coverage together\n");
     {
         const QJsonObject report = withCoverage(
             withDomain(admissible(), QStringLiteral("observed"), false),
             QStringLiteral("incomplete"));
         const Answer answer =
             ask(write(directory, QStringLiteral("observed-incomplete.json"), report));
-        check(!answer.strict, "refused");
-        check(!answer.accepting, "the flag does not reach past the domain question");
-        check(answer.acceptingError.contains(QStringLiteral("which threads reach this function")),
+        check(!answer.write, "the entry may not be written");
+        check(answer.writeError.contains(QStringLiteral("which threads reach this function")),
               "and the domain is what it names, not the coverage");
+        check(!answer.effect, "the replacement is refused without the flag");
+        check(answer.effectAccepting, "and the flag accepts the coverage, which is all it means");
     }
 
     std::printf("incomplete coverage, which is the one thing the flag means\n");
     {
         const QJsonObject report = withCoverage(admissible(), QStringLiteral("incomplete"));
         const Answer answer = ask(write(directory, QStringLiteral("incomplete.json"), report));
-        check(!answer.strict, "refused without the flag");
-        check(answer.strictError.contains(QStringLiteral("coverage is incomplete")),
-              "and says what is missing");
-        check(answer.accepting, "admitted with it");
+        check(!answer.effect, "the replacement is refused without the flag");
+        check(answer.effectError.contains(QStringLiteral("coverage is incomplete")),
+              "and it says what is missing");
+        check(answer.effectAccepting, "admitted with it");
+        check(answer.write, "and coverage never decided whether the entry may be written");
     }
 
     std::printf("coverage the build could not decide\n");
     {
         const QJsonObject report = withCoverage(admissible(), QStringLiteral("unknown"));
         const Answer answer = ask(write(directory, QStringLiteral("unknown.json"), report));
-        check(!answer.strict, "refused without the flag");
-        check(answer.accepting, "admitted with it, the same as incomplete");
+        check(!answer.effect, "the replacement is refused without the flag");
+        check(answer.effectAccepting, "admitted with it, the same as incomplete");
     }
 
-    std::printf("%s\n", failures == 0 ? "all admission-order checks passed"
-                                      : "admission-order checks failed");
+    std::printf("%s\n", failures == 0 ? "all admission checks passed"
+                                      : "admission checks failed");
     return failures == 0 ? 0 : 1;
 }

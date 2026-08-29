@@ -113,6 +113,7 @@ private:
     // The one place that decides whether a write may go ahead, so both the
     // protocol and the host binding call answer to the same rules.
     [[nodiscard]] bool admits(bool acceptIncompleteCoverage, QString& error);
+    [[nodiscard]] runtime_agent::CoverageDecision readDecision() const;
 
 public:
     [[nodiscard]] bool rollback(QString& error);

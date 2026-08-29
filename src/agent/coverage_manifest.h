@@ -58,19 +58,39 @@ struct CoverageDecision {
                                                     const QString& hostBuildId,
                                                     const QString& target);
 
-// Whether the entry may be written, given what the build decided.
+// The build's decision answers two questions, and which of them a caller has
+// to satisfy depends on what the caller is about to do.
 //
-// The order matters and the questions are not interchangeable. Whether the
-// manifest is about this binary and this function, and whether the recorded
-// claim about which threads reach it is strong enough to write while the
-// process runs, are settled first and cannot be accepted past. Only then may a
-// caller take a replacement that some callers will not reach, which is the one
-// thing acceptIncompleteCoverage means.
+// Both start from identity, and neither can be accepted past it. A manifest
+// about another build or another function has decided nothing about the entry
+// in front of the caller, and the flag below would otherwise wave through the
+// case with the least evidence behind it.
+
+// Whether this replacement may be the thing that runs.
 //
-// Putting the flag first would let it wave through a manifest for another
-// build, which is the case with the least evidence behind it.
-[[nodiscard]] bool admitsEntryWrite(const CoverageDecision& decision,
-                                    bool acceptIncompleteCoverage,
-                                    QString& error);
+// The question is coverage: whether replacing the function reaches every call.
+// acceptIncompleteCoverage takes a replacement that some callers will not
+// reach, which is the one thing that flag means. It applies to any selection,
+// since a replacement that misses callers misses them however it was chosen.
+[[nodiscard]] bool admitsReplacementEffect(const CoverageDecision& decision,
+                                           bool acceptIncompleteCoverage,
+                                           QString& error);
+
+// Whether the target's entry bytes may be rewritten while the process runs.
+//
+// The question is the recorded claim about which threads reach the function,
+// which is what stands in for stopping them. Nothing accepts past it: taking a
+// replacement that misses callers is a wrong effect, and writing the entry
+// underneath a thread that is executing it is not the same kind of thing.
+//
+// Asked only by operations that write bytes, which are installing the gateway
+// and recovering from an install that could not finish. Once a gateway exists,
+// choosing what runs is one aligned store into its slot: every call reads the
+// old destination or the new one, both stay valid because nothing is ever
+// unloaded, and no byte of the target changes. A store that reclaimed a
+// generation's code or state would need its own proof that no call is still
+// inside it, which is a different question from this one.
+[[nodiscard]] bool authorizesLiveTextWrite(const CoverageDecision& decision,
+                                           QString& error);
 
 } // namespace runtime_agent

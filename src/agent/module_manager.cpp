@@ -285,10 +285,15 @@ QString manifestPath()
 
 } // namespace
 
+runtime_agent::CoverageDecision ModuleManager::readDecision() const
+{
+    return runtime_agent::readCoverageManifest(
+        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
+}
+
 QJsonObject ModuleManager::coverage() const
 {
-    const runtime_agent::CoverageDecision decision = runtime_agent::readCoverageManifest(
-        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
+    const runtime_agent::CoverageDecision decision = readDecision();
     return QJsonObject{
         {QStringLiteral("coverage"), decision.present() ? QJsonValue(decision.coverage)
                                                         : QJsonValue()},
@@ -305,13 +310,25 @@ bool ModuleManager::admits(const bool acceptIncompleteCoverage, QString& error)
     // default: a build that recorded nothing has not been asked whether the
     // replacement reaches every call, and treating silence as approval is the
     // thing the manifest exists to prevent.
-    const runtime_agent::CoverageDecision decision = runtime_agent::readCoverageManifest(
-        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
-    if (!runtime_agent::admitsEntryWrite(decision, acceptIncompleteCoverage, error)) {
+    const runtime_agent::CoverageDecision decision = readDecision();
+
+    // Asked of every selection, because a replacement that misses callers
+    // misses them however it came to be chosen.
+    if (!runtime_agent::admitsReplacementEffect(decision, acceptIncompleteCoverage, error)) {
         return false;
     }
-    // Kept so recovery can answer to what admitted the write it is undoing.
-    m_admitted = decision;
+
+    // Installing the gateway rewrites the target's entry. Once one is there,
+    // choosing what runs is a single aligned store into its slot: no byte of
+    // the target changes, so the claim about which threads reach it is a claim
+    // about an operation that is not happening.
+    if (m_patches.state() == runtime_agent::PatchState::NoGateway) {
+        if (!runtime_agent::authorizesLiveTextWrite(decision, error)) {
+            return false;
+        }
+        // Kept so recovery can answer to what authorized the write it undoes.
+        m_admitted = decision;
+    }
     return true;
 }
 
@@ -564,13 +581,11 @@ bool ModuleManager::resetActivePatch(QString& error)
         // refused with the entry left mid-install and nothing able to finish
         // it. The bytes being restored are this process's own, so the decision
         // taken when they were written is the one that governs restoring them.
-        if (m_admitted.has_value()) {
-            if (!runtime_agent::admitsEntryWrite(*m_admitted, true, error)) {
-                return false;
-            }
-        } else if (!admits(true, error)) {
-            // Only reachable if a gateway was installed without going through
-            // admits(), which nothing does. Asking now is the best left.
+        // Only the write question. Recovery puts the target's own bytes back,
+        // so there is no replacement whose reach anyone could ask about.
+        const runtime_agent::CoverageDecision& decision =
+            m_admitted.has_value() ? *m_admitted : m_admitted.emplace(readDecision());
+        if (!runtime_agent::authorizesLiveTextWrite(decision, error)) {
             return false;
         }
         std::string nativeError;
