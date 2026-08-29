@@ -76,6 +76,12 @@ bool PatchManager::installGateway(const PatchSite& site,
     // against as well as a success.
     m_threadsAtInstall = observedThreadCount();
 
+    // Room for whatever any of this has to say, taken before anything stops.
+    // A policy that parks every thread leaves them holding whatever they held,
+    // so growing a string between here and letting them go can wait on a lock
+    // only a parked thread can release.
+    error.reserve(512);
+
     // The bytes about to change, so a policy able to account for threads can
     // check that none of them is standing inside them.
     std::unique_ptr<QuiescenceLease> lease =
@@ -84,17 +90,20 @@ bool PatchManager::installGateway(const PatchSite& site,
         return false;
     }
 
-    // Checked again with execution stopped, because everything above happened
-    // while the target was still running.
-    if (!siteAcceptsGateway(site, error)) {
+    // Everything between here and releasing is the write and what it needs.
+    // The site is checked again because everything above happened while the
+    // target was still running.
+    const bool stillAcceptsGateway = siteAcceptsGateway(site, error);
+    const TextWriteResult write = stillAcceptsGateway
+        ? m_write->write(site.patchAddress, gateway.data(), gateway.size())
+        : TextWriteResult{};
+
+    lease.reset();
+
+    if (!stillAcceptsGateway) {
         return false;
     }
 
-    std::vector<std::uint8_t> original(site.availableBytes);
-    std::memcpy(original.data(), site.patchAddress, site.availableBytes);
-
-    const TextWriteResult write =
-        m_write->write(site.patchAddress, gateway.data(), gateway.size());
     // From here the bytes have changed, whatever the outcome, so what admitted
     // that write is what describes the entry from now on.
     if (write.complete()) {
@@ -118,13 +127,7 @@ bool PatchManager::installGateway(const PatchSite& site,
     // So this is an installed gateway with one thing wrong with it, and what is
     // wrong is a page that should not be writable. Calling it a state needing
     // the entry's bytes put back would say the bytes are wrong, which they are
-    // not, and would be the only reason a lease has to outlive its write.
-    //
-    // Threads go first. They are parked wherever they were, holding whatever
-    // they held, so appending to a string here can wait on a lock only a parked
-    // thread can release.
-    lease.reset();
-
+    // not.
     m_record = std::move(record);
     m_installedUnder = admission;
     m_mappingLeftWritable = true;

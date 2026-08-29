@@ -62,27 +62,23 @@ namespace runtime_agent {
 
 // One instruction, as much as is needed to move it or refuse it.
 //
-// The forms decoded are the ones compilers emit in a function's opening bytes,
-// listed so the boundary of what is understood is visible:
+// Decoding and relocation approval are separate. The decoder recognises enough
+// forms to walk a function body and find control transfers, including forms
+// that must never be copied into the trampoline. movable is set only for forms
+// deliberately reviewed as straight-line arithmetic, data movement, stack,
+// comparison, no-op, or vector work. A form added to the decoder later remains
+// nonmovable until it is explicitly approved.
 //
-//   push and pop of a 64-bit register            50+r, 58+r, with or without REX
-//   mov between registers and memory             88, 89, 8A, 8B
-//   mov of an immediate                          C6, C7, and B8+r including movabs
-//   lea                                          8D
-//   add, or, and, sub, xor, cmp, register forms  01, 03, 09, 0B, 21, 23, 29, 2B, 31, 33, 39, 3B
-//   the same against an immediate                81 and 83
-//   test                                         85
-//   nop, in its one-byte and multi-byte forms    90 and 0F 1F
-//   endbr64                                      F3 0F 1E FA
-//   movzx and movsx                              0F B6, B7, BE, BF
-//   ret                                          C3
-//   the indirect group                           FF
-//   call and jmp taking a relative displacement  E8, E9, EB, 70+cc, 0F 80+cc
-//
-// Anything else is refused. A length guessed wrong is worse than a refusal,
-// because it is silent.
+// This distinction matters even when the length is exact. An unreviewed form
+// such as CPUID can be decoded so the body sweep can step over it, but it is not
+// accepted in the bytes being moved. Control-transfer forms keep their more
+// specific refusal reasons.
 struct DecodedInstruction {
     std::size_t length = 0;
+
+    // Positive form-level approval for copying this instruction. Position-
+    // dependent operands and control transfers are separate refusals below.
+    bool movable = false;
 
     // Names an address as a distance from the end of this instruction, so
     // moving it changes what it reaches.
