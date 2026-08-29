@@ -166,6 +166,43 @@ bool readThreadIds(int* into, std::size_t capacity, std::size_t& count, int& fai
     return ok && count <= capacity;
 }
 
+// Whether a thread has this signal blocked, from what the kernel reports.
+//
+// Asked before anything is sent, because a signal queued to a thread that
+// blocks it stays queued until that thread unblocks it. The stop then times
+// out, and every retry queues another, against a limit shared by every process
+// this user is running.
+//
+// Read with ordinary file calls, which is safe here: nothing is parked yet.
+bool blocksSignal(const int tid, const int signalNumber, bool& blocked) noexcept
+{
+    char path[64] = {};
+    std::snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
+    std::FILE* status = std::fopen(path, "re");
+    if (status == nullptr) {
+        // Gone between listing and asking, which the second reading of the list
+        // answers. Any other failure means the mask is simply unknown, and
+        // guessing it is not answering the question.
+        if (errno == ENOENT || errno == ESRCH) {
+            blocked = false;
+            return true;
+        }
+        return false;
+    }
+    char line[256];
+    bool answered = false;
+    while (std::fgets(line, sizeof(line), status) != nullptr) {
+        unsigned long long mask = 0;
+        if (std::sscanf(line, "SigBlk: %llx", &mask) == 1) {
+            blocked = (mask >> (signalNumber - 1)) & 1ULL;
+            answered = true;
+            break;
+        }
+    }
+    (void)std::fclose(status);
+    return answered;
+}
+
 bool sameThreads(const int* a, std::size_t aCount, const int* b, std::size_t bCount) noexcept
 {
     if (aCount != bCount) {
@@ -271,23 +308,33 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         return nullptr;
     }
     if (already == 0) {
-        // What the application has already said about this signal. Installing
-        // over a handler it registered would disable it silently, and this
-        // takes the signal for the life of the process, so there is no putting
-        // it back afterwards.
-        struct sigaction existing {};
-        if (::sigaction(m_signal, nullptr, &existing) != 0) {
+        // Installed in one call, which hands back exactly what was displaced.
+        // Asking first and installing second leaves a gap in which another
+        // thread can register the application's own handler, and this would
+        // then overwrite it having just been told there was nothing there.
+        struct sigaction parking {};
+        parking.sa_sigaction = &parkHandler;
+        parking.sa_flags = SA_SIGINFO | SA_RESTART;
+        ::sigfillset(&parking.sa_mask);
+
+        struct sigaction displaced {};
+        if (::sigaction(m_signal, &parking, &displaced) != 0) {
             const int failure = errno;
             controllerBusy.store(false, std::memory_order_release);
-            error = std::string("could not read what this process already does with signal ")
-                + std::to_string(m_signal) + ": " + std::strerror(failure);
+            error = std::string("could not install the parking handler: ")
+                + std::strerror(failure);
             return nullptr;
         }
-        const bool taken = ((existing.sa_flags & SA_SIGINFO) != 0
-                            && existing.sa_sigaction != nullptr)
-            || ((existing.sa_flags & SA_SIGINFO) == 0
-                && existing.sa_handler != SIG_DFL && existing.sa_handler != SIG_IGN);
-        if (taken || existing.sa_handler == SIG_IGN) {
+
+        const bool wasTaken = ((displaced.sa_flags & SA_SIGINFO) != 0
+                               && displaced.sa_sigaction != nullptr)
+            || ((displaced.sa_flags & SA_SIGINFO) == 0
+                && displaced.sa_handler != SIG_DFL);
+        if (wasTaken) {
+            // Put back what was there, then refuse. Parking claims a signal for
+            // the life of the process, so taking one the application uses would
+            // replace what it does with no way back.
+            (void)::sigaction(m_signal, &displaced, nullptr);
             controllerBusy.store(false, std::memory_order_release);
             error = "this process already does something with signal "
                 + std::to_string(m_signal)
@@ -296,17 +343,6 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
             return nullptr;
         }
 
-        struct sigaction parking {};
-        parking.sa_sigaction = &parkHandler;
-        parking.sa_flags = SA_SIGINFO | SA_RESTART;
-        ::sigfillset(&parking.sa_mask);
-        if (::sigaction(m_signal, &parking, nullptr) != 0) {
-            const int failure = errno;
-            controllerBusy.store(false, std::memory_order_release);
-            error = std::string("could not install the parking handler: ")
-                + std::strerror(failure);
-            return nullptr;
-        }
         installedFor.store(m_signal, std::memory_order_release);
     }
 
@@ -345,6 +381,26 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     }
     if (beforeCount > maxParked) {
         return giveUp("this process has more threads than this policy can account for");
+    }
+
+    // Before a generation exists, so a refusal here leaves nothing behind.
+    for (std::size_t i = 0; i < beforeCount; ++i) {
+        if (before[i] == self) {
+            continue;
+        }
+        bool blocked = false;
+        if (!blocksSignal(before[i], m_signal, blocked)) {
+            return giveUp("could not read what thread " + std::to_string(before[i])
+                          + " does with this signal, so whether it would ever arrive is "
+                            "unknown");
+        }
+        if (blocked) {
+            return giveUp("thread " + std::to_string(before[i])
+                          + " has this signal blocked, so one sent to it would sit in the "
+                            "queue until that thread unblocks it. Sending anyway would time "
+                            "out and leave it queued, and every retry would add another "
+                            "against a limit this user's other processes share");
+        }
     }
 
     const unsigned mine = generation.fetch_add(1, std::memory_order_acq_rel) + 1;

@@ -209,12 +209,17 @@ bool decodeInstruction(const std::uint8_t* at,
     // leave it. Checking the length afterwards would already have read past the
     // end, and the byte after a function can be in a page that is not mapped.
     //
-    // Fifteen because nothing on this architecture is longer. Where fewer bytes
-    // belong here than that, the rest of the window is zero, and any
-    // instruction whose length depends on those reads longer than what belongs
-    // and is refused below.
-    std::uint8_t window[15] = {};
-    const std::size_t readable = available < sizeof(window) ? available : sizeof(window);
+    // At most fifteen bytes are taken, because nothing on this architecture is
+    // longer, and any instruction needing more than that or more than belongs
+    // here is refused below. The buffer is larger than fifteen so that parsing
+    // which walks further before being refused stays inside it: a run of
+    // prefix bytes with no opcode would otherwise walk off the end of a buffer
+    // exactly fifteen long. The padding is zero, which is not a prefix, so the
+    // prefix loop stops there.
+    constexpr std::size_t longestInstruction = 15;
+    std::uint8_t window[longestInstruction * 2] = {};
+    const std::size_t readable = available < longestInstruction ? available
+                                                                : longestInstruction;
     std::memcpy(window, at, readable);
 
     // Where the instruction really is, kept because a branch names where it
@@ -418,7 +423,7 @@ bool decodeInstruction(const std::uint8_t* at,
     // Nothing on this architecture is longer than fifteen bytes, so a longer
     // answer means the decode went wrong and reading it as an instruction would
     // be reading somebody else's.
-    if (decoded.length > 15U) {
+    if (decoded.length > longestInstruction) {
         error = "the instruction decoded to " + std::to_string(decoded.length)
             + " bytes, and nothing here is longer than fifteen, so this decode is wrong";
         return false;
@@ -800,22 +805,28 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     // what is here, and the conclusion that nothing branches into these bytes
     // was reached about different instructions. Compared with execution stopped,
     // because comparing while they can change answers nothing.
-    // Both: the bytes being moved, and the whole body the sweep read. Changing
-    // a later instruction into a branch back into the opening leaves the
-    // opening equal, and that is what the second check is for.
-    const bool unchanged =
-        std::memcmp(patchAt, plan.expectedBytes.data(), plan.takenBytes) == 0
-        && digestOf(static_cast<const std::uint8_t*>(plan.entry), plan.functionBytes)
-            == plan.bodyDigest;
-    if (!unchanged) {
+    // Two separate questions with two separate answers. The bytes being moved
+    // decide whether what was copied is what is there. The whole body decides
+    // whether the sweep's conclusion still holds, and changing a later
+    // instruction into a branch back into the opening leaves the opening equal.
+    const bool openingMatches =
+        std::memcmp(patchAt, plan.expectedBytes.data(), plan.takenBytes) == 0;
+    const bool bodyMatches =
+        digestOf(static_cast<const std::uint8_t*>(plan.entry), plan.functionBytes)
+        == plan.bodyDigest;
+    if (!openingMatches || !bodyMatches) {
         // Threads first: formatting the refusal can wait on a lock a parked
         // thread is holding.
         lease.reset();
         (void)::munmap(trampoline, trampolineBytes);
-        error = "the function's opening bytes are not the ones this plan was made from, so "
-                "something wrote to them in between. What was copied is not what is there, "
-                "and the sweep that found nothing branching into them was about different "
-                "instructions. Plan again";
+        error = openingMatches
+            ? "this function's opening bytes are unchanged, and something wrote elsewhere in "
+              "its body since it was planned. The sweep that found nothing branching into "
+              "the bytes being taken was about instructions that are no longer there. Plan "
+              "again"
+            : "this function's opening bytes are not the ones this plan was made from, so "
+              "something wrote to them in between and what was copied is not what is there. "
+              "Plan again";
         return false;
     }
 
