@@ -1,5 +1,6 @@
 #pragma once
 
+#include "agent/errno_text.h"
 #include "agent/patch_site.h"
 
 #include <cstddef>
@@ -23,7 +24,30 @@ enum class TextWriteOutcome {
 
 struct TextWriteResult {
     TextWriteOutcome outcome = TextWriteOutcome::NotWritten;
-    std::string error;
+
+    // What went wrong, recorded without allocating.
+    //
+    // A write into live text happens with every other thread parked, and one of
+    // them can be inside the allocator holding its lock. Building a sentence
+    // here would wait for a thread that cannot run until the caller releases
+    // them, which is a deadlock the caller cannot see. So a failure is kept as
+    // a literal and an errno, and message() turns it into a sentence once the
+    // caller has let the threads go.
+    //
+    // failedOperation is always a string literal, so nothing owns it.
+    const char* failedOperation = nullptr;
+    int failureErrno = 0;
+
+    [[nodiscard]] std::string message() const
+    {
+        if (failedOperation == nullptr) {
+            return {};
+        }
+        if (failureErrno == 0) {
+            return std::string(failedOperation);
+        }
+        return std::string(failedOperation) + " failed: " + errnoText(failureErrno);
+    }
 
     [[nodiscard]] bool complete() const noexcept
     {

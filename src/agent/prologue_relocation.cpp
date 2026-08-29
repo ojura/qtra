@@ -1031,6 +1031,45 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     __builtin___clear_cache(static_cast<char*>(trampoline),
                             static_cast<char*>(trampoline) + trampolineBytes);
 
+    // Everything that allocates is done before anything is parked.
+    //
+    // StopTheWorldQuiescer stops threads wherever they are, including inside
+    // malloc holding its lock. An allocation after that waits for a lock whose
+    // holder cannot run until the lease is released, and the lease is held by
+    // the thread doing the allocating. So the bytes to write, the room to save
+    // the old ones into, and every part of the record that owns memory are
+    // prepared here, and what runs under the lease only compares, copies and
+    // stores. The prepared backend states the same rule over its own write.
+    std::vector<std::uint8_t> written(plan.takenBytes, 0x90U);
+    // jmp qword ptr [rip+disp32]. The distance is from the end of this
+    // instruction to the word, and the word holds where to go.
+    // Formed as an integer, like the two above: patchAt points into the
+    // function being patched, and advancing it past the jump is arithmetic on
+    // an object this program never declared.
+    const auto fromEnd = static_cast<std::intptr_t>(
+        reinterpret_cast<std::uintptr_t>(patchAt) + entryJumpBytes);
+    const auto toSlot = reinterpret_cast<std::intptr_t>(selection);
+    const std::intptr_t reach = toSlot - fromEnd;
+    if (reach > std::numeric_limits<std::int32_t>::max()
+        || reach < std::numeric_limits<std::int32_t>::min()) {
+        (void)::munmap(trampoline, mappedBytes);
+        error = "the word this entry's jump has to read was mapped further away than the "
+                "jump can name";
+        return false;
+    }
+    written[0] = 0xFFU;
+    written[1] = 0x25U;
+    const auto narrowed = static_cast<std::int32_t>(reach);
+    std::memcpy(written.data() + 2, &narrowed, sizeof(narrowed));
+
+    // Storage for what the entry holds now, so copying it under the lease is a
+    // memcpy into room that already exists. The record's own vectors are filled
+    // in here too; the fields that say a write happened are not, because a
+    // caller reads selection to tell a refusal from a partial write.
+    installed.savedBytes.assign(plan.takenBytes, 0U);
+    installed.plan = plan;
+    installed.installedBytes = written;
+
     // Several bytes change at once, so a thread standing inside them would run
     // the join of what was there and what is arriving. That range is exactly
     // what a policy able to account for threads has to be asked about, and it
@@ -1040,6 +1079,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         quiescer.acquire(WriteRegion{plan.patchAddress, plan.takenBytes}, error);
     if (lease == nullptr) {
         (void)::munmap(trampoline, mappedBytes);
+        installed = RelocatedPrologue{};
         return false;
     }
 
@@ -1063,6 +1103,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         // thread is holding.
         lease.reset();
         (void)::munmap(trampoline, mappedBytes);
+        installed = RelocatedPrologue{};
         error = openingMatches
             ? "this function's opening bytes are unchanged, and something wrote elsewhere in "
               "its body since it was planned. The sweep that found nothing branching into "
@@ -1074,28 +1115,6 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         return false;
     }
 
-    std::vector<std::uint8_t> written(plan.takenBytes, 0x90U);
-    // jmp qword ptr [rip+disp32]. The distance is from the end of this
-    // instruction to the word, and the word holds where to go.
-    // Formed as an integer, like the two above: patchAt points into the
-    // function being patched, and advancing it past the jump is arithmetic on
-    // an object this program never declared.
-    const auto fromEnd = static_cast<std::intptr_t>(
-        reinterpret_cast<std::uintptr_t>(patchAt) + entryJumpBytes);
-    const auto toSlot = reinterpret_cast<std::intptr_t>(selection);
-    const std::intptr_t reach = toSlot - fromEnd;
-    if (reach > std::numeric_limits<std::int32_t>::max()
-        || reach < std::numeric_limits<std::int32_t>::min()) {
-        (void)::munmap(trampoline, mappedBytes);
-        error = "the word this entry's jump has to read was mapped further away than the "
-                "jump can name";
-        return false;
-    }
-    written[0] = 0xFFU;
-    written[1] = 0x25U;
-    const auto narrowed = static_cast<std::int32_t>(reach);
-    std::memcpy(written.data() + 2, &narrowed, sizeof(narrowed));
-
     // What the entry reaches from its first call, in the word before the jump
     // that reads it exists. A caller with nothing to select yet asks for the
     // copy, which runs the original: installing early is a write and nothing
@@ -1103,18 +1122,25 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     selection->store(replacement != nullptr ? replacement : copy,
                      std::memory_order_release);
 
-    installed.savedBytes.assign(patchAt, patchAt + plan.takenBytes);
+    // Into room taken above, so this is a copy and not an allocation.
+    std::memcpy(installed.savedBytes.data(), patchAt, plan.takenBytes);
 
     const TextWriteResult result = writer.write(patchAt, written.data(), written.size());
+
+    // Threads go here, before anything below can allocate. What is left is
+    // reading the result, filling in scalar fields, and possibly building an
+    // error string, and the last of those takes the allocator.
+    lease.reset();
+
     if (!result.changedBytes()) {
         (void)::munmap(trampoline, mappedBytes);
         installed = RelocatedPrologue{};
-        error = result.error;
+        error = result.message();
         return false;
     }
 
-    installed.plan = plan;
-    installed.installedBytes = written;
+    // Scalars, and the fields a caller reads to tell a partial write from a
+    // refusal. The vectors are filled in above, before the lease.
     installed.trampoline = trampoline;
     installed.trampolineBytes = trampolineBytes;
     installed.mappedBytes = mappedBytes;
@@ -1125,7 +1151,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         // The bytes changed and the mapping could not be put back. The entry
         // reaches the replacement as asked, and something that should be
         // read-only is not, so the caller is told both.
-        error = result.error;
+        error = result.message();
         return false;
     }
     return true;
@@ -1177,7 +1203,7 @@ bool restoreRelocatedPrologue(const RelocatedPrologue& installed,
         writer.write(installed.plan.patchAddress, installed.savedBytes.data(),
                      installed.savedBytes.size());
     if (!result.complete()) {
-        error = result.error;
+        error = result.message();
         return false;
     }
 

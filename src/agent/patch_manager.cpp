@@ -123,7 +123,7 @@ bool PatchManager::installGateway(const PatchSite& site,
         return true;
     }
 
-    error = write.error;
+    error = write.message();
     if (!write.changedBytes()) {
         return false;
     }

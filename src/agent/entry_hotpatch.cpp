@@ -15,16 +15,6 @@
 #endif
 
 namespace runtime_agent {
-namespace {
-
-std::string errnoMessage(const char* operation)
-{
-    // Saved first. Building the string is allowed to touch errno itself.
-    const int number = errno;
-    return std::string(operation) + " failed: " + errnoText(number);
-}
-
-} // namespace
 
 TextWriteResult MappedTextWriter::write(void* address,
                                         const std::uint8_t* bytes,
@@ -50,17 +40,18 @@ TextWriteResult writeText(void* address,
     (void)bytes;
     (void)size;
     (void)protect;
-    result.error = "writing mapped text is implemented only for Linux/x86-64";
+    result.failedOperation = "writing mapped text is implemented only for Linux/x86-64";
     return result;
 #else
     if (address == nullptr || bytes == nullptr || size == 0) {
-        result.error = "invalid write request";
+        result.failedOperation = "invalid write request";
         return result;
     }
 
     const std::size_t page_size = pageSize();
     if (page_size == 0) {
-        result.error = errnoMessage("sysconf(_SC_PAGESIZE)");
+        result.failedOperation = "sysconf(_SC_PAGESIZE)";
+        result.failureErrno = errno;
         return result;
     }
     const auto target_address = reinterpret_cast<std::uintptr_t>(address);
@@ -68,7 +59,7 @@ TextWriteResult writeText(void* address,
     std::uintptr_t page_begin = 0;
     std::size_t mapping_size = 0;
     if (!pageSpan(target_address, size, page_size, page_begin, mapping_size)) {
-        result.error = "address range overflow";
+        result.failedOperation = "address range overflow";
         return result;
     }
 
@@ -76,7 +67,8 @@ TextWriteResult writeText(void* address,
     const ProtectFunction change = protect != nullptr ? protect : &::mprotect;
 
     if (change(mapping, mapping_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        result.error = errnoMessage("mprotect(RWX)");
+        result.failedOperation = "mprotect(RWX)";
+        result.failureErrno = errno;
         return result;
     }
 
@@ -90,7 +82,8 @@ TextWriteResult writeText(void* address,
     // permissions, which requires reading them first.
     if (change(mapping, mapping_size, PROT_READ | PROT_EXEC) != 0) {
         result.outcome = TextWriteOutcome::WrittenProtectionNotRestored;
-        result.error = errnoMessage("mprotect(RX)");
+        result.failedOperation = "mprotect(RX)";
+        result.failureErrno = errno;
         return result;
     }
 
