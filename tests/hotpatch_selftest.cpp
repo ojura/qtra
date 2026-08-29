@@ -450,7 +450,7 @@ int main(int argc, char** argv)
 
         runtime_agent::SingleThreadQuiescer counted;
         std::string countedError;
-        if (counted.acquire(countedError) != nullptr || countedError.empty()) {
+        if (counted.acquire(runtime_agent::WriteRegion{site.patchAddress, 20}, countedError) != nullptr || countedError.empty()) {
             std::cerr << "a second thread did not stop the single-thread policy\n";
             keepRunning.store(false, std::memory_order_release);
             worker.join();

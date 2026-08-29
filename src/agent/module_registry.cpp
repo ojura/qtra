@@ -68,6 +68,14 @@ bool targetBuildMatches(void* handle, QString& moduleBuildId, QString& error)
 
 } // namespace
 
+ModuleRegistry& ModuleRegistry::instance()
+{
+    // Never destroyed. See the header: what it holds is referred to by patched
+    // entries that outlive every adapter.
+    static ModuleRegistry* const registry = new ModuleRegistry();
+    return *registry;
+}
+
 quint64 ModuleRegistry::nextId()
 {
     static std::atomic<quint64> counter{1};

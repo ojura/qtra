@@ -106,6 +106,16 @@ public:
         }
     };
 
+    // The one every adapter shares, allocated once and never destroyed.
+    //
+    // For the same reason the patched entries have one. A generation names the
+    // module that bound it, and generations outlive whoever installed them, so
+    // a registry that died with its adapter would leave a selected binding
+    // whose owner nothing could name and nothing could release. The code those
+    // modules hold is never unloaded either, so there is nothing here to
+    // reclaim even in principle.
+    [[nodiscard]] static ModuleRegistry& instance();
+
     ModuleRegistry() = default;
     ModuleRegistry(const ModuleRegistry&) = delete;
     ModuleRegistry& operator=(const ModuleRegistry&) = delete;

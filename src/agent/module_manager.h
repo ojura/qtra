@@ -88,7 +88,10 @@ private:
     [[nodiscard]] bool resetActivePatch(QString& error);
 
     CubeWidget* m_cube = nullptr;
-    runtime_agent::ModuleRegistry m_registry;
+    // Borrowed from the process-lifetime registry. A successor adapter finds
+    // the modules a predecessor loaded, which is what lets it name and
+    // release a binding that is still selected.
+    runtime_agent::ModuleRegistry& m_registry;
     // Borrowed from the registry, which outlives this. What a gateway leaves
     // behind is referred to by the process's own text, so destroying this must
     // not take it: an agent torn down and built again finds the same manager

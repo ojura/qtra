@@ -112,13 +112,14 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/cube_step.cpp
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.cpp
-    src/agent/got_site.h
-    src/agent/got_site.cpp
         src/agent/got_site.cpp
         src/agent/patch_manager.cpp
         src/agent/patch_registry.cpp
         src/agent/write_admission.cpp
         src/agent/quiescence_providers.cpp
+    src/agent/stop_the_world.h
+    src/agent/stop_the_world.cpp
+        src/agent/stop_the_world.cpp
     )
     target_include_directories(hotpatch_selftest PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
     target_link_libraries(hotpatch_selftest PRIVATE ${CMAKE_DL_LIBS})
@@ -148,6 +149,8 @@ qt_add_executable(qt_runtime_cube
     src/agent/entry_hotpatch.cpp
     src/agent/patch_site.h
     src/agent/patch_site.cpp
+    src/agent/got_site.h
+    src/agent/got_site.cpp
     src/agent/gateway_record.h
     src/agent/quiescence.h
     src/agent/quiescence_providers.h
@@ -382,6 +385,43 @@ stamp_with_host_build_id(agent_snippet_jack_in_the_box)
 if(BUILD_TESTING)
     # The admission rule reads a manifest and answers a question about it, so it
     # needs Qt's JSON and nothing else: no window, no display, no build artifact.
+    add_library(teardown_module MODULE tests/teardown_module.cpp)
+    target_include_directories(teardown_module PRIVATE include)
+    set_target_properties(teardown_module PROPERTIES PREFIX "" OUTPUT_NAME "teardown_module")
+
+    # Links the adapter and both registries, so destroying an adapter is a real
+    # destruction and not a stand-in for one. The widget is never constructed:
+    # nothing these ask about involves it.
+    qt_add_executable(module_teardown_selftest
+        tests/module_teardown_selftest.cpp
+        src/cube_step.cpp
+        src/cube_widget.h
+        src/cube_widget.cpp
+        src/agent/entry_hotpatch.cpp
+        src/agent/patch_site.cpp
+        src/agent/got_site.cpp
+        src/agent/patch_manager.cpp
+        src/agent/patch_registry.cpp
+        src/agent/write_admission.cpp
+        src/agent/quiescence_providers.cpp
+        src/agent/stop_the_world.cpp
+        src/agent/module_registry.cpp
+        src/agent/module_manager.cpp
+        src/agent/coverage_manifest.cpp
+        src/agent/build_id.cpp
+    )
+    target_include_directories(module_teardown_selftest
+        PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
+    target_link_libraries(module_teardown_selftest PRIVATE
+        Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets ${CMAKE_DL_LIBS})
+    target_compile_definitions(module_teardown_selftest PRIVATE
+        DEMO_BUILD_DIR="${CMAKE_BINARY_DIR}" DEMO_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+    # The probe module calls cube_step_builtin, which lives here, so this has to
+    # offer its own symbols the way the application does.
+    target_link_options(module_teardown_selftest PRIVATE -Wl,--export-dynamic)
+    add_test(NAME module-teardown
+             COMMAND module_teardown_selftest $<TARGET_FILE:teardown_module>)
+
     add_executable(coverage_admission_selftest
         tests/coverage_admission_selftest.cpp
         src/agent/coverage_manifest.cpp

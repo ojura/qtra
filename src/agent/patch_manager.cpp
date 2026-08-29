@@ -106,7 +106,10 @@ bool PatchManager::installGateway(const PatchSite& site,
     // against as well as a success.
     m_threadsAtInstall = observedThreadCount();
 
-    std::unique_ptr<QuiescenceLease> lease = quiescer.acquire(error);
+    // The bytes about to change, so a policy able to account for threads can
+    // check that none of them is standing inside them.
+    std::unique_ptr<QuiescenceLease> lease =
+        quiescer.acquire(WriteRegion{site.patchAddress, gateway.size()}, error);
     if (lease == nullptr) {
         return false;
     }

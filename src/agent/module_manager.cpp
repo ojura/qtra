@@ -66,7 +66,8 @@ public:
         return "same-thread-request-boundary";
     }
 
-    std::unique_ptr<runtime_agent::QuiescenceLease> acquire(std::string& error) override
+    std::unique_ptr<runtime_agent::QuiescenceLease> acquire(const runtime_agent::WriteRegion&,
+                                                            std::string& error) override
     {
         if (m_cube == nullptr) {
             error = "there is no widget whose thread this could be";
@@ -115,6 +116,7 @@ runtime_agent::LiveTextWriteAdmission admissionFor(
 
 ModuleManager::ModuleManager(CubeWidget* cube)
     : m_cube(cube)
+    , m_registry(runtime_agent::ModuleRegistry::instance())
     , m_patches(runtime_agent::PatchRegistry::instance().forEntry(
           reinterpret_cast<void*>(&cube_step_builtin)))
 {

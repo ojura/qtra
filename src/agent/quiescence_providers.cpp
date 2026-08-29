@@ -29,13 +29,14 @@ std::optional<std::size_t> observedThreadCount()
 #endif
 }
 
-std::unique_ptr<QuiescenceLease> AlreadyQuiescent::acquire(std::string& error)
+std::unique_ptr<QuiescenceLease> AlreadyQuiescent::acquire(const WriteRegion&, std::string& error)
 {
     error.clear();
     return std::make_unique<QuiescenceLease>();
 }
 
-std::unique_ptr<QuiescenceLease> SingleThreadQuiescer::acquire(std::string& error)
+std::unique_ptr<QuiescenceLease> SingleThreadQuiescer::acquire(const WriteRegion&,
+                                                               std::string& error)
 {
     const std::optional<std::size_t> threads = observedThreadCount();
     if (!threads.has_value()) {
@@ -55,7 +56,7 @@ std::unique_ptr<QuiescenceLease> SingleThreadQuiescer::acquire(std::string& erro
     return std::make_unique<QuiescenceLease>();
 }
 
-std::unique_ptr<QuiescenceLease> RefusingQuiescer::acquire(std::string& error)
+std::unique_ptr<QuiescenceLease> RefusingQuiescer::acquire(const WriteRegion&, std::string& error)
 {
     const std::optional<std::size_t> threads = observedThreadCount();
     error = "no policy here can account for what might be running the target";

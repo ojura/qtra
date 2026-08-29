@@ -35,7 +35,8 @@ namespace runtime_agent {
 // no way to check.
 class AlreadyQuiescent final : public Quiescer {
 public:
-    [[nodiscard]] std::unique_ptr<QuiescenceLease> acquire(std::string& error) override;
+    [[nodiscard]] std::unique_ptr<QuiescenceLease> acquire(const WriteRegion& region,
+                                                           std::string& error) override;
     [[nodiscard]] const char* name() const noexcept override { return "already-quiescent"; }
 };
 
@@ -43,7 +44,8 @@ public:
 // thread, which is the one asking.
 class SingleThreadQuiescer final : public Quiescer {
 public:
-    [[nodiscard]] std::unique_ptr<QuiescenceLease> acquire(std::string& error) override;
+    [[nodiscard]] std::unique_ptr<QuiescenceLease> acquire(const WriteRegion& region,
+                                                           std::string& error) override;
     [[nodiscard]] const char* name() const noexcept override { return "single-thread"; }
 };
 
@@ -55,7 +57,8 @@ public:
 // by installing earlier.
 class RefusingQuiescer final : public Quiescer {
 public:
-    [[nodiscard]] std::unique_ptr<QuiescenceLease> acquire(std::string& error) override;
+    [[nodiscard]] std::unique_ptr<QuiescenceLease> acquire(const WriteRegion& region,
+                                                           std::string& error) override;
     [[nodiscard]] const char* name() const noexcept override { return "refusing"; }
 };
 
