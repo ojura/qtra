@@ -350,7 +350,7 @@ QJsonObject ModuleManager::patchStatus() const
     const runtime_agent::PatchStatus patch = m_patches.status();
     QString mode = QStringLiteral("builtin");
     quint64 moduleId = 0;
-    if (m_activeEntryModule != 0) {
+    if (m_activeEntryModule != 0 && m_patches.replacementSelected()) {
         mode = QStringLiteral("entry");
         moduleId = m_activeEntryModule;
     } else if (m_activeDispatchModule != 0) {
@@ -367,12 +367,16 @@ QJsonObject ModuleManager::patchStatus() const
             : QJsonValue()},
         {QStringLiteral("reservedEntryBytes"),
          static_cast<qint64>(runtime_agent::patchAreaBytes)},
-        {QStringLiteral("entryPatchActive"), m_patches.active()},
-        // Reported separately from entryPatchActive, because a caller that sees
-        // only "active" cannot tell an installed patch from one whose install
-        // failed partway and left the entry rewritten.
-        {QStringLiteral("recoveryRequired"),
-         patch.state == runtime_agent::PatchState::RecoveryRequired},
+        // What the entry itself holds, which is a separate question from what
+        // is driving the cube. A gateway naming its continuation runs the
+        // original function, so the entry can be rewritten while mode is
+        // builtin. One field rather than several booleans, because most
+        // combinations of those would describe nothing that can happen.
+        {QStringLiteral("entryState"),
+         QString::fromLatin1(runtime_agent::describe(patch.state))},
+        {QStringLiteral("gatewaySlot"), patch.slotAddress != nullptr
+            ? QJsonValue(pointerString(patch.slotAddress))
+            : QJsonValue()},
     };
     if (LoadedModule* loaded = module(moduleId); loaded != nullptr) {
         result.insert(QStringLiteral("module"), moduleJson(*loaded));
@@ -390,7 +394,7 @@ ModuleManager::LoadedModule* ModuleManager::insertModule(std::unique_ptr<LoadedM
 
 bool ModuleManager::resetActivePatch(QString& error)
 {
-    if (m_patches.active()) {
+    if (m_patches.replacementSelected()) {
         CubeTimerQuiescer quiescer(m_cube);
         std::string nativeError;
         if (!m_patches.rollback(quiescer, nativeError)) {

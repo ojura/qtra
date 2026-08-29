@@ -88,123 +88,78 @@ TextWriteResult writeText(void* address,
 #endif
 }
 
-bool EntryHotpatch::apply(const PatchSite& site, void* replacement, std::string& error)
+std::vector<std::uint8_t> encodeGateway(void* slotAddress, const std::size_t areaBytes)
+{
+    std::vector<std::uint8_t> bytes;
+    if (slotAddress == nullptr || areaBytes < GatewayLayout::totalBytes) {
+        return bytes;
+    }
+
+    bytes.assign(areaBytes, 0x90U);
+
+    // movabs r11, <slot address>. r11 is caller-saved under the System V AMD64
+    // ABI, so a callee is free to clobber it and no caller depends on it here.
+    bytes[0] = 0x49U;
+    bytes[1] = 0xBBU;
+    const auto slot = reinterpret_cast<std::uintptr_t>(slotAddress);
+    static_assert(sizeof(slot) == 8);
+    std::memcpy(bytes.data() + 2, &slot, sizeof(slot));
+
+    // jmp qword ptr [r11]. The destination comes from memory, which is what
+    // makes changing it a store instead of another code write.
+    bytes[10] = 0x41U;
+    bytes[11] = 0xFFU;
+    bytes[12] = 0x23U;
+
+    // endbr64, the continuation. Reached only through the indirect jump above,
+    // so under CET it has to be a landing pad.
+    bytes[13] = 0xF3U;
+    bytes[14] = 0x0FU;
+    bytes[15] = 0x1EU;
+    bytes[16] = 0xFAU;
+    return bytes;
+}
+
+bool siteAcceptsGateway(const PatchSite& site, std::string& error)
 {
     error.clear();
-#if !defined(__linux__) || !defined(__x86_64__)
-    (void)site;
-    (void)replacement;
-    error = "raw entry hotpatching is implemented only for Linux/x86-64";
-    return false;
-#else
-    if (!site.valid() || replacement == nullptr) {
-        error = "a resolved site and a replacement are both required";
+    if (!site.valid()) {
+        error = "a resolved site is required";
         return false;
     }
-    if (active()) {
-        error = "a patch is already active";
+    if (site.availableBytes < GatewayLayout::totalBytes) {
+        error = "the prepared area holds " + std::to_string(site.availableBytes)
+              + " bytes and a gateway with its continuation needs "
+              + std::to_string(GatewayLayout::totalBytes);
         return false;
     }
 
-    // movabs r11, imm64 ; jmp r11
-    // r11 is caller-saved under the System V AMD64 ABI.
-    constexpr std::size_t jump_size = 13;
-    if (site.availableBytes < jump_size) {
-        error = "the prepared area holds " + std::to_string(site.availableBytes)
-              + " bytes and this encoding needs " + std::to_string(jump_size);
+    // Confirmed against what is there now. The site is a measurement taken
+    // earlier and this is the last moment before the write.
+    const auto* bytes = static_cast<const std::uint8_t*>(site.patchAddress);
+    for (std::size_t index = 0; index < site.availableBytes; ++index) {
+        if (bytes[index] != 0x90U) {
+            error = "the prepared area no longer holds the NOPs it was resolved with, so "
+                    "something has been written there since";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool replacementIsReachable(const PatchSite& site, const void* replacement, std::string& error)
+{
+    error.clear();
+    if (replacement == nullptr) {
+        error = "a replacement address is required";
         return false;
     }
 
     constexpr std::uint8_t endbr64[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
     if (site.requiresEndbr64
         && std::memcmp(replacement, endbr64, sizeof(endbr64)) != 0) {
-        error = "this entry sits behind a CET landing pad, so the branch to the replacement "
-                "is indirect and the replacement has to begin with ENDBR64";
-        return false;
-    }
-
-    // Confirmed here and not at resolve time. The site was measured earlier and
-    // this is the last moment before the write, with execution stopped.
-    auto* patchAddress = static_cast<std::uint8_t*>(site.patchAddress);
-    std::vector<std::uint8_t> original(site.availableBytes);
-    std::memcpy(original.data(), patchAddress, site.availableBytes);
-    if (!std::all_of(original.begin(), original.end(), [](const std::uint8_t byte) {
-            return byte == 0x90U;
-        })) {
-        error = "the prepared area no longer holds the NOPs it was resolved with, so "
-                "something has been written there since";
-        return false;
-    }
-
-    m_target = site.entry;
-    m_patchAddress = patchAddress;
-    m_replacement = replacement;
-    m_original = std::move(original);
-
-    std::vector<std::uint8_t> patch(site.availableBytes, 0x90U);
-    patch[0] = 0x49U;
-    patch[1] = 0xBBU;
-    const auto address = reinterpret_cast<std::uintptr_t>(replacement);
-    static_assert(sizeof(address) == 8);
-    std::memcpy(patch.data() + 2, &address, sizeof(address));
-    patch[10] = 0x41U;
-    patch[11] = 0xFFU;
-    patch[12] = 0xE3U;
-
-    const TextWriteResult write = writeText(m_patchAddress, patch.data(), patch.size(), m_protect);
-    if (write.complete()) {
-        m_state = PatchState::Active;
-        return true;
-    }
-
-    error = write.error;
-    if (!write.changedBytes()) {
-        m_state = PatchState::Inactive;
-        m_target = nullptr;
-        m_patchAddress = nullptr;
-        m_replacement = nullptr;
-        m_original.clear();
-        return false;
-    }
-
-    // The entry now holds the jump and the mapping could not be put back. The
-    // replacement is reachable, so the saved bytes are the only route to the
-    // original and are kept.
-    m_state = PatchState::RecoveryRequired;
-    error += "; the entry was already rewritten, so the replacement is live and "
-             "rollback is still required";
-    return false;
-#endif
-}
-
-bool EntryHotpatch::rollback(std::string& error)
-{
-    error.clear();
-    if (!active()) {
-        error = "no entry patch is active";
-        return false;
-    }
-
-    const TextWriteResult write =
-        writeText(m_patchAddress, m_original.data(), m_original.size(), m_protect);
-    if (!write.changedBytes()) {
-        // The entry still holds the jump, so the patch is still in force.
-        error = write.error;
-        return false;
-    }
-
-    // The saved bytes are back, so the target runs its own instructions again
-    // whatever else went wrong.
-    m_state = PatchState::Inactive;
-    m_target = nullptr;
-    m_patchAddress = nullptr;
-    m_replacement = nullptr;
-    m_original.clear();
-
-    if (!write.complete()) {
-        error = write.error;
-        error += "; the entry was restored, so the target is no longer "
-                 "redirected, and the mapping is left writable";
+        error = "this entry sits behind a CET landing pad, so the jump to it is indirect "
+                "and anything it reaches has to begin with ENDBR64";
         return false;
     }
     return true;

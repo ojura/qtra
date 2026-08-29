@@ -51,8 +51,17 @@ endif()
 # build profile.
 # Stated once. The flag reserves the area and the generated header tells the
 # code that resolves the site how much to expect, so the two cannot drift.
-set(RUNTIME_AGENT_PATCH_AREA_BYTES 16 CACHE STRING
-    "Bytes reserved at a patchable function entry")
+# Not a cache entry. A cached value survives a change here, so an existing build
+# directory would keep reserving the old amount while the code that resolves the
+# site expects the new one, which is the drift stating it once was meant to
+# prevent. It is a property of the encoding rather than a knob: a gateway is 13
+# bytes and its continuation is 4.
+set(RUNTIME_AGENT_PATCH_AREA_BYTES 20)
+if(RUNTIME_AGENT_PATCH_AREA_BYTES LESS 17)
+    message(FATAL_ERROR
+        "a gateway needs 13 bytes and its ENDBR64 continuation needs 4, so the prepared "
+        "area cannot be smaller than 17")
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     set_source_files_properties(src/cube_step.cpp PROPERTIES COMPILE_OPTIONS
@@ -78,6 +87,7 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/cube_step.cpp
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.cpp
+        src/agent/patch_manager.cpp
     )
     target_include_directories(hotpatch_selftest PRIVATE include src ${CMAKE_BINARY_DIR}/generated)
     target_link_libraries(hotpatch_selftest PRIVATE ${CMAKE_DL_LIBS})
@@ -108,6 +118,7 @@ if(BUILD_QT_APP)
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.h
         src/agent/patch_site.cpp
+        src/agent/gateway_record.h
         src/agent/quiescence.h
         src/agent/patch_manager.h
         src/agent/patch_manager.cpp

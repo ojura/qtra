@@ -49,58 +49,47 @@ using ProtectFunction = int (*)(void* address, std::size_t length, int protectio
                                         std::size_t size,
                                         ProtectFunction protect = nullptr);
 
-// Inactive means the target holds its own instructions. RecoveryRequired means
-// the bytes were changed and the mapping could not be put back. The entry then
-// holds a redirect the caller was told had failed, so execution has to stay
-// stopped until a rollback puts the original bytes back.
-enum class PatchState {
-    Inactive,
-    Active,
-    RecoveryRequired,
+
+// How a gateway is laid out inside a prepared area.
+//
+// The gateway loads its destination from a slot and jumps through it, so the
+// bytes are written once and every later change is a store to the slot. The
+// continuation is an ENDBR64 immediately after it: the slot starts pointing
+// there, so a call with nothing installed goes gateway, landing pad, remaining
+// NOPs, original body. It is a valid indirect-branch target, which the jump
+// requires under CET.
+//
+//   prepared[0..9]    movabs r11, <slot address>
+//   prepared[10..12]  jmp qword ptr [r11]
+//   prepared[13..16]  endbr64, the original continuation
+//   prepared[17..]    NOPs, falling through to the function's own instructions
+struct GatewayLayout {
+    static constexpr std::size_t jumpBytes = 13;
+    static constexpr std::size_t continuationBytes = 4;
+    static constexpr std::size_t totalBytes = jumpBytes + continuationBytes;
+
+    // Where the slot points when nothing is installed.
+    [[nodiscard]] static void* continuationAddress(void* patchAddress) noexcept
+    {
+        return static_cast<std::uint8_t*>(patchAddress) + jumpBytes;
+    }
 };
 
-// Deliberately small and sharp-edged. This demo implementation is x86-64/Linux
-// only and expects a GCC patchable_function_entry NOP region at the target
-// address, optionally following a four-byte Intel CET ENDBR64 landing pad.
-class EntryHotpatch final {
-public:
-    EntryHotpatch() = default;
-    EntryHotpatch(const EntryHotpatch&) = delete;
-    EntryHotpatch& operator=(const EntryHotpatch&) = delete;
-    // Writes nothing. Restoring an entry needs execution stopped, and a
-    // destructor has no way to arrange that or to report that it failed. A
-    // caller that wants the original bytes back calls rollback while it still
-    // holds a lease.
-    ~EntryHotpatch() = default;
+// Builds the bytes for a gateway that jumps through the given slot. The area is
+// filled to its full length so nothing of what was there survives between the
+// continuation and the function body.
+[[nodiscard]] std::vector<std::uint8_t> encodeGateway(void* slotAddress,
+                                                      std::size_t areaBytes);
 
-    // Writes the redirect. The site says where and how much room there is, and
-    // both are confirmed against the bytes present before anything is written,
-    // because a site is a measurement taken earlier.
-    [[nodiscard]] bool apply(const PatchSite& site, void* replacement, std::string& error);
-    [[nodiscard]] bool rollback(std::string& error);
+// Whether a gateway can go here, checked against the bytes actually present.
+// The site was measured earlier, so this confirms it has not gone stale, and it
+// runs with execution stopped.
+[[nodiscard]] bool siteAcceptsGateway(const PatchSite& site, std::string& error);
 
-    // Tests substitute the permission call to reach the path where the copy
-    // has happened and putting the mapping back has not.
-    void setProtectFunction(const ProtectFunction protect) noexcept { m_protect = protect; }
-
-    [[nodiscard]] PatchState state() const noexcept { return m_state; }
-
-    // True while the target may hold anything other than its own instructions,
-    // which includes the state where a write completed and the mapping could
-    // not be restored, since the redirection is live either way.
-    [[nodiscard]] bool active() const noexcept { return m_state != PatchState::Inactive; }
-    [[nodiscard]] void* target() const noexcept { return m_target; }
-    [[nodiscard]] void* patchAddress() const noexcept { return m_patchAddress; }
-    [[nodiscard]] void* replacement() const noexcept { return m_replacement; }
-    [[nodiscard]] std::size_t reservedBytes() const noexcept { return m_original.size(); }
-
-private:
-    PatchState m_state = PatchState::Inactive;
-    ProtectFunction m_protect = nullptr;
-    void* m_target = nullptr;
-    void* m_patchAddress = nullptr;
-    void* m_replacement = nullptr;
-    std::vector<std::uint8_t> m_original;
-};
+// Whether the gateway's indirect jump may land on this address. Under CET an
+// indirect branch is only allowed to reach an ENDBR64.
+[[nodiscard]] bool replacementIsReachable(const PatchSite& site,
+                                          const void* replacement,
+                                          std::string& error);
 
 } // namespace runtime_agent

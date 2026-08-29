@@ -1,4 +1,5 @@
 #include "agent/entry_hotpatch.h"
+#include "agent/patch_manager.h"
 #include "agent/patch_area.h"
 #include "agent/patch_site.h"
 #include "demo/cube_step_abi.h"
@@ -39,6 +40,16 @@ int failRestoreProtect(void* address, std::size_t length, int protection)
 }
 #endif
 
+// The self-test is single threaded and nothing is calling the target, so
+// stopping execution is already true and the lease has nothing to restore.
+class AlreadyQuiet final : public runtime_agent::Quiescer {
+public:
+    std::unique_ptr<runtime_agent::QuiescenceLease> acquire(std::string&) override
+    {
+        return std::make_unique<runtime_agent::QuiescenceLease>();
+    }
+};
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -57,9 +68,7 @@ int main(int argc, char** argv)
         std::cerr << "dlopen failed: " << ::dlerror() << '\n';
         return 3;
     }
-
-    auto init = reinterpret_cast<CubeStepPatchInit>(
-        ::dlsym(module, "cube_step_patch_init"));
+    auto init = reinterpret_cast<CubeStepPatchInit>(::dlsym(module, "cube_step_patch_init"));
     if (init == nullptr) {
         std::cerr << "dlsym failed: " << ::dlerror() << '\n';
         return 4;
@@ -78,9 +87,7 @@ int main(int argc, char** argv)
         return 6;
     }
 
-    // Where the compiler says this function may be patched, and how much room
-    // it left. Everything below works from this rather than from its own
-    // arithmetic over the function's first bytes.
+    // Where the compiler says this function may be patched.
     runtime_agent::PatchSite site;
     std::string resolveError;
     if (!runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&cube_step_builtin),
@@ -96,18 +103,13 @@ int main(int argc, char** argv)
     const bool cetTarget = std::equal(endbr64.begin(), endbr64.end(), targetBytes);
     const auto expectedPatchAddress = reinterpret_cast<std::uintptr_t>(targetBytes)
         + (cetTarget ? endbr64.size() : 0U);
-    if (reinterpret_cast<std::uintptr_t>(site.patchAddress) != expectedPatchAddress) {
-        std::cerr << "the recorded patch address disagrees with the one derived from ENDBR64\n";
-        return 8;
-    }
-    if (site.availableBytes != runtime_agent::patchAreaBytes
+    if (reinterpret_cast<std::uintptr_t>(site.patchAddress) != expectedPatchAddress
+        || site.availableBytes != runtime_agent::patchAreaBytes
         || site.requiresEndbr64 != cetTarget) {
         std::cerr << "the resolved site does not describe the prepared area\n";
-        return 9;
+        return 8;
     }
 
-    // A function nothing prepared has to be refused, not patched at whatever
-    // happens to follow it.
     runtime_agent::PatchSite unprepared;
     std::string refusal;
     if (runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&approximatelyEqual),
@@ -116,120 +118,129 @@ int main(int argc, char** argv)
                                         refusal)
         || refusal.empty()) {
         std::cerr << "an unprepared function resolved to a patch site\n";
+        return 9;
+    }
+
+    // An area holding anything but its reserved NOPs takes no gateway.
+    std::array<std::uint8_t, 20> occupied{};
+    occupied.fill(0xCCU);
+    runtime_agent::PatchSite occupiedSite;
+    occupiedSite.entry = occupied.data();
+    occupiedSite.patchAddress = occupied.data();
+    occupiedSite.availableBytes = occupied.size();
+    refusal.clear();
+    if (runtime_agent::siteAcceptsGateway(occupiedSite, refusal) || refusal.empty()) {
+        std::cerr << "an occupied area accepted a gateway\n";
         return 10;
     }
 
-    // Refuse an area holding anything but the reserved NOPs. The site is built
-    // by hand here so the refusal is exercised without a prepared target.
-    std::array<std::uint8_t, 16> invalidEntry{};
-    invalidEntry.fill(0xCCU);
-    runtime_agent::PatchSite invalidSite;
-    invalidSite.entry = invalidEntry.data();
-    invalidSite.patchAddress = invalidEntry.data();
-    invalidSite.availableBytes = invalidEntry.size();
-    runtime_agent::EntryHotpatch rejectedPatch;
-    std::string rejectedError;
-    if (rejectedPatch.apply(invalidSite, reinterpret_cast<void*>(patch->step), rejectedError)
-        || rejectedError.empty()) {
-        std::cerr << "non-NOP entry was not rejected\n";
+    // Behind a CET landing pad the jump is indirect, so its destination has to
+    // be one too.
+    runtime_agent::PatchSite cetSite;
+    cetSite.entry = occupied.data();
+    cetSite.patchAddress = occupied.data();
+    cetSite.availableBytes = occupied.size();
+    cetSite.requiresEndbr64 = true;
+    std::array<std::uint8_t, 4> notALandingPad{0x90U, 0x90U, 0x90U, 0x90U};
+    refusal.clear();
+    if (runtime_agent::replacementIsReachable(cetSite, notALandingPad.data(), refusal)
+        || refusal.empty()) {
+        std::cerr << "a CET site accepted a replacement without ENDBR64\n";
         return 11;
     }
 
-    // A site behind a CET landing pad may only branch to another valid landing
-    // pad. Built from buffers so this runs in every configuration, not only
-    // where -fcf-protection is on.
-    std::array<std::uint8_t, 20> cetEntry{};
-    std::copy(endbr64.begin(), endbr64.end(), cetEntry.begin());
-    std::fill(cetEntry.begin() + static_cast<std::ptrdiff_t>(endbr64.size()),
-              cetEntry.end(), 0x90U);
-    std::array<std::uint8_t, 4> nonCetReplacement{0x90U, 0x90U, 0x90U, 0x90U};
-    runtime_agent::PatchSite cetSite;
-    cetSite.entry = cetEntry.data();
-    cetSite.patchAddress = cetEntry.data() + endbr64.size();
-    cetSite.availableBytes = 16;
-    cetSite.requiresEndbr64 = true;
-    runtime_agent::EntryHotpatch rejectedCetPatch;
-    rejectedError.clear();
-    if (rejectedCetPatch.apply(cetSite, nonCetReplacement.data(), rejectedError)
-        || rejectedError.empty()) {
-        std::cerr << "CET target accepted a replacement without ENDBR64\n";
-        return 12;
+    AlreadyQuiet quiet;
+
+    // An install that copies the gateway and cannot put the mapping back. The
+    // slot already names the continuation at that point, so the original still
+    // runs, and the saved bytes are the only way back to a pristine entry.
+    {
+        runtime_agent::PatchManager faulted;
+        faulted.setProtectFunction(&failRestoreProtect);
+        std::string faultError;
+        if (faulted.activate(site, reinterpret_cast<void*>(patch->step), quiet, faultError)) {
+            std::cerr << "activate reported success although the mapping was never restored\n";
+            return 12;
+        }
+        if (faulted.state() != runtime_agent::PatchState::RecoveryRequired) {
+            std::cerr << "a write that changed bytes did not leave recovery required\n";
+            return 13;
+        }
+        const CubeStepOutput duringFault = cube_step_builtin(&input);
+        if (!approximatelyEqual(duringFault.angle_degrees, before.angle_degrees)) {
+            std::cerr << "a half-installed gateway did not still run the original\n";
+            return 14;
+        }
+
+        faulted.setProtectFunction(nullptr);
+        if (!faulted.rollback(quiet, faultError)) {
+            std::cerr << "recovery failed: " << faultError << '\n';
+            return 15;
+        }
+        if (faulted.state() != runtime_agent::PatchState::NoGateway) {
+            std::cerr << "recovery did not return the entry to its own bytes\n";
+            return 16;
+        }
     }
 
-    runtime_agent::EntryHotpatch hotpatch;
+    // The gateway proper.
+    runtime_agent::PatchManager patches;
     std::string error;
-    if (!hotpatch.apply(site, reinterpret_cast<void*>(patch->step), error)) {
-        std::cerr << "apply failed: " << error << '\n';
-        return 13;
+    if (!patches.activate(site, reinterpret_cast<void*>(patch->step), quiet, error)) {
+        std::cerr << "activate failed: " << error << '\n';
+        return 17;
+    }
+    if (patches.state() != runtime_agent::PatchState::GatewayReplacement) {
+        std::cerr << "activate did not select a replacement\n";
+        return 18;
     }
     if (cetTarget && !std::equal(endbr64.begin(), endbr64.end(), targetBytes)) {
         std::cerr << "the CET landing pad was overwritten\n";
-        return 14;
+        return 19;
     }
 
     const CubeStepOutput during = cube_step_builtin(&input);
     if (approximatelyEqual(during.angle_degrees, before.angle_degrees)
         && approximatelyEqual(during.scale, before.scale)) {
-        std::cerr << "patched function still produced the builtin result\n";
-        return 15;
+        std::cerr << "the selected replacement did not run\n";
+        return 20;
     }
 
-    if (!hotpatch.rollback(error)) {
+    // The gateway stays. Rolling back is a store naming the continuation, and
+    // the original runs again through an entry that is still rewritten.
+    if (!patches.rollback(quiet, error)) {
         std::cerr << "rollback failed: " << error << '\n';
-        return 16;
+        return 21;
     }
-
+    if (patches.state() != runtime_agent::PatchState::GatewayOriginal) {
+        std::cerr << "rollback did not leave the gateway naming its continuation\n";
+        return 22;
+    }
     const CubeStepOutput after = cube_step_builtin(&input);
     if (!approximatelyEqual(after.angle_degrees, before.angle_degrees)
         || !approximatelyEqual(after.scale, before.scale)) {
-        std::cerr << "rollback did not restore the builtin function\n";
-        return 17;
+        std::cerr << "the continuation did not run the original function\n";
+        return 23;
     }
 
-    // A permission restore that fails after the copy is the one path that
-    // leaves the process changed while the caller is told the install failed.
-    // A real mprotect will not fail on demand, so the call is substituted.
-    {
-        runtime_agent::EntryHotpatch faulted;
-        faulted.setProtectFunction(&failRestoreProtect);
-        std::string faultError;
-        if (faulted.apply(site, reinterpret_cast<void*>(patch->step), faultError)) {
-            std::cerr << "apply reported success although the mapping was never restored\n";
-            return 14;
-        }
-        if (faulted.state() != runtime_agent::PatchState::RecoveryRequired) {
-            std::cerr << "a write that changed bytes did not leave recovery required\n";
-            return 15;
-        }
-        if (!faulted.active() || faulted.reservedBytes() == 0) {
-            std::cerr << "the saved original bytes were discarded after a partial install\n";
-            return 16;
-        }
-
-        const CubeStepOutput faultedOutput = cube_step_builtin(&input);
-        if (approximatelyEqual(faultedOutput.angle_degrees, before.angle_degrees)
-            && approximatelyEqual(faultedOutput.scale, before.scale)) {
-            std::cerr << "the entry was reported rewritten but still ran the builtin\n";
-            return 17;
-        }
-
-        // Recovery has to be possible from the state the failure left behind.
-        faulted.setProtectFunction(nullptr);
-        if (!faulted.rollback(faultError)) {
-            std::cerr << "rollback after a partial install failed: " << faultError << '\n';
-            return 18;
-        }
-        const CubeStepOutput recovered = cube_step_builtin(&input);
-        if (!approximatelyEqual(recovered.angle_degrees, before.angle_degrees)
-            || !approximatelyEqual(recovered.scale, before.scale)) {
-            std::cerr << "recovery did not restore the builtin function\n";
-            return 19;
-        }
+    // Selecting again writes no code at all.
+    if (!patches.activate(site, reinterpret_cast<void*>(patch->step), quiet, error)) {
+        std::cerr << "reselecting failed: " << error << '\n';
+        return 24;
+    }
+    const CubeStepOutput again = cube_step_builtin(&input);
+    if (approximatelyEqual(again.angle_degrees, before.angle_degrees)) {
+        std::cerr << "reselecting did not reach the replacement\n";
+        return 25;
+    }
+    if (!patches.rollback(quiet, error)) {
+        std::cerr << "final rollback failed: " << error << '\n';
+        return 26;
     }
 
     std::cout << "PASS: " << patch->name_utf8
-              << " redirected and restored cube_step_builtin, and a failed"
-                 " permission restore left recoverable state\n";
+              << " selected and deselected through a permanent gateway, and a failed"
+                 " install left recoverable state\n";
     // Intentionally do not dlclose: the running app follows the same policy.
     return 0;
 #endif
