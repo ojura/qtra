@@ -190,21 +190,6 @@ bool PatchManager::unbind(const std::uint64_t id, const std::uint64_t owner, std
     return false;
 }
 
-std::size_t PatchManager::unbindOwner(const std::uint64_t owner)
-{
-    std::size_t released = 0;
-    for (Generation& generation : m_generations) {
-        if (generation.owner == owner && !generation.released) {
-            generation.released = true;
-            ++released;
-        }
-    }
-    if (released != 0) {
-        publishSelection();
-    }
-    return released;
-}
-
 bool PatchManager::recover(std::string& error)
 {
     error.clear();

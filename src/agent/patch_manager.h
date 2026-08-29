@@ -95,10 +95,6 @@ public:
     // would overwrite a replacement chosen after it.
     [[nodiscard]] bool unbind(std::uint64_t id, std::uint64_t owner, std::string& error);
 
-    // Releases every binding a module owns, for a module that is going away
-    // without having tidied up.
-    [[nodiscard]] std::size_t unbindOwner(std::uint64_t owner);
-
     // Puts the entry back to its own bytes. Only possible while recovering from
     // an install that never finished, which still holds the lease that stopped
     // execution.

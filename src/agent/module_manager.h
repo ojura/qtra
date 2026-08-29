@@ -99,7 +99,6 @@ public:
     [[nodiscard]] LoadedModule* module(quint64 id) const;
     [[nodiscard]] QJsonArray list() const;
 
-    [[nodiscard]] bool activateDispatchPatch(quint64 id, QString& error);
     [[nodiscard]] bool activateEntryPatch(quint64 id, QString& error);
     [[nodiscard]] bool rollback(QString& error);
 
@@ -122,7 +121,6 @@ private:
     quint64 m_nextId = 1;
     std::unordered_map<quint64, std::unique_ptr<LoadedModule>> m_modules;
     runtime_agent::PatchManager m_patches;
-    quint64 m_activeDispatchModule = 0;
     quint64 m_activeEntryModule = 0;
     // The protocol's own binding, so releasing it goes through the same
     // generation rule a snippet's binding does.

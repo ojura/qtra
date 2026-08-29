@@ -219,7 +219,9 @@ leaves it collapsed and unclaimed, so the restore has to come first.
 ### Function patches
 
 - `patch.load {path}`
-- `patch.activate {moduleId, mode}` where mode is `dispatch` or `entry`
+- `patch.activate {moduleId}` rewrites the target's entry so calls reach the
+  module's replacement. The first activation installs a gateway that jumps
+  through a slot, and later ones store into that slot.
 - `patch.rollback`
 - `patch.status`
 

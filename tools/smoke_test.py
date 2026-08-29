@@ -99,12 +99,10 @@ def main(argv: list[str] | None = None) -> int:
             transcript["tree"] = client.request("object.tree", {"maxDepth": 2})
 
             loaded_patch = client.request("patch.load", {"path": str(required["patch"])})
-            transcript["dispatchPatch"] = client.request(
-                "patch.activate", {"moduleId": module_id(loaded_patch), "mode": "dispatch"}
-            )
-            transcript["dispatchRollback"] = client.request("patch.rollback")
+            # One replacement mechanism: the entry is rewritten. The
+            # application holds no function pointer to swap.
             transcript["entryPatch"] = client.request(
-                "patch.activate", {"moduleId": module_id(loaded_patch), "mode": "entry"}
+                "patch.activate", {"moduleId": module_id(loaded_patch)}
             )
             transcript["entryRollback"] = client.request("patch.rollback")
 

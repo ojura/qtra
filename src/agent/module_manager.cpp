@@ -269,17 +269,6 @@ QJsonArray ModuleManager::list() const
     return result;
 }
 
-bool ModuleManager::activateDispatchPatch(const quint64 id, QString& error)
-{
-    Q_UNUSED(id)
-    error = QStringLiteral(
-        "the application holds no function pointer to replace. Replacing its step "
-        "function is done by rewriting the function's own entry, which is what "
-        "mode=entry does; a cooperative pointer is exercised by the hotpatch self-test "
-        "instead of by the application");
-    return false;
-}
-
 bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
 {
     LoadedModule* loaded = module(id);
@@ -351,7 +340,12 @@ int ModuleManager::bindReplacement(void* target,
                                    QString& error)
 {
     if (target != reinterpret_cast<void*>(&cube_step_builtin)) {
-        error = QStringLiteral("this adapter resolves one target, the cube's step function");
+        error = QStringLiteral(
+            "this runtime resolves one target so far, cube_step_builtin at %1. The host "
+            "interface is not limited to it; what is missing is a way to find another "
+            "function's prepared area and to stop whatever might be running it")
+            .arg(QStringLiteral("0x%1").arg(
+                reinterpret_cast<quintptr>(&cube_step_builtin), 0, 16));
         return -1;
     }
 
@@ -406,9 +400,6 @@ QJsonObject ModuleManager::patchStatus() const
     if (m_activeEntryModule != 0 && m_patches.replacementSelected()) {
         mode = QStringLiteral("entry");
         moduleId = m_activeEntryModule;
-    } else if (m_activeDispatchModule != 0) {
-        mode = QStringLiteral("dispatch");
-        moduleId = m_activeDispatchModule;
     }
 
     QJsonObject result{
@@ -457,7 +448,6 @@ bool ModuleManager::resetActivePatch(QString& error)
     }
 
     m_activeEntryModule = 0;
-    m_activeDispatchModule = 0;
     return true;
 }
 

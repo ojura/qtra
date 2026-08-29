@@ -18,8 +18,8 @@ and provides:
 - OpenGL vendor/renderer/version state and asynchronous debug-message events;
 - a stable C host ABI for snippets plus an intentionally unsafe route to real
   C++ objects, private fields, process symbols, and process memory;
-- two function replacement mechanisms: an atomic dispatch slot and a real
-  Linux/x86-64 entry rewrite with rollback;
+- replacing a function in the running process by rewriting its entry, with a
+  gateway installed once and every later choice made by an atomic store;
 - a build-oracle tool that derives a snippet compiler command from the owning
   translation unit in `compile_commands.json`.
 
@@ -63,7 +63,7 @@ Xvfb/current-display smoke session, which needs the Qt 6 packages below.
        | QObject registry       event publisher              |
        | semantic actions       operation lifecycle          |
        | DSO/snippet loader     symbol + unsafe memory API    |
-       | dispatch patching      x86-64 entry hotpatching      |
+       | patch bindings         x86-64 entry gateway          |
        +-----------+-----------------------+-----------------+
                    |                       |
           queued Qt invocation       paintGL callback queue
@@ -512,12 +512,14 @@ So this snippet uses both seams at once, according to which owns what:
 
 | seam | what it drives | why that one |
 | --- | --- | --- |
-| dispatch step function | the cube's angle, tint and scale | the widget recomputes all three every tick from the step's output |
+| a host patch binding | the cube's angle, tint and scale | the widget recomputes all three every tick from its step function's output, so replacing that function is the only way to reach them |
 | `frameRendered` hook | the geometry drawn around the cube | it runs while the context is current and the depth buffer still holds the cube, so the drawing is occluded by the cube for free |
 
-Releasing restores whichever step function was installed beforehand, so a
-dispatch patch loaded first survives this
-snippet being switched on and off.
+The snippet asks the host to bind its own step function, through
+`patch_bind`, and releases that binding when it is switched off. The
+application holds no pointer for this: the host rewrites the target
+function's entry and records the binding, so a replacement bound after this
+one keeps the cube when this one lets go.
 
 ```bash
 python3 tools/agentctl.py snippet \
@@ -840,7 +842,7 @@ animation tick. This is the predictable, portable seam:
 
 ```bash
 python3 tools/agentctl.py patch \
-  build/release/cube_patch_wobble.so --mode dispatch
+  build/release/cube_patch_wobble.so
 python3 tools/agentctl.py call patch.rollback
 ```
 
@@ -924,7 +926,7 @@ python3 tools/smoke_test.py --build-dir build/release --keep-runtime
 ```
 
 The test launches the application on the current display or Xvfb, connects to
-the socket, queries the object tree, exercises dispatch and entry patching,
+the socket, queries the object tree, exercises entry patching,
 loads the private-state, persistent-observer, and render-context snippets,
 replays retained completion events, captures a PNG framebuffer, and requests a
 clean process exit. Logs, screenshot, and transcript are kept when requested or
@@ -959,7 +961,7 @@ include/agent/agent_abi.h       stable snippet host ABI
 include/demo/cube_step_abi.h    patch function/descriptor ABI
 src/agent/runtime_agent.*       JSON socket and command dispatch
 src/agent/object_registry.*     QObject IDs and reflection
-src/agent/module_manager.*      dlopen, snippet, dispatch, entry patch state
+src/agent/module_manager.*      dlopen, snippets, module registry, cube adapter
 src/agent/build_id.*            the running executable's GNU build id
 src/agent/entry_hotpatch.*      Linux/x86-64 entry rewriter
 src/cube_widget.*               OpenGL cube and execution seams

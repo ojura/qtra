@@ -1065,18 +1065,8 @@ void RuntimeAgent::handlePatchActivate(QLocalSocket* socket,
                   QStringLiteral("moduleId must be an unsigned integer"));
         return;
     }
-    const QString mode = parameters.value(QStringLiteral("mode")).toString(
-        QStringLiteral("dispatch"));
-    if (mode != QStringLiteral("dispatch") && mode != QStringLiteral("entry")) {
-        sendError(socket, requestId, QStringLiteral("invalid_patch_mode"),
-                  QStringLiteral("mode must be dispatch or entry"));
-        return;
-    }
     QString error;
-    const bool activated = mode == QStringLiteral("entry")
-        ? m_modules.activateEntryPatch(moduleId, error)
-        : m_modules.activateDispatchPatch(moduleId, error);
-    if (!activated) {
+    if (!m_modules.activateEntryPatch(moduleId, error)) {
         sendError(socket, requestId, QStringLiteral("patch_failed"), error);
         return;
     }

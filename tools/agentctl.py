@@ -454,7 +454,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     patch = subparsers.add_parser("patch", help="load and activate a cube patch module")
     patch.add_argument("path")
-    patch.add_argument("--mode", choices=("dispatch", "entry"), default="dispatch")
+    # One way to replace a function: rewrite its entry. The application holds
+    # no pointer to swap.
+    patch.add_argument("--mode", choices=("entry",), default="entry")
 
     snippet = subparsers.add_parser("snippet", help="load, run, and optionally await a snippet")
     snippet.add_argument("path")
