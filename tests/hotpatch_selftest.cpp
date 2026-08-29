@@ -1,4 +1,5 @@
 #include "agent/entry_hotpatch.h"
+#include "agent/got_site.h"
 #include "agent/patch_registry.h"
 #include "agent/quiescence_providers.h"
 #include "agent/patch_area.h"
@@ -29,6 +30,38 @@ constexpr std::array<std::uint8_t, 4> endbr64{0xF3U, 0x0FU, 0x1EU, 0xFAU};
 bool approximatelyEqual(float a, float b)
 {
     return std::abs(a - b) < 0.0001F;
+}
+
+int replacementMemcpyCalls = 0;
+char gotScratch[64] = {};
+
+// Copies without calling memcpy, which would come straight back through the
+// slot this replaces.
+extern "C" void* countingMemcpy(void* destination, const void* source, std::size_t count)
+{
+    ++replacementMemcpyCalls;
+    auto* to = static_cast<unsigned char*>(destination);
+    const auto* from = static_cast<const unsigned char*>(source);
+    for (std::size_t i = 0; i < count; ++i) {
+        to[i] = from[i];
+    }
+    return destination;
+}
+
+// Out of line, with both the length and the destination read through volatiles
+// so the compiler can see neither.
+//
+// Two things stop this reaching memcpy otherwise, and both cost a version of
+// this test that reported the redirect had not worked. A constant length lets
+// the copy be expanded where it stands. A destination whose size is visible
+// lets _FORTIFY_SOURCE call __memcpy_chk instead, which is a different symbol
+// with a different slot.
+__attribute__((noinline)) void copyThroughTheTable(char* to, const char* from,
+                                                   const std::size_t count)
+{
+    volatile std::size_t opaqueCount = count;
+    char* volatile opaqueDestination = to;
+    std::memcpy(opaqueDestination, from, opaqueCount);
 }
 
 #if defined(__linux__) && defined(__x86_64__)
@@ -199,6 +232,72 @@ int main(int argc, char** argv)
         || refusal.empty()) {
         std::cerr << "a CET site accepted a replacement without ENDBR64\n";
         return 11;
+    }
+
+    // A call into a library this build does not produce, redirected without a
+    // prepared area and without writing anyone's code.
+    //
+    // This is the case the entry patcher cannot serve. Reserving space at a
+    // function's entry means building the object that defines it, and libc is
+    // not ours to build. The relocation is, because it belongs to the object
+    // doing the calling.
+    {
+        std::string gotError;
+        runtime_agent::GotSite site;
+        if (!runtime_agent::resolveGotSlot("", "memcpy", site, gotError)) {
+            std::cerr << "could not find the slot memcpy is called through: " << gotError << '\n';
+            return 40;
+        }
+        if (site.resolved != ::dlsym(RTLD_DEFAULT, "memcpy")) {
+            std::cerr << "the slot does not hold what the loader resolved\n";
+            return 41;
+        }
+
+        const int before = replacementMemcpyCalls;
+        copyThroughTheTable(gotScratch, "unredirected", 13);
+        if (replacementMemcpyCalls != before) {
+            std::cerr << "the replacement ran before anything was redirected\n";
+            return 42;
+        }
+
+        if (!runtime_agent::redirectGotSlot(
+                site, reinterpret_cast<void*>(&countingMemcpy), gotError)) {
+            std::cerr << "could not redirect the slot: " << gotError << '\n';
+            return 43;
+        }
+        copyThroughTheTable(gotScratch, "redirected", 11);
+        if (replacementMemcpyCalls != before + 1) {
+            std::cerr << "the redirect did not reach the caller\n";
+            return 44;
+        }
+        if (std::strcmp(gotScratch, "redirected") != 0) {
+            std::cerr << "the replacement did not copy what it was asked to\n";
+            return 45;
+        }
+
+        if (!runtime_agent::restoreGotSlot(site, gotError)) {
+            std::cerr << "could not put the slot back: " << gotError << '\n';
+            return 46;
+        }
+        if (*site.slot != site.resolved) {
+            std::cerr << "restoring did not put back what the loader resolved\n";
+            return 47;
+        }
+        const int after = replacementMemcpyCalls;
+        copyThroughTheTable(gotScratch, "restored", 9);
+        if (replacementMemcpyCalls != after) {
+            std::cerr << "the replacement still ran after the slot was restored\n";
+            return 48;
+        }
+
+        // Naming something the caller never calls has to say so, not guess.
+        runtime_agent::GotSite absent;
+        gotError.clear();
+        if (runtime_agent::resolveGotSlot("", "no_such_function_anywhere", absent, gotError)
+            || gotError.empty()) {
+            std::cerr << "a symbol nobody calls resolved anyway\n";
+            return 49;
+        }
     }
 
     runtime_agent::SingleThreadQuiescer quiet;

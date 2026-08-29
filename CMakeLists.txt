@@ -112,6 +112,9 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/cube_step.cpp
         src/agent/entry_hotpatch.cpp
         src/agent/patch_site.cpp
+    src/agent/got_site.h
+    src/agent/got_site.cpp
+        src/agent/got_site.cpp
         src/agent/patch_manager.cpp
         src/agent/patch_registry.cpp
         src/agent/write_admission.cpp
