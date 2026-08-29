@@ -21,6 +21,7 @@
 // an accounting of every thread.
 
 #include <string>
+#include <utility>
 
 namespace runtime_agent {
 
@@ -39,22 +40,70 @@ enum class WriteAdmissionBasis {
 
 [[nodiscard]] const char* describe(WriteAdmissionBasis basis) noexcept;
 
-// An aggregate so a test can state one directly. What makes a real one mean
-// anything is where it is built: the layer that evaluated the evidence makes
-// it, and only after that evidence allowed the write.
-struct LiveTextWriteAdmission {
-    WriteAdmissionBasis basis = WriteAdmissionBasis::AlreadyQuiescent;
+// Every field is required, so there is no partly-stated one and no default
+// that could stand in for evidence nobody supplied. A test builds one directly;
+// what makes a real one mean anything is where it is built, which is the layer
+// that read the evidence, after that evidence allowed the write.
+//
+// There is no default basis, because both of them are substantive claims.
+// Already-quiescent says nothing that could reach the target was running, which
+// is as strong a statement as the other one and not a way of saying nothing is
+// known. A zero value meaning either would be evidence made out of nothing.
+//
+// Copyable so it can be reported, and readable only, because nothing may adjust
+// what a write was made under after the write has happened.
+class LiveTextWriteAdmission {
+public:
+    LiveTextWriteAdmission(const WriteAdmissionBasis basis,
+                           std::string provider,
+                           std::string target,
+                           std::string detail,
+                           std::string buildId = {})
+        : m_basis(basis)
+        , m_provider(std::move(provider))
+        , m_target(std::move(target))
+        , m_detail(std::move(detail))
+        , m_buildId(std::move(buildId))
+    {
+    }
+
+    [[nodiscard]] WriteAdmissionBasis basis() const noexcept { return m_basis; }
 
     // The quiescence policy that was used, by name.
-    std::string provider;
+    [[nodiscard]] const std::string& provider() const noexcept { return m_provider; }
 
-    // What was being patched and in which binary, so a record found later can
-    // be attributed without asking anything that may have changed since.
-    std::string target;
-    std::string buildId;
+    // What was patched and in which binary, so a record found later can be
+    // attributed without asking anything that may have changed since. The build
+    // is empty where the basis never came from a build's decision.
+    [[nodiscard]] const std::string& target() const noexcept { return m_target; }
+    [[nodiscard]] const std::string& buildId() const noexcept { return m_buildId; }
 
     // What the basis said, in a form worth reporting.
-    std::string detail;
+    [[nodiscard]] const std::string& detail() const noexcept { return m_detail; }
+
+private:
+    WriteAdmissionBasis m_basis;
+    std::string m_provider;
+    std::string m_target;
+    std::string m_detail;
+    std::string m_buildId;
 };
+
+// Whether this says enough to attribute a write to it.
+//
+// Beside the fields it governs, so the rule and the data stay together and
+// whatever installs a gateway has one thing to ask. It checks that the record
+// is complete and never what the record claims: whether the grounds were good
+// is a question for whoever read the evidence, and a patch manager weighing it
+// again would be owning a policy it has nothing to decide with.
+//
+// Required of every basis: what provided it, and what it said. A record naming
+// neither says a write was admitted by nobody, over nothing.
+//
+// RequestBoundary additionally requires the target and the build, because it is
+// a claim a particular build made about a particular function, and it means
+// nothing without knowing which. AlreadyQuiescent needs the target but no
+// build: no manifest was involved, so there is none to name.
+[[nodiscard]] bool attributable(const LiveTextWriteAdmission& admission, std::string& error);
 
 } // namespace runtime_agent

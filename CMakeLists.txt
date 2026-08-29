@@ -114,7 +114,6 @@ if(BUILD_HOTPATCH_SELFTEST)
         src/agent/patch_site.cpp
         src/agent/patch_manager.cpp
         src/agent/patch_registry.cpp
-    src/agent/write_admission.cpp
         src/agent/write_admission.cpp
         src/agent/quiescence_providers.cpp
     )
@@ -152,7 +151,10 @@ qt_add_executable(qt_runtime_cube
     src/agent/quiescence_providers.cpp
     src/agent/patch_manager.h
     src/agent/patch_manager.cpp
+    src/agent/patch_registry.h
     src/agent/patch_registry.cpp
+    src/agent/write_admission.h
+    src/agent/write_admission.cpp
     src/agent/object_registry.h
     src/agent/object_registry.cpp
     src/agent/module_manager.h

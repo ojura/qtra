@@ -157,17 +157,15 @@ runtime_agent::LiveTextWriteAdmission admissionFor(
     const runtime_agent::Quiescer& quiescer,
     const runtime_agent::CoverageDecision& decision)
 {
-    runtime_agent::LiveTextWriteAdmission admission;
-    admission.basis = runtime_agent::WriteAdmissionBasis::RequestBoundary;
-    admission.provider = quiescer.name();
-    admission.target = decision.target.toStdString();
-    admission.buildId = decision.manifestBuildId.toStdString();
-    admission.detail = QStringLiteral("caller execution domain %1")
-                           .arg(decision.domainStrength.isEmpty()
-                                    ? QStringLiteral("absent")
-                                    : decision.domainStrength)
-                           .toStdString();
-    return admission;
+    return runtime_agent::LiveTextWriteAdmission(
+        runtime_agent::WriteAdmissionBasis::RequestBoundary,
+        quiescer.name(),
+        decision.target.toStdString(),
+        QStringLiteral("caller execution domain %1")
+            .arg(decision.domainStrength.isEmpty() ? QStringLiteral("absent")
+                                                   : decision.domainStrength)
+            .toStdString(),
+        decision.manifestBuildId.toStdString());
 }
 
 } // namespace
@@ -339,18 +337,17 @@ QString manifestPath()
 } // namespace
 
 bool ModuleManager::installIfNeeded(const runtime_agent::PatchSite& site,
+                                    const runtime_agent::CoverageDecision& decision,
                                     runtime_agent::Quiescer& quiescer,
                                     std::string& error)
 {
     if (m_patches.state() != runtime_agent::PatchState::NoGateway) {
         return true;
     }
-    // admits() has already run and stored what allowed this, which is what the
-    // record keeps. Selecting a replacement afterwards writes no bytes and asks
-    // nothing further.
-    return m_patches.installGateway(
-        site, admissionFor(quiescer, m_admitted.value_or(runtime_agent::CoverageDecision{})),
-        quiescer, error);
+    // The decision that allowed this write, handed over by the caller that got
+    // it. Passing it instead of keeping it is what stops an admission being
+    // built out of nothing when somebody adds a path that forgot to ask.
+    return m_patches.installGateway(site, admissionFor(quiescer, decision), quiescer, error);
 }
 
 runtime_agent::CoverageDecision ModuleManager::readDecision() const
@@ -372,13 +369,15 @@ QJsonObject ModuleManager::coverage() const
     };
 }
 
-bool ModuleManager::admits(const bool acceptIncompleteCoverage, QString& error)
+bool ModuleManager::admits(const bool acceptIncompleteCoverage,
+                           runtime_agent::CoverageDecision& decision,
+                           QString& error)
 {
     // What the build established about replacing this function. Refused by
     // default: a build that recorded nothing has not been asked whether the
     // replacement reaches every call, and treating silence as approval is the
     // thing the manifest exists to prevent.
-    const runtime_agent::CoverageDecision decision = readDecision();
+    decision = readDecision();
 
     // Asked of every selection, because a replacement that misses callers
     // misses them however it came to be chosen.
@@ -394,8 +393,6 @@ bool ModuleManager::admits(const bool acceptIncompleteCoverage, QString& error)
         if (!runtime_agent::authorizesLiveTextWrite(decision, error)) {
             return false;
         }
-        // Kept so recovery can answer to what authorized the write it undoes.
-        m_admitted = decision;
     }
     return true;
 }
@@ -418,7 +415,8 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         return false;
     }
 
-    if (!admits(acceptIncompleteCoverage, error)) {
+    runtime_agent::CoverageDecision decision;
+    if (!admits(acceptIncompleteCoverage, decision, error)) {
         return false;
     }
 
@@ -443,9 +441,21 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
     const std::uint64_t previousBinding = m_entryBinding;
     const quint64 previousModule = m_activeEntryModule;
 
+    // Before anything is written. Installing a gateway is permanent, and a
+    // request that will be refused for its replacement must not leave one
+    // behind: the entry would run the original through the slot, so nothing
+    // breaks, but a refused request would have rewritten the entry. bind checks
+    // again against the site the gateway was actually installed at, which is
+    // the one the jump is taken from.
+    if (!runtime_agent::replacementIsReachable(
+            site, reinterpret_cast<void*>(loaded->cubePatch->step), nativeError)) {
+        error = QString::fromStdString(nativeError);
+        return false;
+    }
+
     SameThreadRequestBoundary quiescer(m_cube);
     runtime_agent::PatchBinding binding;
-    if (!installIfNeeded(site, quiescer, nativeError)) {
+    if (!installIfNeeded(site, decision, quiescer, nativeError)) {
         error = QString::fromStdString(nativeError);
         if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
             m_activeEntryModule = id;
@@ -526,7 +536,8 @@ int ModuleManager::bindReplacement(void* target,
     // The same admission the protocol answers to. Without this a module reaches
     // a write that a request over the socket would have refused, and the build's
     // decision only binds whoever happened to ask the other way.
-    if (!admits(acceptIncompleteCoverage, error)) {
+    runtime_agent::CoverageDecision decision;
+    if (!admits(acceptIncompleteCoverage, decision, error)) {
         return -1;
     }
 
@@ -544,8 +555,19 @@ int ModuleManager::bindReplacement(void* target,
         site.name = QStringLiteral("cube_step_builtin").toStdString();
     }
 
+    // Before anything is written. Installing a gateway is permanent, and a
+    // request that will be refused for its replacement must not leave one
+    // behind: the entry would run the original through the slot, so nothing
+    // breaks, but a refused request would have rewritten the entry. bind checks
+    // again against the site the gateway was actually installed at, which is
+    // the one the jump is taken from.
+    if (!runtime_agent::replacementIsReachable(site, replacement, nativeError)) {
+        error = QString::fromStdString(nativeError);
+        return -1;
+    }
+
     SameThreadRequestBoundary quiescer(m_cube);
-    if (!installIfNeeded(site, quiescer, nativeError)) {
+    if (!installIfNeeded(site, decision, quiescer, nativeError)) {
         error = QString::fromStdString(nativeError);
         return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;
     }
@@ -645,10 +667,9 @@ bool ModuleManager::resetActivePatch(QString& error)
     // The one way back from an install that changed bytes and could not finish.
     // Without this the state told a caller to recover and no command could.
     if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
-        // Recovery restores the entry's own bytes, which is a code write, so it
-        // answers to what installing answers to. Reaching it from the wrong
-        // thread, or on a build whose claim about which threads run the target
-        // is not good enough to write by, is the same hazard.
+        // Recovery restores the entry's own bytes, which is a code write, so
+        // reaching it from the wrong thread is the same hazard installing from
+        // one would be.
         if (QThread::currentThread() != m_cube->thread()) {
             error = QStringLiteral("recovery writes the target's entry, so it has to run "
                                    "on the thread that owns it");

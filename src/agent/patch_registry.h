@@ -58,8 +58,15 @@ public:
     // manager and cannot install two gateways over each other. A caller holds
     // the reference for as long as it likes; it belongs to the registry.
     //
-    // Safe to call from any thread. The reference stays valid however the map
-    // grows afterwards, because the managers are separate allocations.
+    // Safe to call from any thread: the map is locked, and the reference stays
+    // valid however the map grows afterwards, because managers are separate
+    // allocations.
+    //
+    // The lock covers finding and making a manager and nothing more. What a
+    // manager does once handed out, and what its status reports, are not
+    // guarded here, so one thread drives patching. That is a requirement and
+    // not an oversight: a write into an entry has to happen on a thread allowed
+    // to write it, which no lock in this class could establish.
     [[nodiscard]] PatchManager& forEntry(void* entry);
 
     // Whether anything is known about this entry yet, which is a question about

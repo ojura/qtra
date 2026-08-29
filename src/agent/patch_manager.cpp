@@ -77,6 +77,12 @@ bool PatchManager::installGateway(const PatchSite& site,
                 "needs no further write";
         return false;
     }
+    // Before anything is written, because a record that cannot be attributed is
+    // worth nothing to whoever finds it later, and by then the bytes have
+    // changed.
+    if (!attributable(admission, error)) {
+        return false;
+    }
     if (!siteAcceptsGateway(site, error)) {
         return false;
     }

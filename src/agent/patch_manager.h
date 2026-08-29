@@ -197,7 +197,8 @@ private:
 
         std::vector<std::uint8_t> original;
         std::unique_ptr<QuiescenceLease> lease;
-        LiveTextWriteAdmission admission;
+        // Const, so custody cannot be edited after the write it describes.
+        const LiveTextWriteAdmission admission;
         std::shared_ptr<TextWriter> write;
     };
 

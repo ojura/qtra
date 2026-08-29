@@ -112,9 +112,12 @@ public:
 private:
     // The one place that decides whether a write may go ahead, so both the
     // protocol and the host binding call answer to the same rules.
-    [[nodiscard]] bool admits(bool acceptIncompleteCoverage, QString& error);
+    [[nodiscard]] bool admits(bool acceptIncompleteCoverage,
+                              runtime_agent::CoverageDecision& decision,
+                              QString& error);
     [[nodiscard]] runtime_agent::CoverageDecision readDecision() const;
     [[nodiscard]] bool installIfNeeded(const runtime_agent::PatchSite& site,
+                                       const runtime_agent::CoverageDecision& decision,
                                        runtime_agent::Quiescer& quiescer,
                                        std::string& error);
 
@@ -148,17 +151,4 @@ private:
     // The protocol's own binding, so releasing it goes through the same
     // generation rule a snippet's binding does.
     std::uint64_t m_entryBinding = 0;
-    // What admitted the write that installed the gateway. Kept because
-    // recovery restores the bytes that write left behind, and the decision
-    // covering those bytes is the one taken when they were written. Asking the
-    // manifest again would ask about whatever is on disk at that later moment.
-    //
-    // This holds the decision belonging to the write only because both paths
-    // call admits() immediately before the one operation that can leave
-    // recovery required. Admitting in one place and writing in another would
-    // leave this naming an admission that wrote nothing. It is a field of the
-    // manager and its lifetime is the manager's, where what it describes is a
-    // single write; the decision belongs on the record of that write, which is
-    // where the registry split puts it.
-    std::optional<runtime_agent::CoverageDecision> m_admitted;
 };

@@ -82,12 +82,19 @@ bool installAndBind(runtime_agent::PatchManager& manager,
                     runtime_agent::PatchBinding& binding,
                     std::string& error)
 {
+    // Checked before anything is written, so a replacement that will be
+    // refused does not leave a permanent gateway behind. bind checks again
+    // against the site the gateway was installed at.
+    if (!replacementIsReachable(site, replacement, error)) {
+        return false;
+    }
+
     if (manager.state() == runtime_agent::PatchState::NoGateway) {
-        runtime_agent::LiveTextWriteAdmission admission;
-        admission.basis = runtime_agent::WriteAdmissionBasis::AlreadyQuiescent;
-        admission.provider = quiescer.name();
-        admission.target = site.name;
-        admission.detail = "the self-test writes before anything can reach the target";
+        const runtime_agent::LiveTextWriteAdmission admission(
+            runtime_agent::WriteAdmissionBasis::AlreadyQuiescent,
+            quiescer.name(),
+            site.name.empty() ? std::string("cube_step_builtin") : site.name,
+            "the self-test writes before anything can reach the target");
         if (!manager.installGateway(site, admission, quiescer, error)) {
             return false;
         }
@@ -196,6 +203,50 @@ int main(int argc, char** argv)
 
     runtime_agent::SingleThreadQuiescer quiet;
 
+    // A replacement that cannot be reached must leave the entry as it was. The
+    // gateway is permanent, so installing one for a request that then fails
+    // would mean a refusal had written into the process's text.
+    {
+        runtime_agent::PatchRegistry registry;
+        runtime_agent::PatchManager& refusedTarget = registry.forEntry(site.entry);
+        runtime_agent::PatchBinding unused;
+        std::string reachError;
+
+        if (installAndBind(refusedTarget, site, nullptr, 1, quiet, unused, reachError)) {
+            std::cerr << "a null replacement was accepted\n";
+            return 30;
+        }
+        if (refusedTarget.state() != runtime_agent::PatchState::NoGateway) {
+            std::cerr << "a refused replacement installed a gateway anyway\n";
+            return 31;
+        }
+
+        // Only under CET is a destination without a landing pad unreachable.
+        // Where the site does not require one, any address is a valid target
+        // and there is nothing here to refuse.
+        if (site.requiresEndbr64) {
+            std::array<std::uint8_t, 8> notALandingPad{};
+            notALandingPad.fill(0x90U);
+            reachError.clear();
+            if (installAndBind(refusedTarget, site, notALandingPad.data(), 1, quiet, unused,
+                               reachError)) {
+                std::cerr << "a destination without a landing pad was accepted\n";
+                return 32;
+            }
+            if (refusedTarget.state() != runtime_agent::PatchState::NoGateway) {
+                std::cerr << "a destination without a landing pad installed a gateway\n";
+                return 33;
+            }
+        }
+
+        // Nothing was written, so the function still is what it was.
+        const CubeStepOutput untouched = cube_step_builtin(&input);
+        if (!approximatelyEqual(untouched.angle_degrees, before.angle_degrees)) {
+            std::cerr << "a refused replacement changed what the function does\n";
+            return 34;
+        }
+    }
+
     // An install that copies the gateway and cannot put the mapping back. The
     // slot already names the continuation at that point, so the original still
     // runs, and the saved bytes are the only way back to a pristine entry.
@@ -240,9 +291,9 @@ int main(int argc, char** argv)
             std::cerr << "recovery state exists with nothing saying what admitted the write\n";
             return 22;
         }
-        if (recovering.recoveryAdmission->basis
+        if (recovering.recoveryAdmission->basis()
                 != runtime_agent::WriteAdmissionBasis::AlreadyQuiescent
-            || recovering.recoveryAdmission->provider != std::string(quiet.name())) {
+            || recovering.recoveryAdmission->provider() != std::string(quiet.name())) {
             std::cerr << "the admission kept with the write is not the one it was made under\n";
             return 23;
         }
