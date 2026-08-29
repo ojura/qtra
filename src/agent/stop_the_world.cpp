@@ -271,6 +271,31 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         return nullptr;
     }
     if (already == 0) {
+        // What the application has already said about this signal. Installing
+        // over a handler it registered would disable it silently, and this
+        // takes the signal for the life of the process, so there is no putting
+        // it back afterwards.
+        struct sigaction existing {};
+        if (::sigaction(m_signal, nullptr, &existing) != 0) {
+            const int failure = errno;
+            controllerBusy.store(false, std::memory_order_release);
+            error = std::string("could not read what this process already does with signal ")
+                + std::to_string(m_signal) + ": " + std::strerror(failure);
+            return nullptr;
+        }
+        const bool taken = ((existing.sa_flags & SA_SIGINFO) != 0
+                            && existing.sa_sigaction != nullptr)
+            || ((existing.sa_flags & SA_SIGINFO) == 0
+                && existing.sa_handler != SIG_DFL && existing.sa_handler != SIG_IGN);
+        if (taken || existing.sa_handler == SIG_IGN) {
+            controllerBusy.store(false, std::memory_order_release);
+            error = "this process already does something with signal "
+                + std::to_string(m_signal)
+                + ", and parking threads takes that signal for good, so installing here "
+                  "would quietly replace what it does. Choose a signal it does not use";
+            return nullptr;
+        }
+
         struct sigaction parking {};
         parking.sa_sigaction = &parkHandler;
         parking.sa_flags = SA_SIGINFO | SA_RESTART;

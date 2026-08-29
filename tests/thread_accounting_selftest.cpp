@@ -66,6 +66,32 @@ __attribute__((noinline)) void tightSpin()
 
 int main()
 {
+    std::printf("a signal the application already uses\n");
+    {
+        // Taking it would disable what the application does with it, for the
+        // life of the process, with nothing to put back.
+        struct sigaction mine {};
+        mine.sa_handler = [](int) {};
+        ::sigemptyset(&mine.sa_mask);
+        const int chosen = SIGRTMIN + 6;
+        struct sigaction previous {};
+        (void)::sigaction(chosen, &mine, &previous);
+
+        runtime_agent::StopTheWorldQuiescer intruder(chosen);
+        std::string refusal;
+        auto denied = intruder.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, refusal);
+        check(denied == nullptr, "is refused instead of replacing what it does");
+        check(refusal.find("already does something with signal") != std::string::npos,
+              refusal.empty() ? "with a reason" : refusal.c_str());
+
+        struct sigaction after {};
+        (void)::sigaction(chosen, nullptr, &after);
+        check(after.sa_handler == mine.sa_handler,
+              "and what the application installed is still there");
+        (void)::sigaction(chosen, &previous, nullptr);
+    }
+
     // Alone, so the count is the count.
     std::printf("with no other threads\n");
     {
