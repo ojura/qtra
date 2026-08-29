@@ -147,6 +147,11 @@ CoverageEvidence& CoverageEvidence::instance()
     return *evidence;
 }
 
+void CoverageEvidence::forget(const QString& target)
+{
+    m_held.remove(target);
+}
+
 CoverageDecision CoverageEvidence::refresh(const QString& target, const CoverageDecision& reading)
 {
     if (reading.describesThisTarget) {

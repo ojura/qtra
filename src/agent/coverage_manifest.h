@@ -114,6 +114,14 @@ public:
     // The one every adapter shares, allocated once and never destroyed.
     [[nodiscard]] static CoverageEvidence& instance();
 
+    // Forgets what is held for one target.
+    //
+    // For a test that has to start from nothing. Nothing in the product calls
+    // it: evidence is only ever replaced by a reading that describes the same
+    // binary, and dropping it would be a way to make the next read of a
+    // replaced file authoritative, which is what holding it prevents.
+    void forget(const QString& target);
+
     // Records a fresh reading and answers with what now stands for this target.
     //
     // A reading that names this build and this function replaces what is held,

@@ -219,6 +219,58 @@ int main()
         check(answer.effectAccepting, "admitted with it, the same as incomplete");
     }
 
+    // What answers a later request once a manifest has been read. These write
+    // into the temporary directory too, so no build artifact is touched and
+    // being killed leaves nothing behind.
+    std::printf("evidence held for a target, refreshed by readings about it\n");
+    {
+        runtime_agent::CoverageEvidence& evidence = runtime_agent::CoverageEvidence::instance();
+        evidence.forget(kTarget);
+
+        const auto read = [&](const QString& path) {
+            return runtime_agent::readCoverageManifest(path, kBuildId, kTarget);
+        };
+
+        const runtime_agent::CoverageDecision good =
+            evidence.refresh(kTarget, read(write(directory, QStringLiteral("held.json"),
+                                                 admissible())));
+        check(good.allow, "a reading about this build is what stands");
+
+        // A rebuild leaves a manifest describing some other binary. That says
+        // nothing about this one, so what was established stays established.
+        QJsonObject elsewhere = admissible();
+        elsewhere.insert(QStringLiteral("buildId"), QStringLiteral("0000000000000000"));
+        const runtime_agent::CoverageDecision afterRebuild =
+            evidence.refresh(kTarget, read(write(directory, QStringLiteral("rebuilt.json"),
+                                                 elsewhere)));
+        check(afterRebuild.allow, "a manifest about another build does not revoke it");
+
+        const runtime_agent::CoverageDecision afterMissing =
+            evidence.refresh(kTarget, read(directory.filePath(QStringLiteral("gone.json"))));
+        check(afterMissing.allow, "and neither does a missing one");
+
+        // A rerun against this build is the same binary speaking again, in
+        // whichever direction it goes.
+        const runtime_agent::CoverageDecision withdrawn =
+            evidence.refresh(kTarget, read(write(directory, QStringLiteral("withdrawn.json"),
+                                                 withCoverage(admissible(),
+                                                              QStringLiteral("incomplete")))));
+        check(!withdrawn.allow, "a rerun about this build can withdraw its verdict");
+
+        const runtime_agent::CoverageDecision restored =
+            evidence.refresh(kTarget, read(write(directory, QStringLiteral("restored.json"),
+                                                 admissible())));
+        check(restored.allow, "and can put it back");
+
+        // Held per target, so one function's verdict is not another's.
+        const runtime_agent::CoverageDecision other = evidence.refresh(
+            QStringLiteral("some_other_function"),
+            read(directory.filePath(QStringLiteral("gone.json"))));
+        check(!other.allow, "another target holds nothing of this one's");
+
+        evidence.forget(kTarget);
+    }
+
     std::printf("%s\n", failures == 0 ? "all admission checks passed"
                                       : "admission checks failed");
     return failures == 0 ? 0 : 1;

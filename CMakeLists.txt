@@ -349,6 +349,15 @@ else()
     message(STATUS "libpulse-simple not found; skipping agent_snippet_audio_pulse")
 endif()
 
+# Binds through the host ABI and needs nothing beyond it, so the mixed-stack
+# behaviour can be tested on a machine without an audio stack.
+add_library(agent_snippet_bind_probe MODULE snippets/bind_probe.cpp)
+target_include_directories(agent_snippet_bind_probe PRIVATE include src)
+target_link_libraries(agent_snippet_bind_probe PRIVATE Qt6::Core)
+set_target_properties(agent_snippet_bind_probe PROPERTIES
+    PREFIX "" OUTPUT_NAME "agent_snippet_bind_probe")
+stamp_with_host_build_id(agent_snippet_bind_probe)
+
 add_library(agent_snippet_about_signature MODULE snippets/about_signature.cpp)
 target_include_directories(agent_snippet_about_signature PRIVATE include src)
 target_link_libraries(agent_snippet_about_signature PRIVATE

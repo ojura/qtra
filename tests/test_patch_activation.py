@@ -1,10 +1,14 @@
 """Replacing the step function over the socket, on a real build.
 
 This is about the wiring: that patch.load, patch.activate, patch.status and
-patch.rollback reach the machinery, and that a build carrying its own manifest
-admits the write. What the admission rule decides for a given manifest is
-settled by coverage_admission_selftest, which reads temporary files and needs
-neither a display nor a build artifact.
+patch.rollback reach the machinery, that a build carrying its own manifest
+admits the write, and that the window and the socket give one answer about what
+the entry reaches.
+
+What the admission rule decides for a given manifest, and what stands once one
+has been read, are settled by coverage_admission_selftest, which writes its
+inputs into a temporary directory and needs neither a display nor a build
+artifact.
 
 Nothing here edits the build's manifest. The one this reads is the one the
 build wrote, so being killed leaves nothing to put back.
@@ -34,6 +38,7 @@ BUILD = Path(os.environ.get("RUNTIME_AGENT_TEST_BUILD_DIR", ROOT / "build" / "re
 BINARY = BUILD / "qt_runtime_cube"
 MANIFEST = BUILD / "coverage-manifest.json"
 PATCH_MODULE = BUILD / "cube_patch_wobble.so"
+BINDER = BUILD / "agent_snippet_bind_probe.so"
 
 HAS_DISPLAY = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
@@ -173,12 +178,17 @@ class MixedGenerations(unittest.TestCase):
     """What the entry reaches, said twice, through a stack bound both ways.
 
     The window's label and patch.status answer one question. They were written
-    from separate places, so releasing a host generation could leave the label
-    naming the released binding while status named the protocol one underneath,
-    and a protocol rollback left the label naming a module that no longer ran.
+    from separate places, so releasing a host generation could leave the window
+    naming the module that had just let go, and a protocol rollback left it
+    naming a module that no longer ran.
+
+    The binder is always built and needs nothing beyond the host ABI, so these
+    run wherever the demo does.
     """
 
     def setUp(self) -> None:
+        if not BINDER.exists():
+            self.skipTest("the binding probe was not built")
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         print(f"driving {BINARY.resolve()}", flush=True)
@@ -208,113 +218,76 @@ class MixedGenerations(unittest.TestCase):
             self.assertEqual(label, f"entry: {expected}", where)
         return status
 
-    def test_label_and_status_agree_through_a_mixed_stack(self) -> None:
-        snippet_path = BUILD / "agent_snippet_audio_pulse.so"
-        if not snippet_path.exists():
-            self.skipTest("built without PulseAudio, so nothing binds through the host")
+    def bind_through_host(self) -> str:
+        module = self.agent.ok("snippet.load", path=str(BINDER))["moduleId"]
+        self.agent.ok("snippet.run", moduleId=module, executor="gui", request={})
+        self.wait_for(module)
+        return module
 
-        self.assert_agrees("before anything")
+    def wait_for(self, module: str) -> None:
+        for _ in range(100):
+            if self.agent.ok("patch.status")["moduleId"] == module:
+                return
+            time.sleep(0.05)
 
-        # The protocol's own binding first.
+    def activate_protocol(self) -> str:
         module = self.agent.ok("patch.load", path=str(PATCH_MODULE))["moduleId"]
         self.agent.ok("patch.activate", moduleId=module, acceptIncompleteCoverage=False)
-        after_protocol = self.assert_agrees("after the protocol bind")
-        self.assertEqual(after_protocol["moduleId"], str(module))
+        return module
 
-        # A host binding stacked on top of it.
-        snippet = self.agent.ok("snippet.load", path=str(snippet_path))["moduleId"]
-        self.agent.ok("snippet.run", moduleId=snippet, executor="render", request={})
-        for _ in range(100):
-            if self.agent.ok("patch.status")["moduleId"] == str(snippet):
-                break
-            time.sleep(0.05)
-        stacked = self.assert_agrees("with both bound")
-        self.assertEqual(stacked["moduleId"], str(snippet))
+    def test_protocol_then_host_then_release_the_host_one(self) -> None:
+        self.assert_agrees("before anything")
+        protocol = self.activate_protocol()
+        self.assertEqual(self.assert_agrees("after the protocol bind")["moduleId"], protocol)
 
-        # Releasing the selected host generation reveals the protocol one
-        # underneath, which is where the label used to keep naming the module
-        # that had just let go.
-        self.agent.ok("snippet.release", moduleId=snippet)
-        for _ in range(100):
-            if self.agent.ok("patch.status")["moduleId"] == str(module):
-                break
-            time.sleep(0.05)
-        revealed = self.assert_agrees("after releasing the host binding")
-        self.assertEqual(revealed["moduleId"], str(module))
+        host = self.bind_through_host()
+        self.assertEqual(self.assert_agrees("with both bound")["moduleId"], host)
 
-        # And rolling the protocol one back leaves nothing selected.
+        # Releasing the selected host generation reveals the protocol one, which
+        # is where the label used to keep naming the module that let go.
+        self.agent.ok("snippet.run", moduleId=host, executor="gui",
+                      request={"release": True})
+        self.wait_for(protocol)
+        self.assertEqual(
+            self.assert_agrees("after releasing the host binding")["moduleId"], protocol
+        )
+
         self.agent.ok("patch.rollback")
         final = self.assert_agrees("after rolling back")
         self.assertEqual(final["mode"], "builtin")
         self.assertEqual(final["entryState"], "original")
 
+    def test_host_then_protocol_then_roll_the_protocol_one_back(self) -> None:
+        """The other order, where rollback reveals a host binding underneath.
 
-@unittest.skipUnless(
-    BINARY.exists() and MANIFEST.exists() and PATCH_MODULE.exists() and HAS_DISPLAY,
-    f"needs a display and a built, manifest-bearing {BUILD}",
-)
-class RetainedEvidence(unittest.TestCase):
-    """What answers a later request once the manifest has been read.
-
-    Evidence about a running process does not stop being true because the file
-    it came from was replaced. A rebuild leaves a manifest describing a
-    different binary, and refusing on that would let an unrelated build revoke
-    what this one established about itself. A rerun against the same build is
-    the same binary speaking again, so it replaces what is held, in whichever
-    direction it goes.
-
-    These edit the build's manifest and put it back. That is what they are
-    about, so there is no way to ask the question without doing it.
-    """
-
-    def setUp(self) -> None:
-        self.original = MANIFEST.read_bytes()
-        self.addCleanup(MANIFEST.write_bytes, self.original)
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        print(f"driving {BINARY.resolve()}", flush=True)
-        self.agent = Agent(Path(directory.name) / "agent.sock")
-        self.addCleanup(self.agent.close)
-        self.module = self.agent.ok("patch.load", path=str(PATCH_MODULE))["moduleId"]
-
-    def rewrite(self, **fields: object) -> None:
-        report = json.loads(self.original)
-        report.update(fields)
-        MANIFEST.write_text(json.dumps(report, indent=2))
-
-    def activate(self) -> dict:
-        return self.agent.call(
-            "patch.activate", moduleId=self.module, acceptIncompleteCoverage=False
-        )
-
-    def test_a_rebuild_does_not_revoke_what_this_build_recorded(self) -> None:
-        """A manifest about another binary leaves the held verdict standing."""
-        self.assertTrue(self.agent.ok("patch.status")["coverage"]["allow"])
-        self.rewrite(buildId="00" * 20)
-        self.assertTrue(self.activate().get("ok"), "a rebuild revoked this build's evidence")
-
-    def test_a_missing_manifest_does_not_revoke_it_either(self) -> None:
-        self.assertTrue(self.agent.ok("patch.status")["coverage"]["allow"])
-        MANIFEST.unlink()
-        self.assertTrue(self.activate().get("ok"), "a deleted manifest revoked the evidence")
-
-    def test_a_rerun_against_this_build_can_withdraw_its_verdict(self) -> None:
-        """The direction nobody wants, and the one worth having.
-
-        Rereading that could only ever help would be a cache dressed as
-        evidence.
+        This is the one the protocol's own rollback never relabelled for: it
+        zeroed its fields and returned, so the window named a module that had
+        stopped running.
         """
-        self.assertTrue(self.agent.ok("patch.status")["coverage"]["allow"])
-        self.rewrite(coverage="incomplete")
-        answer = self.activate()
-        self.assertFalse(answer.get("ok"), "a withdrawn verdict still admitted the write")
-        self.assertIn("coverage is incomplete", answer["error"]["message"])
+        host = self.bind_through_host()
+        self.assertEqual(self.assert_agrees("after the host bind")["moduleId"], host)
 
-    def test_and_can_restore_it(self) -> None:
-        self.rewrite(coverage="incomplete")
-        self.assertFalse(self.activate().get("ok"))
-        MANIFEST.write_bytes(self.original)
-        self.assertTrue(self.activate().get("ok"), "a restored verdict was not picked up")
+        protocol = self.activate_protocol()
+        self.assertEqual(self.assert_agrees("with both bound")["moduleId"], protocol)
+
+        self.agent.ok("patch.rollback")
+        self.wait_for(host)
+        revealed = self.assert_agrees("after rolling the protocol binding back")
+        self.assertEqual(revealed["moduleId"], host)
+        self.assertEqual(revealed["mode"], "entry")
+
+    def test_releasing_a_binding_that_is_not_selected_changes_nothing(self) -> None:
+        host = self.bind_through_host()
+        protocol = self.activate_protocol()
+        self.assertEqual(self.assert_agrees("with both bound")["moduleId"], protocol)
+
+        # The host binding is underneath, so letting it go leaves the selection
+        # alone. Releasing out of order is safe, and nothing should move.
+        self.agent.ok("snippet.run", moduleId=host, executor="gui",
+                      request={"release": True})
+        after = self.assert_agrees("after releasing the buried binding")
+        self.assertEqual(after["moduleId"], protocol)
+        self.assertEqual(after["mode"], "entry")
 
 
 if __name__ == "__main__":
