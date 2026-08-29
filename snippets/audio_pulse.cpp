@@ -7,7 +7,7 @@
 //     the widget calls once per animation tick. Writing m_tint from a draw hook
 //     would achieve nothing: advanceAnimation() overwrites all three from the
 //     step's output before the next paintGL() reads them. So the beat-driven
-//     punch and colour flash are installed as a dispatch step.
+//     punch and colour flash replace the step function.
 //   - Everything drawn around the cube is a direct connection to
 //     frameRendered(), which fires at the end of paintGL() while the context is
 //     current and the depth buffer still holds the cube. Rings expanding
@@ -318,7 +318,7 @@ QVector3D ambientTemperature(const float centroid)
 }
 
 // ---------------------------------------------------------------------------
-// The cube's own motion, as a dispatch step
+// The cube's own motion, as the replacement step function
 // ---------------------------------------------------------------------------
 
 CubeStepOutput audioStep(const CubeStepInput* input) noexcept
