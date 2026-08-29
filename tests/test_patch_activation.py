@@ -60,7 +60,8 @@ def missingArtifacts() -> list[str]:
     for a run that exercised no application at all, which is what a validation
     is for.
     """
-    return [str(path) for path in (BINARY, MANIFEST, PATCH_MODULE) if not path.exists()]
+    return [str(path) for path in (BINARY, MANIFEST, PATCH_MODULE, BINDER)
+            if not path.exists()]
 
 
 def requireArtifacts() -> None:
@@ -255,8 +256,7 @@ class MixedGenerations(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        if not BINDER.exists():
-            self.skipTest("the binding probe was not built")
+
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         requireArtifacts()

@@ -20,6 +20,7 @@
 #include "demo/cube_step_abi.h"
 
 #include <QCoreApplication>
+#include <QJsonObject>
 
 #include <cstdio>
 #include <memory>
@@ -83,15 +84,48 @@ int main(int argc, char** argv)
         check(!registry.list().isEmpty(), "and the process registry lists it");
     }
 
-    std::printf("ids are not handed out twice across loads\n");
+    std::printf("what stamped claims\n");
     {
+        // stamped says a module's build id was compared with this process's and
+        // agreed. It is not "the module mentioned a build", and it is not "no
+        // objection was raised": a module reporting an id into a host that
+        // reports none establishes no agreement, and neither does the reverse.
+        //
+        // The module this test loads carries no id, so the value here is false
+        // and the id is empty. What holds whatever a build produces is the
+        // implication: stamped only where an id is present, since an agreement
+        // with nothing to compare against cannot have happened.
+        runtime_agent::ModuleRegistry::LoadedModule* record = registry.module(loadedId);
+        check(record != nullptr, "the module is still registered");
+        if (record != nullptr) {
+            check(!record->stamped || !record->targetBuildId.isEmpty(),
+                  "stamped is claimed only where the module reports a build id");
+            if (record->targetBuildId.isEmpty()) {
+                check(!record->stamped,
+                      "and a module reporting no build id is not stamped, whatever the "
+                      "host reports");
+            }
+            const QJsonObject described = registry.describe(*record);
+            check(described.value(QStringLiteral("stamped")).toBool() == record->stamped,
+                  "with the wire saying the same as the record");
+        }
+    }
+
+    std::printf("one loaded object has one identity\n");
+    {
+        // The loader keys objects by pathname and hands back the same handle for
+        // the same file, refcounted. Minting a second id for it would put two
+        // registry identities in front of one instance: one set of globals, one
+        // descriptor, and a release runnable once per id against shared state.
         QString error;
         runtime_agent::ModuleRegistry::LoadedModule* again = registry.loadSnippet(modulePath, error);
-        check(again != nullptr, "the same file loads again as a new module");
+        check(again != nullptr, "loading the same file again succeeds");
         if (again != nullptr) {
-            check(again->id != loadedId,
-                  "with an id the first one does not already have, so a generation naming "
-                  "the first is not answered by the second");
+            check(again->id == loadedId,
+                  "and answers with the module already registered for that object, because "
+                  "that is the instance the loader returned");
+            check(again == registry.module(loadedId),
+                  "as the same record, not a copy of it");
         }
     }
 

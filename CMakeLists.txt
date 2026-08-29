@@ -523,9 +523,12 @@ if(BUILD_TESTING)
     # non-CET presets ask for none there, which would strip the markers this
     # target compiles itself to have and refuse every replacement it offers.
     target_link_options(got_reach_selftest PRIVATE -fcf-protection=branch)
-    # One object holding a lazy slot and a bound slot for the same symbol, which
-    # is the mix a redirect has to refuse. Lazy binding is what makes the first
-    # of those lazy, so this one object opts out of binding at load time.
+    # A caller whose slot for malloc is still unresolved, which is one half of
+    # the mix a redirect has to refuse. The bound half is the other caller.so
+    # objects, whose slots the loader fills before anything runs, so the mix
+    # lives across objects: one symbol in one object gets one slot. Linked lazy
+    # because hardened toolchains bind at load time by default, which would
+    # resolve this slot and delete the condition under test.
     add_library(mixed_slot_caller SHARED tests/mixed_slot_caller.cpp)
     target_compile_options(mixed_slot_caller PRIVATE -fplt)
     target_link_options(mixed_slot_caller PRIVATE -Wl,-z,lazy)

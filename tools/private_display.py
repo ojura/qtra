@@ -80,8 +80,11 @@ class OwnDisplay:
                 pass_fds=(writable,),
             )
         except OSError:
+            # Only the read end here. The finally below owns the write end on
+            # every path, and closing it twice raises EBADF out of the finally,
+            # which would replace this None with an exception on the one path
+            # that exists to fail quietly.
             os.close(readable)
-            os.close(writable)
             return None
         finally:
             # This end belongs to the child. Holding it open here would leave the
