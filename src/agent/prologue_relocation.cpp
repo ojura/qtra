@@ -652,7 +652,14 @@ void* allocateNear(const std::uint8_t* const target, const std::size_t bytes)
     // reach of a thirty-two bit displacement.
     constexpr std::uintptr_t limit = 1ULL << 30U;
     for (std::uintptr_t step = pageSize; step < limit; step *= 2U) {
-        const std::uintptr_t candidates[]{base + step, base - step};
+        // Below the function only while there is room below it. These are
+        // unsigned, so a step larger than the address wraps to somewhere near
+        // the top of the space, and every attempt at that address fails for a
+        // reason that has nothing to do with the search. A binary linked at a
+        // fixed low address reaches that within a few doublings, and the whole
+        // low half of the search would quietly stop happening.
+        const std::uintptr_t below = step <= base ? base - step : 0U;
+        const std::uintptr_t candidates[]{base + step, below};
         for (const std::uintptr_t candidate : candidates) {
             if (candidate < pageSize) {
                 continue;
