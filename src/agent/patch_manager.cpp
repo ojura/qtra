@@ -30,6 +30,14 @@ PatchManager::~PatchManager()
     // path and not something to paper over.
     assert(m_state != PatchState::RecoveryRequired
            && "roll back before destroying a manager that is holding recovery state");
+
+    // The gateway is permanent and carries this record's slot address as an
+    // immediate, so the storage has to outlive whatever installed it. Freeing it
+    // here would leave every later call loading a destination out of released
+    // memory, and the manager going away is not a reason for the entry to stop
+    // working. So the record is released deliberately: it is unreachable
+    // afterwards and that is the intent, since nothing may ever reclaim it.
+    (void)m_record.release();
 }
 
 bool PatchManager::installGateway(const PatchSite& site, Quiescer& quiescer, std::string& error)

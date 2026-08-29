@@ -75,9 +75,11 @@ public:
     PatchManager(const PatchManager&) = delete;
     PatchManager& operator=(const PatchManager&) = delete;
 
-    // Writes nothing. A manager holding a lease because an install could not be
-    // finished would otherwise resume execution by being destroyed, which is
-    // the one thing that state exists to prevent.
+    // Writes nothing, and does not free the gateway's record. A manager holding
+    // a lease because an install could not be finished would otherwise resume
+    // execution by being destroyed, which is the one thing that state exists to
+    // prevent, and freeing the record would leave the installed gateway loading
+    // from released storage.
     ~PatchManager();
 
     // Selects which code the entry reaches, and records who asked.

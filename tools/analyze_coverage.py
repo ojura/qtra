@@ -99,6 +99,29 @@ def aliases_at(binary: pathlib.Path, name: str) -> list[str]:
     return sorted(n for a, _, n in table if a == address and n != name)
 
 
+def patchable_addresses(binary: pathlib.Path) -> list[int]:
+    """Every address this binary reserved an entry area at.
+
+    Counting them says only that something was prepared. Which addresses they
+    are is what says whether this target was, and that is the difference between
+    reporting on a function and reporting on a binary that happens to contain
+    one.
+    """
+    words: list[int] = []
+    for line in run(["readelf", "-x", "__patchable_function_entries",
+                     str(binary)]).splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not parts[0].startswith("0x"):
+            continue
+        blob = "".join(p for p in parts[1:] if all(c in "0123456789abcdefABCDEF" for c in p))
+        for index in range(0, len(blob) - 15, 16):
+            try:
+                words.append(int.from_bytes(bytes.fromhex(blob[index:index + 16]), "little"))
+            except ValueError:
+                continue
+    return words
+
+
 def patchable_entries(binary: pathlib.Path) -> int:
     """How many functions this binary reserved an entry area for."""
     for line in run(["readelf", "-SW", str(binary)]).splitlines():
@@ -180,6 +203,10 @@ def preparation(compile_db: pathlib.Path, source_hint: str) -> dict[str, object]
     }
 
 
+def address_of(binary: pathlib.Path, name: str) -> int | None:
+    return next((a for a, _, n in symbols(binary) if n == name), None)
+
+
 def analyze(binary: pathlib.Path,
             build_dir: pathlib.Path,
             compile_db: pathlib.Path,
@@ -187,16 +214,45 @@ def analyze(binary: pathlib.Path,
             source_hint: str,
             caller_domain: str | None,
             domain_strength: str,
-            domain_caveat: str | None) -> dict[str, object]:
+            domain_caveat: str | None,
+            accept_aliases: bool) -> dict[str, object]:
+    # A target that is not in the binary cannot be reported on. Without this its
+    # absence reads as the absence of aliases and the absence of clones, and a
+    # function nobody ever compiled comes back allowed.
+    target_address = address_of(binary, target)
+    if target_address is None:
+        return {
+            "target": target,
+            "buildId": build_id(binary),
+            "binary": str(binary),
+            "coverage": "unknown",
+            "decision": "refuse",
+            "patched": [],
+            "skipped": [],
+            "unknown": ["target symbol"],
+            "evidence": [{"modality": "target symbol", "answered": False,
+                          "finding": "no symbol of this name is defined in this binary"}],
+            "aliases": [],
+            "clones": [],
+        }
+
     prepared = preparation(compile_db, source_hint)
     found_aliases = aliases_at(binary, target)
+
+    # This target's own reserved area, not merely the existence of somebody's.
+    # The compiler records the address of the area, which is the function's own
+    # address or four bytes past it where a CET landing pad comes first.
+    recorded = [a for a in patchable_addresses(binary)
+                if target_address <= a <= target_address + 8]
     clones, dump_count = clone_records(build_dir, target)
 
     evidence: list[dict[str, object]] = [
         {"modality": "final ELF symbols", "answered": True,
          "finding": f"{len(found_aliases)} other name(s) at this address"},
-        {"modality": "patchable entries", "answered": patchable_entries(binary) > 0,
-         "finding": f"{patchable_entries(binary)} prepared entr(y/ies) in this binary"},
+        {"modality": "prepared entry for this target", "answered": bool(recorded),
+         "finding": f"reserved at +{recorded[0] - target_address}" if recorded
+                    else "this target has no reserved area, so its entry cannot be "
+                         "rewritten without relocating real instructions"},
         {"modality": "IPA clone dumps", "answered": dump_count > 0,
          "finding": f"{len(clones)} record(s) naming this function, from {dump_count} dump(s)"
                     if dump_count
@@ -237,6 +293,15 @@ def analyze(binary: pathlib.Path,
 
     unknown = [e["modality"] for e in evidence if not e["answered"]]
     skipped = [{"what": c["into"], "why": c["kind"]} for c in clones]
+
+    # Two names at one address means the compiler folded two functions together,
+    # and rewriting the entry changes what both of them do. Reporting that while
+    # allowing would quietly alter something the caller never named, so it is a
+    # refusal unless the request says it accepts every name at that address.
+    if found_aliases and not accept_aliases:
+        skipped.extend({"what": alias, "why": "shares this address, so replacing "
+                                              "this target replaces it too"}
+                       for alias in found_aliases)
 
     if unknown:
         coverage = "unknown"
@@ -279,13 +344,17 @@ def main() -> int:
                              "stand in for stopping execution")
     parser.add_argument("--caller-domain-caveat",
                         help="what would make the declaration untrue")
+    parser.add_argument("--accept-aliases", action="store_true",
+                        help="allow a target that shares its address with other names, "
+                             "accepting that replacing it replaces all of them")
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
 
     compile_db = args.compile_db or (args.build_dir / "compile_commands.json")
     report = analyze(args.binary, args.build_dir, compile_db, args.target,
                      args.source_hint, args.caller_domain,
-                     args.caller_domain_strength, args.caller_domain_caveat)
+                     args.caller_domain_strength, args.caller_domain_caveat,
+                     args.accept_aliases)
     if report["buildId"] is None:
         print("the binary carries no build id, so a manifest could not be tied to it",
               file=sys.stderr)
