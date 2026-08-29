@@ -43,6 +43,12 @@ struct GotSite {
     // The slot itself, which is what a store goes into.
     void** slot = nullptr;
 
+    // What the loader's mapping said about the page holding the slot, so
+    // restoring puts back the permissions it chose. An object bound lazily
+    // keeps its table writable on purpose, and handing it back read-only would
+    // fault the next symbol it resolved.
+    int pageProtection = 0;
+
     // What the loader put there, kept so a caller can chain to it and so a
     // release can put it back.
     void* resolved = nullptr;
@@ -52,9 +58,14 @@ struct GotSite {
 
 // Finds the slot a named symbol is called through, from a named object.
 //
-// callerObject is matched against the loader's name for each object, by suffix,
-// so "libQt6Core.so" finds a versioned file name. Empty means the main
-// executable.
+// callerObject has to be a suffix of the loader's own name for the object, so
+// "libQt6Core.so.6" matches "/lib/x86_64-linux-gnu/libQt6Core.so.6" and
+// "libQt6Core.so" matches nothing, because the loaded name ends in the version.
+// Give the soname as the loader knows it. Empty means the main executable.
+//
+// The result carries the name the loader used and the symbol as the relocation
+// spells it, so a caller sees what was actually redirected instead of what it
+// asked for.
 //
 // symbol matches the relocation's symbol name, either exactly or ignoring the
 // "@version" suffix, so a caller can name a function without knowing which
@@ -71,6 +82,11 @@ struct GotSite {
 // because the loader needed them.
 [[nodiscard]] std::vector<std::string> callableSymbols(const std::string& callerObject,
                                                        std::string& error);
+
+// What the kernel reports about the mapping holding an address, as the
+// PROT_ flags. Offered so a caller, or a test, can check that a redirect and a
+// restore left the mapping as the loader had it.
+[[nodiscard]] bool pageProtectionOf(const void* address, int& protection, std::string& error);
 
 // Points the caller's slot at something else.
 //

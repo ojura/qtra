@@ -162,6 +162,12 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    // The loader knows this object by its file name, which is what the GOT
+    // lookup below matches by suffix.
+    const std::string patchModulePath = argv[1];
+    const std::string patchModuleName =
+        patchModulePath.substr(patchModulePath.find_last_of('/') + 1);
+
     void* module = ::dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (module == nullptr) {
         std::cerr << "dlopen failed: " << ::dlerror() << '\n';
@@ -302,6 +308,35 @@ int main(int argc, char** argv)
         if (replacementMemcpyCalls != after) {
             std::cerr << "the replacement still ran after the slot was restored\n";
             return 48;
+        }
+
+        // The permissions the loader chose come back, whatever they were.
+        //
+        // This executable is bound eagerly, so its table is read-only once the
+        // loader has finished. A module bound lazily keeps its table writable
+        // because the loader still has symbols to resolve into it, and handing
+        // that back read-only would fault the next call it tried to resolve.
+        // The patch module under test is the second kind.
+        {
+            runtime_agent::GotSite inModule;
+            std::string moduleError;
+            if (runtime_agent::resolveGotSlot(patchModuleName, "fmodf", inModule,
+                                              moduleError)) {
+                const int chosen = inModule.pageProtection;
+                if (!runtime_agent::redirectGotSlot(
+                        inModule, reinterpret_cast<void*>(&countingMemcpy), moduleError)
+                    || !runtime_agent::restoreGotSlot(inModule, moduleError)) {
+                    std::cerr << "the module's slot could not be redirected and put back: "
+                              << moduleError << '\n';
+                    return 50;
+                }
+                int nowIs = 0;
+                if (!runtime_agent::pageProtectionOf(inModule.slot, nowIs, moduleError)
+                    || nowIs != chosen) {
+                    std::cerr << "the round trip changed the permissions the loader chose\n";
+                    return 51;
+                }
+            }
         }
 
         // Naming something the caller never calls has to say so, not guess.

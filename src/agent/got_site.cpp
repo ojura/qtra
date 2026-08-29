@@ -1,7 +1,9 @@
 #include "agent/got_site.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 #include <elf.h>
@@ -160,6 +162,12 @@ int visit(dl_phdr_info* object, std::size_t, void* opaque)
         search.found->symbol = name;
         search.found->slot = slot;
         search.found->resolved = *slot;
+        // Recorded at resolve time, so a restore can put back what the loader
+        // chose instead of a guess about what it must have been.
+        std::string ignored;
+        if (!pageProtectionOf(slot, search.found->pageProtection, ignored)) {
+            search.found->pageProtection = PROT_READ;
+        }
         return 1;
     }
     return 1;
@@ -171,25 +179,34 @@ int visit(dl_phdr_info* object, std::size_t, void* opaque)
 // Failing to put it back leaves the slot correct and the page writable, which
 // is worth saying: the call is redirected as asked, and something that should
 // be read-only is not.
-bool storeIntoSlot(void** slot, void* value, std::string& error)
+// Writes one pointer, leaving the mapping as the loader had it.
+//
+// Making it writable is skipped where it already is, which is the common case
+// for a lazily bound object and the case where forcing it back to read-only
+// would break the next lazy resolution on that page.
+bool storeIntoSlot(void** slot, void* value, const int protection, std::string& error)
 {
     const auto pageSize = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
-    auto address = reinterpret_cast<std::uintptr_t>(slot);
+    const auto address = reinterpret_cast<std::uintptr_t>(slot);
     auto* page = reinterpret_cast<void*>(address & ~(pageSize - 1));
-    // A slot never straddles pages, since it is one aligned pointer, but the
-    // page it sits in is what has to be made writable.
+    // A slot is one aligned pointer, so it never straddles pages; the page it
+    // sits in is what has to be writable.
     const std::size_t span = pageSize;
+    const bool alreadyWritable = (protection & PROT_WRITE) != 0;
 
-    if (::mprotect(page, span, PROT_READ | PROT_WRITE) != 0) {
+    if (!alreadyWritable && ::mprotect(page, span, protection | PROT_WRITE) != 0) {
         error = std::string("could not make the slot writable: ") + std::strerror(errno);
         return false;
     }
 
-    *slot = value;
+    // One aligned pointer word, stored atomically, so a caller loading it gets
+    // the old destination or the new one and never a mixture.
+    static_assert(std::atomic_ref<void*>::is_always_lock_free);
+    std::atomic_ref<void*>(*slot).store(value, std::memory_order_release);
 
-    if (::mprotect(page, span, PROT_READ) != 0) {
-        error = std::string("the slot was written and the mapping could not be made "
-                            "read-only again: ")
+    if (!alreadyWritable && ::mprotect(page, span, protection) != 0) {
+        error = std::string("the slot was written and the mapping could not be put back to "
+                            "the permissions the loader chose: ")
             + std::strerror(errno);
         return false;
     }
@@ -197,6 +214,46 @@ bool storeIntoSlot(void** slot, void* value, std::string& error)
 }
 
 } // namespace
+
+// What the kernel says about the mapping holding an address.
+//
+// Read, not assumed. An object the loader bound eagerly has its table mapped
+// read-only when it finishes; one bound lazily keeps it writable because the
+// loader still has symbols to resolve into it. Handing the second kind back as
+// read-only would fault the next call it tried to resolve.
+bool pageProtectionOf(const void* address, int& protection, std::string& error)
+{
+    std::FILE* maps = std::fopen("/proc/self/maps", "re");
+    if (maps == nullptr) {
+        error = std::string("could not read this process's mappings: ") + std::strerror(errno);
+        return false;
+    }
+    const auto wanted = reinterpret_cast<std::uintptr_t>(address);
+    char line[512];
+    bool found = false;
+    while (std::fgets(line, sizeof(line), maps) != nullptr) {
+        std::uintptr_t from = 0;
+        std::uintptr_t to = 0;
+        char flags[5] = {};
+        if (std::sscanf(line, "%lx-%lx %4s", &from, &to, flags) != 3) {
+            continue;
+        }
+        if (wanted < from || wanted >= to) {
+            continue;
+        }
+        protection = 0;
+        if (flags[0] == 'r') { protection |= PROT_READ; }
+        if (flags[1] == 'w') { protection |= PROT_WRITE; }
+        if (flags[2] == 'x') { protection |= PROT_EXEC; }
+        found = true;
+        break;
+    }
+    (void)std::fclose(maps);
+    if (!found) {
+        error = "the slot is not in any mapping this process reports";
+    }
+    return found;
+}
 
 bool resolveGotSlot(const std::string& callerObject,
                     const std::string& symbol,
@@ -253,7 +310,7 @@ bool redirectGotSlot(const GotSite& site, void* const replacement, std::string& 
         error = "a replacement is required";
         return false;
     }
-    return storeIntoSlot(site.slot, replacement, error);
+    return storeIntoSlot(site.slot, replacement, site.pageProtection, error);
 }
 
 bool restoreGotSlot(const GotSite& site, std::string& error)
@@ -262,7 +319,7 @@ bool restoreGotSlot(const GotSite& site, std::string& error)
         error = "the site was never resolved";
         return false;
     }
-    return storeIntoSlot(site.slot, site.resolved, error);
+    return storeIntoSlot(site.slot, site.resolved, site.pageProtection, error);
 }
 
 } // namespace runtime_agent
