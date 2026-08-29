@@ -49,8 +49,15 @@ struct GotSite {
     // fault the next symbol it resolved.
     int pageProtection = 0;
 
-    // What the loader put there, kept so a caller can chain to it and so a
-    // release can put it back.
+    // What was in the slot when it was read, kept so a release can put exactly
+    // that back.
+    //
+    // Not promised to be the function. An object the loader bound lazily has a
+    // stub here that resolves the symbol on first call and then replaces
+    // itself, so this can be that stub. Calling it does reach the function on
+    // the form seen here, but that is a property of one procedure linkage table
+    // layout and not something this establishes, so a replacement wanting to
+    // chain to the original should not assume it.
     void* resolved = nullptr;
 
     [[nodiscard]] bool valid() const noexcept { return slot != nullptr; }
@@ -66,6 +73,13 @@ struct GotSite {
 // The result carries the name the loader used and the symbol as the relocation
 // spells it, so a caller sees what was actually redirected instead of what it
 // asked for.
+//
+// symbol is matched against the dynamic string table, which holds a bare name:
+// the "@GLIBC_2.14" a disassembler shows comes from separate version tables
+// this does not read. So two versions of one symbol cannot be told apart here,
+// and a caller wanting a particular one has to look elsewhere. Where an object
+// calls two versions of the same name, this finds the first relocation naming
+// it, which is not a choice anyone made.
 //
 // symbol matches the relocation's symbol name, either exactly or ignoring the
 // "@version" suffix, so a caller can name a function without knowing which

@@ -104,19 +104,14 @@ bool namesObject(const char* loaderName, const std::string& wanted)
         && name.compare(name.size() - wanted.size(), wanted.size(), wanted) == 0;
 }
 
-// Whether a relocation's symbol is the one asked for, with or without the
-// version tag the library attached to it.
+// Whether a relocation's symbol is the one asked for.
+//
+// Compared whole. The dynamic string table holds a bare name, so there is no
+// version to strip: what a disassembler prints as "memcpy@GLIBC_2.14" is the
+// bare name plus a tag it read from tables this does not.
 bool namesSymbol(const char* relocationSymbol, const std::string& wanted)
 {
-    if (relocationSymbol == nullptr) {
-        return false;
-    }
-    const std::string name = relocationSymbol;
-    if (name == wanted) {
-        return true;
-    }
-    const std::size_t at = name.find('@');
-    return at != std::string::npos && name.compare(0, at, wanted) == 0;
+    return relocationSymbol != nullptr && wanted == relocationSymbol;
 }
 
 struct Search {
