@@ -53,7 +53,9 @@ void spin()
 //
 // Giving up records a failure and returns, rather than exiting early, because
 // the shutdown after each of these clears the flag the workers watch. Leaving
-// by another route would strand them in their loops and hang the join instead.
+// by another route would skip that, so the flag would stay set, the workers
+// would keep spinning, and the join would never return: the same hang one frame
+// further out.
 bool started(const std::atomic<int>& counter, const int expected, const char* what)
 {
     constexpr std::chrono::seconds limit{30};
