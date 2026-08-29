@@ -10,18 +10,18 @@ elif [[ $# -ne 0 ]]; then
   exit 2
 fi
 
-for preset in selftest-only selftest-lto selftest-cet; do
+for preset in release release-lto release-cet; do
   "$root/scripts/build.sh" "$preset"
 done
 
 validation_dir="$root/build/oracle-validation"
 rm -rf "$validation_dir"
 mkdir -p "$validation_dir"
-for build_name in selftest selftest-lto selftest-cet; do
+for build_name in release release-lto release-cet; do
   output="$validation_dir/oracle-$build_name.so"
   python3 "$root/tools/compile_snippet.py" \
     --compile-db "$root/build/$build_name/compile_commands.json" \
-    --context src/cube_step.cpp \
+    --context "hotpatch_selftest.dir/src/cube_step.cpp.o" \
     --source "$root/patches/wobble_patch.cpp" \
     --output "$output" \
     --optimization O3 \
@@ -34,7 +34,6 @@ python3 -m py_compile "$root"/tools/*.py
 bash -n "$root"/scripts/*.sh
 
 if (( with_gui )); then
-  "$root/scripts/build.sh" release
   python3 "$root/tools/smoke_test.py" \
     --build-dir "$root/build/release" --keep-runtime
 fi

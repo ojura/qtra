@@ -31,9 +31,9 @@ incorrect native code may corrupt or crash the process.**
 
 ## Validation
 
-`./scripts/validate.sh` builds the Qt-independent core in three Release
-configurations and runs the hotpatch tests against each: ordinary `-O3`, `-O3`
-with GCC LTO, and `-O3` with Intel CET/IBT (`-fcf-protection=full`). Every run
+`./scripts/validate.sh` builds three Release configurations and runs the
+hotpatch tests against each: ordinary `-O3`, `-O3` with GCC LTO, and `-O3` with
+Intel CET/IBT (`-fcf-protection=full`). Every run
 calls the optimized built-in function, installs an x86-64 entry redirect,
 checks the replacement behavior, rolls the original bytes back, and checks the
 original behavior again. The CET configuration also checks that `ENDBR64`
@@ -49,8 +49,8 @@ The Python tests run under `ctest` and cover compilation-command
 transformation, retained-event replay, quiet event streams, and socket protocol
 behavior.
 
-`./scripts/validate.sh --with-gui` adds the Qt application and the
-Xvfb/current-display smoke session, which needs the Qt 6 packages below.
+`./scripts/validate.sh --with-gui` adds the Xvfb/current-display smoke session,
+which drives the running application.
 
 ## Architecture
 
@@ -134,34 +134,35 @@ cmake --preset release
 cmake --build --preset release --parallel
 ```
 
-Qt-independent hotpatch and Python tests only:
+Each build runs its tests. Qt is found from the `CMAKE_PREFIX_PATH`
+environment variable, which the presets do not set:
 
 ```bash
-./scripts/build.sh selftest-only
+export CMAKE_PREFIX_PATH=/path/to/Qt/6.9.3/gcc_64
 ```
 
-The stronger optimized/LTO variant is:
+Two more builds exist for the codegen the patcher has to survive. The LTO one,
+where `-fno-lto` on the target is what keeps callers from seeing its body:
 
 ```bash
-./scripts/build.sh selftest-lto
+./scripts/build.sh release-lto
 ```
 
-The Intel CET/IBT variant is:
+The Intel CET/IBT one, where the entry begins with a landing pad the patcher
+has to leave alone:
 
 ```bash
-./scripts/build.sh selftest-cet
+./scripts/build.sh release-cet
 ```
 
-`release-cet` is the corresponding Qt application preset.
-
-Run every Qt-independent configuration plus the build-oracle redirect tests:
+Run all three plus the build-oracle redirect tests:
 
 ```bash
 ./scripts/validate.sh
 ```
 
-On a machine with Qt 6, `./scripts/validate.sh --with-gui` also builds the app
-and executes the Xvfb/current-display smoke session.
+`./scripts/validate.sh --with-gui` also executes the Xvfb/current-display smoke
+session against the built application.
 
 The build exports `compile_commands.json`, which is the build oracle's source of
 compiler, include, macro, language, target, and ABI context.

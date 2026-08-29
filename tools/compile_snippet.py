@@ -122,8 +122,14 @@ def select_entry(entries: Sequence[CompileEntry], context: str) -> CompileEntry:
         raise BuildOracleError(
             f"no compilation entry matches {context!r}; examples:\n  {examples}"
         )
-    matches = "\n  ".join(str(entry.file) for entry in candidates[:20])
-    raise BuildOracleError(f"ambiguous compilation context {context!r}:\n  {matches}")
+    # Candidates matched on the same source path, so printing that path once per
+    # candidate says nothing. What tells them apart is the object each produced,
+    # and an output fragment is itself a valid context, so these are the answers.
+    matches = "\n  ".join(entry.output or str(entry.file) for entry in candidates[:20])
+    raise BuildOracleError(
+        f"ambiguous compilation context {context!r}; {len(candidates)} compilations "
+        f"produced:\n  {matches}\nName one by passing enough of its output path to "
+        f"--context to be unique.")
 
 
 def _same_file_argument(token: str, entry: CompileEntry) -> bool:
