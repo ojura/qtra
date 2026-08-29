@@ -33,7 +33,7 @@ CORE_HEADER = ROOT / "src" / "agent" / "runtime_agent.h"
 APPLICATION_SOURCE = ROOT / "src" / "cube_protocol.cpp"
 
 # Both files register through a local add(), so one pattern reads either.
-REGISTRATION = re.compile(r'add\("([a-z][a-zA-Z.]*)", \{([^}]*)\}, ')
+REGISTRATION = re.compile(r'add\("([a-z][a-zA-Z.]*)", \{([^}]*)\},\s+')
 CORE_HANDLER = re.compile(r'add\("([a-z][a-zA-Z.]*)", \{[^}]*\}, &RuntimeAgent::(handle[A-Za-z]+)\)')
 COMMAND_COMPARISON = re.compile(r'command == QStringLiteral\("([a-z][a-zA-Z.]*)"\)')
 
@@ -50,7 +50,7 @@ class ProtocolSurfaceTests(unittest.TestCase):
 
     def test_the_core_table_is_populated(self) -> None:
         found = names(self.core)
-        self.assertGreater(len(found), 25, "the pattern has rotted or the core table shrank")
+        self.assertGreaterEqual(len(found), 25, "the pattern has rotted or the core table shrank")
         self.assertEqual(sorted(found), sorted(set(found)), "a command is registered twice")
 
     def test_the_application_registers_its_own(self) -> None:
@@ -64,20 +64,23 @@ class ProtocolSurfaceTests(unittest.TestCase):
         self.assertEqual(both, set(), f"registered in the core and by the application: {both}")
 
     def test_the_core_does_not_name_the_application(self) -> None:
-        """What this whole split is for: a second application would carry the cube.
-
-        The agent keeps the socket, the table, the refusals, the event history and
-        the object registry, and an application that wanted those used to have to
-        bring a CubeWidget to get them.
-        """
+        """A second application must not carry this demo's adapters or build fields."""
+        forbidden = ("cube", "MainWindow", "ModuleManager", "DEMO_")
         for where, source in (("runtime_agent.cpp", self.core), ("runtime_agent.h", self.core_header)):
             with self.subTest(file=where):
                 named = [
                     f"{where}:{number}: {line.strip()}"
                     for number, line in enumerate(source.splitlines(), start=1)
-                    if "cube" in line.lower()
+                    if any(token.lower() in line.lower() for token in forbidden)
                 ]
-                self.assertEqual(named, [], "the agent names this demo again")
+                self.assertEqual(named, [], "the agent names this demo or its adapter again")
+
+    def test_patch_commands_belong_to_the_application(self) -> None:
+        core = set(names(self.core))
+        application = set(names(self.application))
+        expected = {"patch.load", "patch.activate", "patch.rollback", "patch.status"}
+        self.assertEqual(core & expected, set(), "the core still owns application patch policy")
+        self.assertEqual(expected - application, set(), "the application lost a patch command")
 
     def test_nothing_dispatches_on_a_command_name_outside_the_table(self) -> None:
         """A special case added beside the table is the duplication returning.

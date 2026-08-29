@@ -1,7 +1,7 @@
 #pragma once
 
 #include "agent/agent_abi.h"
-#include "agent/module_manager.h"
+#include "agent/module_registry.h"
 #include "agent/object_registry.h"
 
 #include <QElapsedTimer>
@@ -15,20 +15,19 @@
 #include <QQueue>
 #include <QStringList>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <unordered_map>
 #include <vector>
 
-class MainWindow;
 class QLocalSocket;
 
 class RuntimeAgent final : public QObject {
     Q_OBJECT
 
 public:
-    explicit RuntimeAgent(MainWindow* window,
-                          ModuleManager& modules,
+    explicit RuntimeAgent(QObject* root,
                           QString socketName,
                           QObject* parent = nullptr);
     ~RuntimeAgent() override;
@@ -68,9 +67,9 @@ public:
     using SnippetExecutor = std::function<bool(std::function<void()> call)>;
 
     // Adds one under the name a request asks for it by. The core knows two
-    // places already, the thread owning the object a request names and the
-    // window's, and an application adds any other place it can run one, such
-    // as the thread holding its render context.
+    // places already, the thread owning the object a request names and the root
+    // object's thread, and an application adds any other place it can run one,
+    // such as the thread holding its render context.
     //
     // Returns false and registers nothing if the name is taken.
     [[nodiscard]] bool registerExecutor(QString name, SnippetExecutor executor);
@@ -79,6 +78,29 @@ public:
     // the state at that moment. Returns false if the core or another
     // registration already writes that field.
     [[nodiscard]] bool registerHelloField(QString name, std::function<QJsonValue()> value);
+
+    // The host ABI always offers patch_bind and patch_unbind, while the policy
+    // and target set belong to the application. Without a provider the callbacks
+    // refuse. Only one provider can be registered.
+    using PatchBindHandler = std::function<std::int32_t(
+        void* target,
+        void* replacement,
+        quint64 owner,
+        std::uint32_t flags,
+        RuntimeAgentPatchBinding& binding,
+        QString& error)>;
+    using PatchUnbindHandler = std::function<std::int32_t(
+        std::uint64_t bindingId,
+        quint64 owner,
+        QString& error)>;
+
+    [[nodiscard]] bool registerPatchProvider(PatchBindHandler bind,
+                                             PatchUnbindHandler unbind);
+
+    // Protocol integers accept either an exact JSON number or its decimal string
+    // form. Application handlers use the same parser as the core.
+    [[nodiscard]] static bool parseUnsignedInteger(const QJsonValue& value,
+                                                   quint64& result);
 
     void sendSuccess(QLocalSocket* socket,
                      const QJsonValue& requestId,
@@ -94,6 +116,8 @@ private:
         bool allEvents = true;
         QStringList eventPrefixes;
     };
+
+    using LoadedModule = runtime_agent::ModuleRegistry::LoadedModule;
 
     // Which of a module's two entry points an invocation calls. Both take the
     // same host and report the same way, so they share all the machinery below;
@@ -115,14 +139,14 @@ private:
 
     // What a module's host callbacks carry as agent_context, instead of the
     // agent itself. A callback made from outside an invocation, such as a draw
-    // hook or a menu handler, has no other way to say which module it came from, so
-    // stash entries and log lines from those places would otherwise be
-    // unattributable. Modules are never unloaded, so these satisfy the ABI's
-    // promise that agent_context stays valid for the life of the process.
+    // hook or a menu handler, has no other way to say which module it came from,
+    // so stash entries and log lines from those places would otherwise be
+    // unattributable. The registry and its modules live for the process and
+    // modules are never unloaded, so retaining the registry entry avoids a
+    // second copy of its identity and keeps this pointer valid.
     struct ModuleContext {
         RuntimeAgent* agent = nullptr;
-        quint64 moduleId = 0;
-        QString moduleName;
+        const LoadedModule* module = nullptr;
     };
 
     struct StashEntry {
@@ -230,18 +254,6 @@ private:
     void handleStashDrop(QLocalSocket* socket,
                         const QJsonValue& requestId,
                         const QJsonObject& parameters);
-    void handlePatchLoad(QLocalSocket* socket,
-                        const QJsonValue& requestId,
-                        const QJsonObject& parameters);
-    void handlePatchActivate(QLocalSocket* socket,
-                            const QJsonValue& requestId,
-                            const QJsonObject& parameters);
-    void handlePatchRollback(QLocalSocket* socket,
-                            const QJsonValue& requestId,
-                            const QJsonObject& parameters);
-    void handlePatchStatus(QLocalSocket* socket,
-                          const QJsonValue& requestId,
-                          const QJsonObject& parameters);
     void handleSymbolResolve(QLocalSocket* socket,
                             const QJsonValue& requestId,
                             const QJsonObject& parameters);
@@ -270,18 +282,20 @@ private:
     [[nodiscard]] QJsonObject hello();
     [[nodiscard]] QJsonArray commandList() const;
 
-    void runSnippet(ModuleManager::LoadedModule* module,
+    void runSnippet(LoadedModule* module,
                     quint64 operationId,
                     const QString& executor,
                     QObject* target,
                     const QJsonValue& request,
                     SnippetEntry entry = SnippetEntry::Run);
-    void executeSnippet(ModuleManager::LoadedModule* module,
+    void executeSnippet(LoadedModule* module,
                         const std::shared_ptr<SnippetInvocation>& invocation);
-    void finishSnippet(ModuleManager::LoadedModule* module,
+    void finishSnippet(LoadedModule* module,
                        const std::shared_ptr<SnippetInvocation>& invocation);
 
     [[nodiscard]] QJsonValue parseSnippetResult(const QByteArray& json) const;
+    [[nodiscard]] bool executorExists(const QString& name) const;
+    [[nodiscard]] QString executorChoices() const;
     [[nodiscard]] bool clientWantsEvent(const ClientState& state,
                                         const QString& eventName) const;
 
@@ -312,18 +326,14 @@ private:
     static std::int32_t hostPatchUnbind(void* agentContext, std::uint64_t bindingId);
     static std::int64_t hostStashList(void* agentContext, char* buffer, std::int64_t capacity);
 
-    [[nodiscard]] ModuleContext* contextForModule(quint64 moduleId);
+    [[nodiscard]] ModuleContext* contextForModule(const LoadedModule* module);
     [[nodiscard]] static RuntimeAgent* agentOf(void* agentContext);
     [[nodiscard]] QJsonArray stashEntries() const;
     [[nodiscard]] bool stashDrop(const QString& key);
 
-    QPointer<MainWindow> m_window;
-
-    // Owned by whoever built the application, because rolling the active patch
-    // back on the way out makes the patched thing emit, and an application's
-    // event connections are still live while this object's members go away.
-    // Outliving the agent is what keeps that emission from reaching them.
-    ModuleManager& m_modules;
+    // Process-lifetime storage for every native module. Descriptor-specific
+    // loaders remain in the application layer and adopt their records here.
+    runtime_agent::ModuleRegistry& m_modules;
 
     QString m_socketName;
     QLocalServer m_server;
@@ -331,12 +341,14 @@ private:
     std::vector<CommandEntry> m_commands;
     QMap<QString, SnippetExecutor> m_executors;
     QMap<QString, std::function<QJsonValue()>> m_helloFields;
+    PatchBindHandler m_patchBind;
+    PatchUnbindHandler m_patchUnbind;
     ObjectRegistry m_registry;
     QElapsedTimer m_monotonicClock;
     quint64 m_eventSequence = 0;
     QQueue<QJsonObject> m_eventHistory;
-    // Keep native snippet operation IDs disjoint from MainWindow's small demo
-    // job IDs while retaining a plain uint64 wire representation.
+    // Keep native snippet operation IDs in the high half, leaving applications
+    // the low half for their own operation events without coordination.
     quint64 m_nextOperationId = (quint64{1} << 63);
     bool m_unsafeEnabled = false;
 

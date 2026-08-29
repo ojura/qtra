@@ -52,11 +52,13 @@ int main(int argc, char** argv)
     quint64 loadedId = 0;
     QString loadedName;
 
-    std::printf("a module outlives the adapter that loaded it\n");
+    runtime_agent::ModuleRegistry& registry = runtime_agent::ModuleRegistry::instance();
+
+    std::printf("a module remains visible across adapter turnover\n");
     {
         auto first = std::make_unique<ModuleManager>(nullptr);
         QString error;
-        ModuleManager::LoadedModule* module = first->loadSnippet(modulePath, error);
+        runtime_agent::ModuleRegistry::LoadedModule* module = registry.loadSnippet(modulePath, error);
         check(module != nullptr, qPrintable(QStringLiteral("loaded %1: %2")
                                                 .arg(modulePath, error)));
         if (module == nullptr) {
@@ -65,26 +67,26 @@ int main(int argc, char** argv)
         loadedId = module->id;
         loadedName = module->name;
 
-        check(first->module(loadedId) != nullptr, "the adapter that loaded it can find it");
+        check(first->module(loadedId) != nullptr,
+              "the first adapter can find the registry's module");
         first.reset();
 
-        // The adapter is gone. Anything that was only its knowledge is gone
-        // with it, and this is the question that matters: was the module.
+        // The adapter is gone. The registry is process-lifetime, and a successor
+        // must see the same module record rather than a private copy.
         auto second = std::make_unique<ModuleManager>(nullptr);
-        ModuleManager::LoadedModule* survivor = second->module(loadedId);
-        check(survivor != nullptr, "a later adapter finds the module the first one loaded");
+        runtime_agent::ModuleRegistry::LoadedModule* survivor = second->module(loadedId);
+        check(survivor != nullptr, "a later adapter finds the same registry module");
         if (survivor != nullptr) {
             check(survivor->name == loadedName, "and it is the same module, by name");
             check(survivor->id == loadedId, "under the same id");
         }
-        check(!second->list().isEmpty(), "and it lists it");
+        check(!registry.list().isEmpty(), "and the process registry lists it");
     }
 
-    std::printf("ids are not handed out twice across adapters\n");
+    std::printf("ids are not handed out twice across loads\n");
     {
-        auto third = std::make_unique<ModuleManager>(nullptr);
         QString error;
-        ModuleManager::LoadedModule* again = third->loadSnippet(modulePath, error);
+        runtime_agent::ModuleRegistry::LoadedModule* again = registry.loadSnippet(modulePath, error);
         check(again != nullptr, "the same file loads again as a new module");
         if (again != nullptr) {
             check(again->id != loadedId,
@@ -107,7 +109,7 @@ int main(int argc, char** argv)
 
         auto owner = std::make_unique<ModuleManager>(nullptr);
         QString error;
-        ModuleManager::LoadedModule* binder = owner->loadSnippet(modulePath, error);
+        runtime_agent::ModuleRegistry::LoadedModule* binder = registry.loadSnippet(modulePath, error);
         check(binder != nullptr, "loaded a module to own the binding");
         if (binder == nullptr) {
             return 1;

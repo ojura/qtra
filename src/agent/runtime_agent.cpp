@@ -1,14 +1,11 @@
 #include "agent/runtime_agent.h"
 
 #include "agent/build_id.h"
-#include "main_window.h"
+#include "agent/errno_text.h"
 
 #include <QAbstractButton>
 #include <QAction>
 #include <QCoreApplication>
-#include <QCryptographicHash>
-#include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -16,7 +13,6 @@
 #include <QLocalSocket>
 #include <QMetaMethod>
 #include <QMetaProperty>
-#include <QProcessEnvironment>
 #include <QTimer>
 
 #include <cerrno>
@@ -66,31 +62,6 @@ bool parseAddress(const QJsonValue& value, quintptr& address)
     return false;
 }
 
-bool parseUnsignedInteger(const QJsonValue& value, quint64& result)
-{
-    if (value.isString()) {
-        const QString text = value.toString().trimmed();
-        if (text.isEmpty()) {
-            return false;
-        }
-        bool ok = false;
-        const quint64 parsed = text.toULongLong(&ok, 10);
-        if (ok) {
-            result = parsed;
-        }
-        return ok;
-    }
-    if (value.isDouble()) {
-        const double number = value.toDouble();
-        if (std::isfinite(number) && number >= 0.0
-            && number <= maximumExactJsonInteger && std::floor(number) == number) {
-            result = static_cast<quint64>(number);
-            return true;
-        }
-    }
-    return false;
-}
-
 QJsonObject parseObjectOrRaw(const QByteArray& json)
 {
     QJsonParseError parseError;
@@ -101,24 +72,22 @@ QJsonObject parseObjectOrRaw(const QByteArray& json)
     return QJsonObject{{QStringLiteral("raw"), QString::fromUtf8(json)}};
 }
 
-QString errnoText(const char* operation)
+QString failedCall(const char* operation, const int errorNumber)
 {
-    return QStringLiteral("%1 failed: %2 (errno=%3)")
-        .arg(QString::fromLatin1(operation), QString::fromLocal8Bit(std::strerror(errno)))
-        .arg(errno);
+    return QStringLiteral("%1 failed: %2")
+        .arg(QString::fromLatin1(operation),
+             QString::fromStdString(runtime_agent::errnoText(errorNumber)));
 }
 
 } // namespace
 
-RuntimeAgent::RuntimeAgent(MainWindow* window,
-                           ModuleManager& modules,
+RuntimeAgent::RuntimeAgent(QObject* root,
                            QString socketName,
                            QObject* parent)
     : QObject(parent)
-    , m_window(window)
-    , m_modules(modules)
+    , m_modules(runtime_agent::ModuleRegistry::instance())
     , m_socketName(std::move(socketName))
-    , m_registry(window, this)
+    , m_registry(root, this)
     , m_unsafeEnabled(qEnvironmentVariableIntValue("QT_RUNTIME_AGENT_UNSAFE") == 1)
 {
     setObjectName(QStringLiteral("runtimeAgent"));
@@ -128,31 +97,10 @@ RuntimeAgent::RuntimeAgent(MainWindow* window,
     connect(&m_server, &QLocalServer::newConnection,
             this, &RuntimeAgent::acceptConnections);
 
-    connect(m_window, &MainWindow::demoJobStarted, this,
-            [this](const qulonglong id, const QString& name) {
-                publishEvent(QStringLiteral("operation.started"), QJsonObject{
-                    {QStringLiteral("operationId"), QString::number(id)},
-                    {QStringLiteral("kind"), QStringLiteral("demoJob")},
-                    {QStringLiteral("name"), name},
-                });
-            });
-    connect(m_window, &MainWindow::demoJobProgress, this,
-            [this](const qulonglong id, const int percent) {
-                publishEvent(QStringLiteral("operation.progress"), QJsonObject{
-                    {QStringLiteral("operationId"), QString::number(id)},
-                    {QStringLiteral("percent"), percent},
-                });
-            });
-    connect(m_window, &MainWindow::demoJobFinished, this,
-            [this](const qulonglong id, const QString& outcome) {
-                publishEvent(QStringLiteral("operation.finished"), QJsonObject{
-                    {QStringLiteral("operationId"), QString::number(id)},
-                    {QStringLiteral("kind"), QStringLiteral("demoJob")},
-                    {QStringLiteral("outcome"), outcome},
-                });
-            });
-
-    for (QAction* action : m_window->findChildren<QAction*>()) {
+    if (root == nullptr) {
+        return;
+    }
+    for (QAction* action : root->findChildren<QAction*>()) {
         (void)m_registry.idFor(action);
         connect(action, &QAction::triggered, this, [this, action](const bool checked) {
             publishEvent(QStringLiteral("action.triggered"), QJsonObject{
@@ -166,13 +114,6 @@ RuntimeAgent::RuntimeAgent(MainWindow* window,
 
 RuntimeAgent::~RuntimeAgent()
 {
-    // Qt drops a destroyed receiver's connections in ~QObject, which runs after
-    // these members are gone. Anything the members emit on the way out would
-    // still reach the lambdas installed in the constructor, so cut those first.
-    if (m_window != nullptr) {
-        disconnect(m_window, nullptr, this, nullptr);
-    }
-
     // The client sockets are children of m_server, so ~QLocalServer deletes
     // them, and that runs after m_clients has already been destroyed. Each
     // socket aborts on the way out and emits disconnected, which would reach
@@ -376,10 +317,6 @@ void RuntimeAgent::registerCoreCommands()
     add("stash.list", {}, &RuntimeAgent::handleStashList);
     add("stash.get", {"key"}, &RuntimeAgent::handleStashGet);
     add("stash.drop", {"key"}, &RuntimeAgent::handleStashDrop);
-    add("patch.load", {"path"}, &RuntimeAgent::handlePatchLoad);
-    add("patch.activate", {"moduleId", "acceptIncompleteCoverage"}, &RuntimeAgent::handlePatchActivate);
-    add("patch.rollback", {}, &RuntimeAgent::handlePatchRollback);
-    add("patch.status", {}, &RuntimeAgent::handlePatchStatus);
     add("symbol.resolve", {"name"}, &RuntimeAgent::handleSymbolResolve);
     add("unsafe.status", {}, &RuntimeAgent::handleUnsafeStatus);
     add("unsafe.memory.read", {"address", "size"}, &RuntimeAgent::handleUnsafeMemoryRead);
@@ -409,10 +346,11 @@ bool RuntimeAgent::registerCommand(QString name,
 
 bool RuntimeAgent::registerExecutor(QString name, SnippetExecutor executor)
 {
-    // "object" is the core's own, and the empty name is what a request that
-    // says nothing falls back to, so neither is an application's to take.
-    if (name.isEmpty() || !executor || name == QStringLiteral("object")
-        || m_executors.contains(name)) {
+    // "gui" and "object" are the core's own, and the empty name is what a
+    // request that says nothing falls back to, so none is an application's to
+    // take.
+    if (name.isEmpty() || !executor || name == QStringLiteral("gui")
+        || name == QStringLiteral("object") || m_executors.contains(name)) {
         return false;
     }
     m_executors.insert(std::move(name), std::move(executor));
@@ -427,6 +365,41 @@ bool RuntimeAgent::registerHelloField(QString name, std::function<QJsonValue()> 
     }
     m_helloFields.insert(std::move(name), std::move(value));
     return true;
+}
+
+bool RuntimeAgent::registerPatchProvider(PatchBindHandler bind, PatchUnbindHandler unbind)
+{
+    if (!bind || !unbind || m_patchBind || m_patchUnbind) {
+        return false;
+    }
+    m_patchBind = std::move(bind);
+    m_patchUnbind = std::move(unbind);
+    return true;
+}
+
+bool RuntimeAgent::parseUnsignedInteger(const QJsonValue& value, quint64& result)
+{
+    if (value.isString()) {
+        const QString text = value.toString().trimmed();
+        if (text.isEmpty()) {
+            return false;
+        }
+        bool ok = false;
+        const quint64 parsed = text.toULongLong(&ok, 10);
+        if (ok) {
+            result = parsed;
+        }
+        return ok;
+    }
+    if (value.isDouble()) {
+        const double number = value.toDouble();
+        if (std::isfinite(number) && number >= 0.0
+            && number <= maximumExactJsonInteger && std::floor(number) == number) {
+            result = static_cast<quint64>(number);
+            return true;
+        }
+    }
+    return false;
 }
 
 void RuntimeAgent::dispatchRequest(QLocalSocket* socket,
@@ -482,8 +455,7 @@ void RuntimeAgent::handleObjectTree(QLocalSocket* socket,
     QString error;
     const bool hasSelector = parameters.contains(QStringLiteral("objectName"))
         || parameters.contains(QStringLiteral("id"));
-    QObject* root = hasSelector ? resolveObject(parameters, error)
-                                : static_cast<QObject*>(m_window.data());
+    QObject* root = hasSelector ? resolveObject(parameters, error) : m_registry.root();
     if (root == nullptr) {
         sendError(socket, requestId, QStringLiteral("object_not_found"), error);
         return;
@@ -743,7 +715,7 @@ void RuntimeAgent::handleSnippetLoad(QLocalSocket* socket,
                                  const QJsonObject& parameters)
 {
     QString error;
-    ModuleManager::LoadedModule* module = m_modules.loadSnippet(
+    RuntimeAgent::LoadedModule* module = m_modules.loadSnippet(
         parameters.value(QStringLiteral("path")).toString(), error);
     if (module == nullptr) {
         sendError(socket, requestId, QStringLiteral("load_failed"), error);
@@ -776,7 +748,7 @@ void RuntimeAgent::handleSnippetRun(QLocalSocket* socket,
     quint64 moduleId = 0;
     const bool ok = parseUnsignedInteger(
         parameters.value(QStringLiteral("moduleId")), moduleId);
-    ModuleManager::LoadedModule* module = m_modules.module(ok ? moduleId : 0);
+    RuntimeAgent::LoadedModule* module = m_modules.module(ok ? moduleId : 0);
     if (module == nullptr || module->kind != QLatin1String("snippet")) {
         sendError(socket, requestId, QStringLiteral("module_not_found"),
                   QStringLiteral("snippet module was not found"));
@@ -785,11 +757,9 @@ void RuntimeAgent::handleSnippetRun(QLocalSocket* socket,
 
     const QString executor = parameters.value(QStringLiteral("executor")).toString(
         QStringLiteral("gui"));
-    if (executor != QStringLiteral("gui")
-        && executor != QStringLiteral("object")
-        && executor != QStringLiteral("render")) {
+    if (!executorExists(executor)) {
         sendError(socket, requestId, QStringLiteral("invalid_executor"),
-                  QStringLiteral("executor must be gui, object, or render"));
+                  QStringLiteral("executor must be one of: %1").arg(executorChoices()));
         return;
     }
     QObject* target = nullptr;
@@ -821,7 +791,7 @@ void RuntimeAgent::handleSnippetRelease(QLocalSocket* socket,
     quint64 moduleId = 0;
     const bool ok = parseUnsignedInteger(
         parameters.value(QStringLiteral("moduleId")), moduleId);
-    ModuleManager::LoadedModule* module = m_modules.module(ok ? moduleId : 0);
+    RuntimeAgent::LoadedModule* module = m_modules.module(ok ? moduleId : 0);
     if (module == nullptr || module->kind != QLatin1String("snippet")) {
         sendError(socket, requestId, QStringLiteral("module_not_found"),
                   QStringLiteral("snippet module was not found"));
@@ -864,11 +834,9 @@ void RuntimeAgent::handleSnippetRelease(QLocalSocket* socket,
                                  "release under; pass one explicitly to try anyway"));
         return;
     }
-    if (executor != QStringLiteral("gui")
-        && executor != QStringLiteral("object")
-        && executor != QStringLiteral("render")) {
+    if (!executorExists(executor)) {
         sendError(socket, requestId, QStringLiteral("invalid_executor"),
-                  QStringLiteral("executor must be gui, object, or render"));
+                  QStringLiteral("executor must be one of: %1").arg(executorChoices()));
         return;
     }
 
@@ -964,75 +932,6 @@ void RuntimeAgent::handleStashDrop(QLocalSocket* socket,
     return;
 }
 
-void RuntimeAgent::handlePatchLoad(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject& parameters)
-{
-    QString error;
-    ModuleManager::LoadedModule* module = m_modules.loadEntryPatch(
-        parameters.value(QStringLiteral("path")).toString(), error);
-    if (module == nullptr) {
-        sendError(socket, requestId, QStringLiteral("load_failed"), error);
-        return;
-    }
-    const QJsonObject result{
-        {QStringLiteral("moduleId"), QString::number(module->id)},
-        {QStringLiteral("name"), module->name},
-        {QStringLiteral("path"), module->path},
-    };
-    publishEvent(QStringLiteral("patch.loaded"), result);
-    sendSuccess(socket, requestId, result);
-    return;
-}
-
-void RuntimeAgent::handlePatchActivate(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject& parameters)
-{
-    quint64 moduleId = 0;
-    const bool ok = parseUnsignedInteger(
-        parameters.value(QStringLiteral("moduleId")), moduleId);
-    if (!ok) {
-        sendError(socket, requestId, QStringLiteral("invalid_module_id"),
-                  QStringLiteral("moduleId must be an unsigned integer"));
-        return;
-    }
-    const bool acceptIncomplete =
-        parameters.value(QStringLiteral("acceptIncompleteCoverage")).toBool(false);
-    QString error;
-    if (!m_modules.activateEntryPatch(moduleId, acceptIncomplete, error)) {
-        sendError(socket, requestId, QStringLiteral("patch_failed"), error);
-        return;
-    }
-    const QJsonObject result = m_modules.patchStatus();
-    publishEvent(QStringLiteral("patch.activated"), result);
-    sendSuccess(socket, requestId, result);
-    return;
-}
-
-void RuntimeAgent::handlePatchRollback(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject&)
-{
-    QString error;
-    if (!m_modules.rollback(error)) {
-        sendError(socket, requestId, QStringLiteral("rollback_failed"), error);
-        return;
-    }
-    const QJsonObject result = m_modules.patchStatus();
-    publishEvent(QStringLiteral("patch.rolledBack"), result);
-    sendSuccess(socket, requestId, result);
-    return;
-}
-
-void RuntimeAgent::handlePatchStatus(QLocalSocket* socket,
-                                 const QJsonValue& requestId,
-                                 const QJsonObject&)
-{
-    sendSuccess(socket, requestId, m_modules.patchStatus());
-    return;
-}
-
 void RuntimeAgent::handleSymbolResolve(QLocalSocket* socket,
                                  const QJsonValue& requestId,
                                  const QJsonObject& parameters)
@@ -1087,8 +986,9 @@ void RuntimeAgent::handleUnsafeMemoryRead(QLocalSocket* socket,
     const ssize_t transferred = ::process_vm_readv(
         ::getpid(), &local, 1, &remote, 1, 0);
     if (transferred < 0) {
+        const int errorNumber = errno;
         sendError(socket, requestId, QStringLiteral("memory_read_failed"),
-                  errnoText("process_vm_readv"));
+                  failedCall("process_vm_readv", errorNumber));
         return;
     }
     data.truncate(static_cast<qsizetype>(transferred));
@@ -1123,8 +1023,9 @@ void RuntimeAgent::handleUnsafeMemoryWrite(QLocalSocket* socket,
     const ssize_t transferred = ::process_vm_writev(
         ::getpid(), &local, 1, &remote, 1, 0);
     if (transferred < 0) {
+        const int errorNumber = errno;
         sendError(socket, requestId, QStringLiteral("memory_write_failed"),
-                  errnoText("process_vm_writev"));
+                  failedCall("process_vm_writev", errorNumber));
         return;
     }
     sendSuccess(socket, requestId, QJsonObject{
@@ -1229,7 +1130,7 @@ QJsonObject RuntimeAgent::coreHello()
     constexpr bool optimizedBuild = false;
 #endif
     return QJsonObject{
-        {QStringLiteral("name"), QStringLiteral("qt-runtime-agent-demo")},
+        {QStringLiteral("name"), QCoreApplication::applicationName()},
         {QStringLiteral("protocolVersion"), 1},
         {QStringLiteral("agentAbi"), QStringLiteral("0x%1").arg(RUNTIME_AGENT_ABI, 8, 16, QLatin1Char('0'))},
         {QStringLiteral("pid"), QCoreApplication::applicationPid()},
@@ -1239,13 +1140,9 @@ QJsonObject RuntimeAgent::coreHello()
         {QStringLiteral("compiler"), QString::fromLatin1(__VERSION__)},
         {QStringLiteral("optimizedBuild"), optimizedBuild},
         {QStringLiteral("unsafeEnabled"), m_unsafeEnabled},
-        {QStringLiteral("sourceDir"), QStringLiteral(DEMO_SOURCE_DIR)},
-        {QStringLiteral("buildDir"), QStringLiteral(DEMO_BUILD_DIR)},
-        {QStringLiteral("buildType"), QStringLiteral(DEMO_BUILD_TYPE)},
         // The build a module has to have been compiled against for the loader
         // to accept it, readable without loading anything.
         {QStringLiteral("buildId"), runtime_agent::hostBuildId()},
-        {QStringLiteral("patch"), m_modules.patchStatus()},
     };
 }
 
@@ -1267,19 +1164,17 @@ QJsonArray RuntimeAgent::commandList() const
     return result;
 }
 
-RuntimeAgent::ModuleContext* RuntimeAgent::contextForModule(const quint64 moduleId)
+RuntimeAgent::ModuleContext* RuntimeAgent::contextForModule(const LoadedModule* module)
 {
-    auto found = m_moduleContexts.find(moduleId);
+    if (module == nullptr) {
+        return nullptr;
+    }
+    auto found = m_moduleContexts.find(module->id);
     if (found == m_moduleContexts.end()) {
         auto context = std::make_unique<ModuleContext>();
         context->agent = this;
-        context->moduleId = moduleId;
-        // The descriptor name, taken here and not accepted from the module
-        // later, so a stash entry's owner is something the host observed.
-        if (const ModuleManager::LoadedModule* loaded = m_modules.module(moduleId)) {
-            context->moduleName = loaded->name;
-        }
-        found = m_moduleContexts.emplace(moduleId, std::move(context)).first;
+        context->module = module;
+        found = m_moduleContexts.emplace(module->id, std::move(context)).first;
     }
     return found->second.get();
 }
@@ -1289,7 +1184,7 @@ RuntimeAgent* RuntimeAgent::agentOf(void* agentContext)
     return static_cast<ModuleContext*>(agentContext)->agent;
 }
 
-void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
+void RuntimeAgent::runSnippet(RuntimeAgent::LoadedModule* module,
                               const quint64 operationId,
                               const QString& executor,
                               QObject* target,
@@ -1316,7 +1211,7 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
         // Not the agent itself: the module's own context, so that a callback
         // made later from a draw hook or a menu handler still identifies the
         // module it came from.
-        contextForModule(module->id),
+        contextForModule(module),
         invocation.get(),
         &RuntimeAgent::hostLog,
         &RuntimeAgent::hostEmitEvent,
@@ -1353,8 +1248,10 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
         scheduled = (*registered)(std::move(callback));
     } else if (executor == QStringLiteral("object") && target != nullptr) {
         scheduled = QMetaObject::invokeMethod(target, std::move(callback), Qt::QueuedConnection);
+    } else if (QObject* root = m_registry.root(); root != nullptr) {
+        scheduled = QMetaObject::invokeMethod(root, std::move(callback), Qt::QueuedConnection);
     } else {
-        scheduled = QMetaObject::invokeMethod(m_window, std::move(callback), Qt::QueuedConnection);
+        scheduled = false;
     }
 
     if (!scheduled) {
@@ -1364,7 +1261,7 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
     }
 }
 
-void RuntimeAgent::executeSnippet(ModuleManager::LoadedModule* module,
+void RuntimeAgent::executeSnippet(RuntimeAgent::LoadedModule* module,
                                   const std::shared_ptr<SnippetInvocation>& invocation)
 {
     // Recorded before the call, and for every attempt: this is the only witness
@@ -1395,7 +1292,7 @@ void RuntimeAgent::executeSnippet(ModuleManager::LoadedModule* module,
 }
 
 void RuntimeAgent::finishSnippet(
-    ModuleManager::LoadedModule* module,
+    RuntimeAgent::LoadedModule* module,
     const std::shared_ptr<SnippetInvocation>& invocation)
 {
     QJsonObject event{
@@ -1437,6 +1334,19 @@ QJsonValue RuntimeAgent::parseSnippetResult(const QByteArray& json) const
         };
     }
     return document.isArray() ? QJsonValue(document.array()) : QJsonValue(document.object());
+}
+
+bool RuntimeAgent::executorExists(const QString& name) const
+{
+    return name == QStringLiteral("gui") || name == QStringLiteral("object")
+        || m_executors.contains(name);
+}
+
+QString RuntimeAgent::executorChoices() const
+{
+    QStringList choices{QStringLiteral("gui"), QStringLiteral("object")};
+    choices.append(m_executors.keys());
+    return choices.join(QStringLiteral(", "));
 }
 
 bool RuntimeAgent::clientWantsEvent(const ClientState& state, const QString& eventName) const
@@ -1560,38 +1470,37 @@ std::int32_t RuntimeAgent::hostPatchBind(void* agentContext,
                                          RuntimeAgentPatchBinding* out)
 {
     auto* context = static_cast<ModuleContext*>(agentContext);
-    if (context == nullptr || context->agent == nullptr || out == nullptr
-        || target == nullptr || replacement == nullptr) {
+    if (context == nullptr || context->agent == nullptr || context->module == nullptr
+        || out == nullptr || target == nullptr || replacement == nullptr
+        || !context->agent->m_patchBind) {
         return -3;
     }
 
     QString error;
-    runtime_agent::PatchBinding binding;
-    const int result = context->agent->m_modules.bindReplacement(
-        target, replacement, context->moduleId,
-        (flags & RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE) != 0, binding, error);
+    RuntimeAgentPatchBinding binding{};
+    const std::int32_t result = context->agent->m_patchBind(
+        target, replacement, context->module->id, flags, binding, error);
     if (result != 0) {
         context->agent->publishEvent(QStringLiteral("patch.bindRefused"), QJsonObject{
-            {QStringLiteral("moduleId"), QString::number(context->moduleId)},
+            {QStringLiteral("moduleId"), QString::number(context->module->id)},
             {QStringLiteral("error"), error},
         });
         return result;
     }
 
-    out->id = binding.id;
-    out->original = binding.original;
-    out->previous = binding.previous;
+    *out = binding;
     return 0;
 }
 
 std::int32_t RuntimeAgent::hostPatchUnbind(void* agentContext, const std::uint64_t bindingId)
 {
     auto* context = static_cast<ModuleContext*>(agentContext);
-    if (context == nullptr || context->agent == nullptr) {
+    if (context == nullptr || context->agent == nullptr || context->module == nullptr
+        || !context->agent->m_patchUnbind) {
         return -1;
     }
     QString error;
-    return context->agent->m_modules.releaseBinding(bindingId, context->moduleId, error);
+    return context->agent->m_patchUnbind(bindingId, context->module->id, error);
 }
 
 std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
@@ -1600,10 +1509,12 @@ std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
                                         const std::int64_t size,
                                         const std::int32_t overwrite)
 {
-    if (key == nullptr || *key == '\0' || size < 0 || (bytes == nullptr && size > 0)) {
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    if (context == nullptr || context->agent == nullptr || context->module == nullptr
+        || key == nullptr || *key == '\0' || size < 0
+        || (bytes == nullptr && size > 0)) {
         return -2;
     }
-    auto* context = static_cast<ModuleContext*>(agentContext);
     auto* agent = context->agent;
     const QString name = QString::fromUtf8(key);
 
@@ -1620,7 +1531,7 @@ std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
     // reason the namespace is flat.
     if (existed) {
         const QString owner = agent->m_stash.value(name).moduleName;
-        if (!owner.isEmpty() && owner != context->moduleName) {
+        if (!owner.isEmpty() && owner != context->module->name) {
             return -2;
         }
     }
@@ -1628,8 +1539,8 @@ std::int32_t RuntimeAgent::hostStashPut(void* agentContext,
     StashEntry entry;
     entry.bytes = QByteArray(static_cast<const char*>(bytes), static_cast<qsizetype>(size));
     entry.monotonicNs = static_cast<quint64>(agent->m_monotonicClock.nsecsElapsed());
-    entry.moduleId = context->moduleId;
-    entry.moduleName = context->moduleName;
+    entry.moduleId = context->module->id;
+    entry.moduleName = context->module->name;
     agent->m_stash.insert(name, entry);
     return existed ? 1 : 0;
 }
@@ -1659,10 +1570,13 @@ std::int64_t RuntimeAgent::hostStashGet(void* agentContext,
 
 std::int32_t RuntimeAgent::hostStashDrop(void* agentContext, const char* key)
 {
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    if (context == nullptr || context->agent == nullptr || context->module == nullptr) {
+        return -2;
+    }
     if (key == nullptr) {
         return 0;
     }
-    auto* context = static_cast<ModuleContext*>(agentContext);
     auto* agent = context->agent;
     const QString name = QString::fromUtf8(key);
 
@@ -1681,7 +1595,7 @@ std::int32_t RuntimeAgent::hostStashDrop(void* agentContext, const char* key)
         if (found == agent->m_stash.constEnd()) {
             return 0;
         }
-        if (!found->moduleName.isEmpty() && found->moduleName != context->moduleName) {
+        if (!found->moduleName.isEmpty() && found->moduleName != context->module->name) {
             return -2;
         }
     }

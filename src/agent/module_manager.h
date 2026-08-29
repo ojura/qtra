@@ -6,7 +6,6 @@
 #include "agent/patch_registry.h"
 #include "demo/cube_step_abi.h"
 
-#include <QJsonArray>
 #include <QJsonObject>
 #include <QPointer>
 #include <QString>
@@ -33,13 +32,8 @@ public:
     ModuleManager(const ModuleManager&) = delete;
     ModuleManager& operator=(const ModuleManager&) = delete;
 
-    [[nodiscard]] LoadedModule* loadSnippet(const QString& path, QString& error)
-    {
-        return m_registry.loadSnippet(path, error);
-    }
     [[nodiscard]] LoadedModule* loadEntryPatch(const QString& path, QString& error);
     [[nodiscard]] LoadedModule* module(const quint64 id) const { return m_registry.module(id); }
-    [[nodiscard]] QJsonArray list() const { return m_registry.list(); }
 
     // acceptIncompleteCoverage proceeds when the build could not establish that
     // replacing the target reaches every call. It is a request a caller has to

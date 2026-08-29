@@ -12,6 +12,7 @@ class ObjectRegistry final : public QObject {
 public:
     explicit ObjectRegistry(QObject* root, QObject* parent = nullptr);
 
+    [[nodiscard]] QObject* root() const noexcept { return m_root.data(); }
     [[nodiscard]] quint64 idFor(QObject* object);
     [[nodiscard]] QObject* byId(quint64 id) const;
     [[nodiscard]] QObject* byObjectName(const QString& name) const;

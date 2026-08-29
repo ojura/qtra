@@ -81,13 +81,13 @@ int main(int argc, char** argv)
     std::unique_ptr<RuntimeAgent> agent;
     if (!parser.isSet(noAgentOption)) {
         agent = std::make_unique<RuntimeAgent>(
-            &window, modules, parser.value(socketOption), &application);
+            &window, parser.value(socketOption), &application);
         // Assembly is this file's job, and this is the line that says which
         // application the agent is serving. The agent names none of it: the
-        // cube's commands, events, render executor and hello fields are all
-        // registered from here. MainWindow is the wrong place for it, because
-        // then a window would have to know the protocol to be shown.
-        if (!registerCubeProtocol(*agent, *window.cubeWidget(), modules)) {
+        // cube and patch commands, events, the render executor and hello fields
+        // are all registered from here. MainWindow is the wrong place for it,
+        // because then a window would have to know the protocol to be shown.
+        if (!registerCubeProtocol(*agent, window, modules)) {
             qFatal("the cube's commands collided with names the agent already had");
         }
         QString error;

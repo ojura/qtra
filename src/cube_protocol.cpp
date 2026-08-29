@@ -3,6 +3,7 @@
 #include "agent/module_manager.h"
 #include "agent/runtime_agent.h"
 #include "cube_widget.h"
+#include "main_window.h"
 
 #include "demo/cube_step_abi.h"
 
@@ -16,6 +17,7 @@
 #include <QLocalSocket>
 #include <QString>
 
+#include <cstdint>
 #include <functional>
 #include <utility>
 
@@ -42,8 +44,9 @@ QJsonObject cubeState(const CubeWidget& cube)
 
 } // namespace
 
-bool registerCubeProtocol(RuntimeAgent& agent, CubeWidget& cube, ModuleManager& modules)
+bool registerCubeProtocol(RuntimeAgent& agent, MainWindow& window, ModuleManager& modules)
 {
+    CubeWidget& cube = *window.cubeWidget();
     bool registered = true;
 
     // One entry per command, and the only place this application's set is
@@ -57,6 +60,34 @@ bool registerCubeProtocol(RuntimeAgent& agent, CubeWidget& cube, ModuleManager& 
                                            std::move(handler))
             && registered;
     };
+
+    // The ABI callbacks are always present, while this application decides which
+    // targets they may patch and under which admission policy.
+    registered = agent.registerPatchProvider(
+                     [&modules](void* target,
+                                void* replacement,
+                                const quint64 owner,
+                                const std::uint32_t flags,
+                                RuntimeAgentPatchBinding& out,
+                                QString& error) {
+                         runtime_agent::PatchBinding binding;
+                         const int result = modules.bindReplacement(
+                             target, replacement, owner,
+                             (flags & RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE) != 0,
+                             binding, error);
+                         if (result == 0) {
+                             out.id = binding.id;
+                             out.original = binding.original;
+                             out.previous = binding.previous;
+                         }
+                         return result;
+                     },
+                     [&modules](const std::uint64_t bindingId,
+                                const quint64 owner,
+                                QString& error) {
+                         return modules.releaseBinding(bindingId, owner, error);
+                     })
+        && registered;
 
     add("cube.state", {}, [&agent, &cube](QLocalSocket* socket,
                                           const QJsonValue& requestId,
@@ -138,6 +169,68 @@ bool registerCubeProtocol(RuntimeAgent& agent, CubeWidget& cube, ModuleManager& 
         agent.sendSuccess(socket, requestId, result);
     });
 
+    add("patch.load", {"path"}, [&agent, &modules](QLocalSocket* socket,
+                                                   const QJsonValue& requestId,
+                                                   const QJsonObject& parameters) {
+        QString error;
+        ModuleManager::LoadedModule* module = modules.loadEntryPatch(
+            parameters.value(QStringLiteral("path")).toString(), error);
+        if (module == nullptr) {
+            agent.sendError(socket, requestId, QStringLiteral("load_failed"), error);
+            return;
+        }
+        const QJsonObject result{
+            {QStringLiteral("moduleId"), QString::number(module->id)},
+            {QStringLiteral("name"), module->name},
+            {QStringLiteral("path"), module->path},
+        };
+        agent.publishEvent(QStringLiteral("patch.loaded"), result);
+        agent.sendSuccess(socket, requestId, result);
+    });
+
+    add("patch.activate", {"moduleId", "acceptIncompleteCoverage"},
+        [&agent, &modules](QLocalSocket* socket,
+                          const QJsonValue& requestId,
+                          const QJsonObject& parameters) {
+            quint64 moduleId = 0;
+            if (!RuntimeAgent::parseUnsignedInteger(
+                    parameters.value(QStringLiteral("moduleId")), moduleId)) {
+                agent.sendError(socket, requestId, QStringLiteral("invalid_module_id"),
+                                QStringLiteral("moduleId must be an unsigned integer"));
+                return;
+            }
+            const bool acceptIncomplete = parameters
+                .value(QStringLiteral("acceptIncompleteCoverage"))
+                .toBool(false);
+            QString error;
+            if (!modules.activateEntryPatch(moduleId, acceptIncomplete, error)) {
+                agent.sendError(socket, requestId, QStringLiteral("patch_failed"), error);
+                return;
+            }
+            const QJsonObject result = modules.patchStatus();
+            agent.publishEvent(QStringLiteral("patch.activated"), result);
+            agent.sendSuccess(socket, requestId, result);
+        });
+
+    add("patch.rollback", {}, [&agent, &modules](QLocalSocket* socket,
+                                                 const QJsonValue& requestId,
+                                                 const QJsonObject&) {
+        QString error;
+        if (!modules.rollback(error)) {
+            agent.sendError(socket, requestId, QStringLiteral("rollback_failed"), error);
+            return;
+        }
+        const QJsonObject result = modules.patchStatus();
+        agent.publishEvent(QStringLiteral("patch.rolledBack"), result);
+        agent.sendSuccess(socket, requestId, result);
+    });
+
+    add("patch.status", {}, [&agent, &modules](QLocalSocket* socket,
+                                               const QJsonValue& requestId,
+                                               const QJsonObject&) {
+        agent.sendSuccess(socket, requestId, modules.patchStatus());
+    });
+
     // A snippet asking for the render executor runs with the widget's context
     // current, at the next paint. Queuing is the whole of it, so there is no
     // way for this to fail to schedule.
@@ -162,6 +255,46 @@ bool registerCubeProtocol(RuntimeAgent& agent, CubeWidget& cube, ModuleManager& 
                              CUBE_STEP_ABI, 8, 16, QLatin1Char('0')));
                      })
         && registered;
+    registered = agent.registerHelloField(
+                     QStringLiteral("sourceDir"),
+                     [] { return QJsonValue(QStringLiteral(DEMO_SOURCE_DIR)); })
+        && registered;
+    registered = agent.registerHelloField(
+                     QStringLiteral("buildDir"),
+                     [] { return QJsonValue(QStringLiteral(DEMO_BUILD_DIR)); })
+        && registered;
+    registered = agent.registerHelloField(
+                     QStringLiteral("buildType"),
+                     [] { return QJsonValue(QStringLiteral(DEMO_BUILD_TYPE)); })
+        && registered;
+    registered = agent.registerHelloField(
+                     QStringLiteral("patch"),
+                     [&modules] { return QJsonValue(modules.patchStatus()); })
+        && registered;
+
+    QObject::connect(&window, &MainWindow::demoJobStarted, &agent,
+                     [&agent](const qulonglong id, const QString& name) {
+                         agent.publishEvent(QStringLiteral("operation.started"), QJsonObject{
+                             {QStringLiteral("operationId"), QString::number(id)},
+                             {QStringLiteral("kind"), QStringLiteral("demoJob")},
+                             {QStringLiteral("name"), name},
+                         });
+                     });
+    QObject::connect(&window, &MainWindow::demoJobProgress, &agent,
+                     [&agent](const qulonglong id, const int percent) {
+                         agent.publishEvent(QStringLiteral("operation.progress"), QJsonObject{
+                             {QStringLiteral("operationId"), QString::number(id)},
+                             {QStringLiteral("percent"), percent},
+                         });
+                     });
+    QObject::connect(&window, &MainWindow::demoJobFinished, &agent,
+                     [&agent](const qulonglong id, const QString& outcome) {
+                         agent.publishEvent(QStringLiteral("operation.finished"), QJsonObject{
+                             {QStringLiteral("operationId"), QString::number(id)},
+                             {QStringLiteral("kind"), QStringLiteral("demoJob")},
+                             {QStringLiteral("outcome"), outcome},
+                         });
+                     });
 
     // The widget's signals, published through the agent. Sequence numbers,
     // retained history and who is subscribed are all its business; which
