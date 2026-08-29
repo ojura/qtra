@@ -580,9 +580,9 @@ bool decodeInstruction(const std::uint8_t* at,
         return false;
     }
 
-    // Control forms retain their specific classification even if a table range
-    // includes their opcode. This is an invariant rather than the planner's only
-    // protection; the planner reports the control-specific reason first.
+    // Control forms keep their specific classification even where a table range
+    // includes their opcode. The planner refuses them anyway and says why, so
+    // this is a second answer to the same question and not the only one.
     decoded.movable = movable && !decoded.relativeBranch && !decoded.transfersControl;
     return true;
 }
