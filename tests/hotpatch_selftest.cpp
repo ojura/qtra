@@ -192,7 +192,8 @@ int main(int argc, char** argv)
         std::array<std::uint8_t, runtime_agent::patchAreaBytes> beforeRefusal{};
         std::memcpy(beforeRefusal.data(), site.patchAddress, beforeRefusal.size());
 
-        if (runtime_agent::observedThreadCount() < 2) {
+        const auto observed = runtime_agent::observedThreadCount();
+        if (!observed.has_value() || *observed < 2) {
             std::cerr << "the worker thread was not observed, so the refusal proves nothing\n";
             keepRunning.store(false, std::memory_order_release);
             worker.join();

@@ -13,6 +13,32 @@ option(BUILD_QT_APP "Build the Qt 6/OpenGL application and Qt-native snippets" O
 option(BUILD_HOTPATCH_SELFTEST "Build the standalone raw hotpatch self-test" ON)
 option(ENABLE_CET "Build x86-64 code with Intel CET/IBT landing pads" OFF)
 
+# Keeping the evidence that says whether replacing a function is safe.
+#
+# Deciding that needs to know whether callers could see the body, whether the
+# entry has one name, and whether the compiler made copies. All three are known
+# at build time and unrecoverable from an optimized binary afterwards, so they
+# are kept beside the artifacts and the compile database rather than rediscovered
+# from memory later.
+#
+# Split DWARF keeps the debug information out of the running binary, which stays
+# optimized. The clone dumps record inlining and specialization directly, in a
+# form that needs no DWARF reader.
+option(PATCH_READY "Keep the build evidence a coverage decision needs" OFF)
+if(PATCH_READY)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        add_compile_options(-g -gsplit-dwarf -fdump-ipa-clones)
+    else()
+        message(FATAL_ERROR "PATCH_READY currently requires GCC")
+    endif()
+endif()
+
+# The manifest a coverage decision is read from, written after the link because
+# it names the build id of the binary it describes.
+if(PATCH_READY AND BUILD_QT_APP)
+    set(RUNTIME_AGENT_COVERAGE_MANIFEST "${CMAKE_BINARY_DIR}/coverage-manifest.json")
+endif()
+
 if(ENABLE_CET)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
        AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
@@ -185,6 +211,20 @@ if(BUILD_QT_APP)
             VERBATIM
         )
         add_custom_target(runtime_agent_build_id DEPENDS ${RUNTIME_AGENT_BUILD_ID_HEADER})
+
+        if(PATCH_READY)
+            add_custom_command(
+                OUTPUT ${RUNTIME_AGENT_COVERAGE_MANIFEST}
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/analyze_coverage.py
+                        --binary $<TARGET_FILE:qt_runtime_cube>
+                        --build-dir ${CMAKE_BINARY_DIR}
+                        --output ${RUNTIME_AGENT_COVERAGE_MANIFEST}
+                DEPENDS qt_runtime_cube ${CMAKE_SOURCE_DIR}/tools/analyze_coverage.py
+                COMMENT "Deciding whether replacing the target can be complete"
+                VERBATIM)
+            add_custom_target(runtime_agent_coverage ALL
+                DEPENDS ${RUNTIME_AGENT_COVERAGE_MANIFEST})
+        endif()
         set(RUNTIME_AGENT_CAN_STAMP TRUE)
     else()
         message(STATUS

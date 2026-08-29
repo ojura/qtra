@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -58,7 +59,9 @@ struct PatchStatus {
     // A thread count above one is not proof the write was safe; it is what the
     // policy was judged against.
     std::string quiescedBy;
-    std::size_t threadsAtInstall = 0;
+    // Absent when the count could not be read, which is a different thing from
+    // a process with no threads.
+    std::optional<std::size_t> threadsAtInstall;
 
     // Whose replacement is selected. Zero when the original is running.
     std::uint64_t selectedBinding = 0;
@@ -146,7 +149,7 @@ private:
     std::unique_ptr<GatewayRecord> m_record;
     std::vector<std::uint8_t> m_original;
     std::string m_quiescedBy;
-    std::size_t m_threadsAtInstall = 0;
+    std::optional<std::size_t> m_threadsAtInstall;
     std::vector<Generation> m_generations;
     std::uint64_t m_nextBinding = 1;
 

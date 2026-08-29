@@ -430,8 +430,9 @@ QJsonObject ModuleManager::patchStatus() const
         {QStringLiteral("quiescedBy"), patch.quiescedBy.empty()
             ? QJsonValue()
             : QJsonValue(QString::fromStdString(patch.quiescedBy))},
-        {QStringLiteral("threadsAtInstall"),
-         static_cast<qint64>(patch.threadsAtInstall)},
+        {QStringLiteral("threadsAtInstall"), patch.threadsAtInstall.has_value()
+            ? QJsonValue(static_cast<qint64>(*patch.threadsAtInstall))
+            : QJsonValue()},
     };
     if (LoadedModule* loaded = module(moduleId); loaded != nullptr) {
         result.insert(QStringLiteral("module"), moduleJson(*loaded));
