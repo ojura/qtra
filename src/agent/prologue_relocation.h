@@ -154,19 +154,24 @@ struct ProloguePlan {
     bool keepsLandingPad = false;
     bool adjustedRipRelative = false;
 
-    // Exactly the bytes the planner read, kept so installing can check they
-    // are still what it decided about.
+    // The bytes the planner is about to move, kept so installing can check
+    // they are still the ones it decided about.
     //
-    // Planning and installing are separate calls with a gap between them, and
-    // anything may write to a function's entry in that gap: another patcher, a
-    // probe, a debugger. What was swept is then not what would be copied, and
-    // the sweep's conclusion that no branch enters these bytes was reached
-    // about different instructions.
+    // Planning and installing are separate calls, and anything may write to a
+    // function in the gap: another patcher, a probe, a debugger.
     std::vector<std::uint8_t> expectedBytes;
+
+    // A summary of the whole body the sweep read, for a wider reason.
+    //
+    // The sweep's conclusion is about the entire function and not its opening.
+    // Somebody could leave the opening untouched and introduce a branch into it
+    // from further down, and comparing only the bytes being moved would see
+    // nothing wrong. This covers what that conclusion covers.
+    std::uint64_t bodyDigest = 0;
 
     [[nodiscard]] bool valid() const noexcept
     {
-        return patchAddress != nullptr && takenBytes != 0
+        return patchAddress != nullptr && takenBytes != 0 && functionBytes != 0
             && expectedBytes.size() == takenBytes;
     }
 };
@@ -207,9 +212,9 @@ struct RelocatedPrologue {
 // function.
 //
 // Closing it needs a relay near the entry, holding a slot the far address is
-// loaded from, which is the shape the prepared backend already uses: one write
-// to install, and a store to choose afterwards. Until that exists this backend
-// serves a replacement in the same image.
+// loaded from, so the entry is written once and what it reaches is chosen with
+// a store afterwards, as the prepared backend does. Until that exists this
+// backend serves a replacement in the same image.
 //
 // The quiescer is asked to stop execution for the one write, because several
 // bytes change and a thread standing inside them would execute the join of what
