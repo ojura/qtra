@@ -9,6 +9,7 @@
 #include "agent/stop_the_world.h"
 
 #include <atomic>
+#include <csignal>
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -235,6 +236,21 @@ int main()
 
         keepSpinning.store(false, std::memory_order_release);
         worker.join();
+    }
+
+    std::printf("a second policy asking for a different signal\n");
+    {
+        // One handler is installed for the life of the process, because a
+        // signal sent earlier can still arrive. A second instance naming
+        // another signal would send one nothing handles, and a real-time signal
+        // with no handler ends the process.
+        runtime_agent::StopTheWorldQuiescer other(SIGRTMIN + 4);
+        std::string refusal;
+        auto denied = other.acquire(
+            runtime_agent::WriteRegion{reinterpret_cast<void*>(&quietCorner), 16}, refusal);
+        check(denied == nullptr, "is refused instead of sending a signal nothing handles");
+        check(refusal.find("already parks threads with signal") != std::string::npos,
+              refusal.empty() ? "with a reason" : refusal.c_str());
     }
 
     std::printf("without being told which bytes\n");

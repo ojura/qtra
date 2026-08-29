@@ -115,6 +115,7 @@ bool namesSymbol(const char* relocationSymbol, const std::string& wanted)
 }
 
 struct Search {
+    std::string protectionError;
     const std::string* object = nullptr;
     const std::string* symbol = nullptr;
     GotSite* found = nullptr;
@@ -157,11 +158,14 @@ int visit(dl_phdr_info* object, std::size_t, void* opaque)
         search.found->symbol = name;
         search.found->slot = slot;
         search.found->resolved = *slot;
-        // Recorded at resolve time, so a restore can put back what the loader
-        // chose instead of a guess about what it must have been.
-        std::string ignored;
-        if (!pageProtectionOf(slot, search.found->pageProtection, ignored)) {
-            search.found->pageProtection = PROT_READ;
+        // Recorded at resolve time, so a restore puts back what the loader
+        // chose. Failing to read it fails the resolve: defaulting to read-only
+        // is how the permissions get downgraded, which is the thing this field
+        // exists to prevent, and a site that cannot be restored correctly is
+        // not one anybody should be handed.
+        if (!pageProtectionOf(slot, search.found->pageProtection, search.protectionError)) {
+            search.found->slot = nullptr;
+            return 1;
         }
         return 1;
     }
@@ -270,6 +274,12 @@ bool resolveGotSlot(const std::string& callerObject,
     if (!search.sawObject) {
         error = "no loaded object named '" + callerObject
             + "'; the name is matched by suffix, so a versioned file name works";
+        return false;
+    }
+    if (!search.protectionError.empty()) {
+        error = "the slot for '" + symbol + "' was found and what the loader had done to its "
+                "page could not be read, so restoring it later could not put that back: "
+            + search.protectionError;
         return false;
     }
     if (!site.valid()) {

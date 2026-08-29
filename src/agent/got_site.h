@@ -37,7 +37,8 @@ struct GotSite {
     // Empty for the main executable.
     std::string caller;
 
-    // The symbol being called, as the relocation names it, version and all.
+    // The symbol being called, as the dynamic string table spells it, which is
+    // a bare name with no version.
     std::string symbol;
 
     // The slot itself, which is what a store goes into.
@@ -81,9 +82,7 @@ struct GotSite {
 // calls two versions of the same name, this finds the first relocation naming
 // it, which is not a choice anyone made.
 //
-// symbol matches the relocation's symbol name, either exactly or ignoring the
-// "@version" suffix, so a caller can name a function without knowing which
-// version tag the library assigned it.
+// symbol has to match the relocation's name exactly.
 [[nodiscard]] bool resolveGotSlot(const std::string& callerObject,
                                   const std::string& symbol,
                                   GotSite& site,
@@ -115,7 +114,8 @@ struct GotSite {
 // replacement with the wrong signature is a crash the caller has asked for.
 [[nodiscard]] bool redirectGotSlot(const GotSite& site, void* replacement, std::string& error);
 
-// Puts back what the loader resolved, from what the site recorded.
+// Puts back exactly the value the slot held when it was resolved, which for a
+// lazily bound object is the stub that was there and not the function.
 [[nodiscard]] bool restoreGotSlot(const GotSite& site, std::string& error);
 
 } // namespace runtime_agent

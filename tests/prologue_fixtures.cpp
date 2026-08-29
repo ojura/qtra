@@ -107,4 +107,39 @@ fixtureBranchesIntoItsPrologue:
     jl   2b
     ret
 .size fixtureBranchesIntoItsPrologue, .-fixtureBranchesIntoItsPrologue
+
+# Loads a value into r11 among the bytes a jump would be written over, and reads
+# it back afterwards. Anything that uses r11 to get from the copy back to the
+# body returns a different answer, with nothing crashing to draw attention.
+.globl fixtureKeepsAValueInR11
+.type fixtureKeepsAValueInR11, @function
+fixtureKeepsAValueInR11:
+    endbr64
+    mov  $0x5EED, %r11d
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    mov  %r11d, %eax
+    ret
+.size fixtureKeepsAValueInR11, .-fixtureKeepsAValueInR11
+
+# Calls through a register in the first bytes a jump would be written over.
+#
+# Planned and never run: the register holds nothing, so calling it would go
+# somewhere arbitrary. What is being tested is that the planner refuses it, and
+# setting the register up first would push the call past the bytes taken and
+# test nothing.
+.globl fixtureCallsThroughARegister
+.type fixtureCallsThroughARegister, @function
+fixtureCallsThroughARegister:
+    endbr64
+    call *%rax
+    nop
+    nop
+    nop
+    ret
+.size fixtureCallsThroughARegister, .-fixtureCallsThroughARegister
 )");

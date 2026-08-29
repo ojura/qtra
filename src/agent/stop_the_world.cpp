@@ -226,8 +226,20 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
     // as late and returns. Restoring the old disposition while a signal may
     // still be pending would let the default action run, and for a real-time
     // signal the default action ends the process.
-    static std::atomic<bool> handlerInstalled{false};
-    if (!handlerInstalled.load(std::memory_order_acquire)) {
+    // Which signal the handler is installed for, remembered so a second
+    // instance asking for a different one is refused instead of sending a
+    // signal nothing handles. A real-time signal with no handler ends the
+    // process, so getting this wrong kills whatever it was meant to protect.
+    static std::atomic<int> installedFor{0};
+    const int already = installedFor.load(std::memory_order_acquire);
+    if (already != 0 && already != m_signal) {
+        arranging.store(false, std::memory_order_release);
+        error = "this process already parks threads with signal " + std::to_string(already)
+            + ", and one handler is installed for the life of the process because a signal "
+              "sent earlier can still arrive. Use that signal or none";
+        return nullptr;
+    }
+    if (already == 0) {
         struct sigaction parking {};
         parking.sa_sigaction = &parkHandler;
         parking.sa_flags = SA_SIGINFO | SA_RESTART;
@@ -239,7 +251,7 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
                 + std::strerror(failure);
             return nullptr;
         }
-        handlerInstalled.store(true, std::memory_order_release);
+        installedFor.store(m_signal, std::memory_order_release);
     }
 
     // Everything the stopped phase needs, allocated before anything stops. A

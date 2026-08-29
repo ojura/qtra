@@ -92,6 +92,29 @@ struct DecodedInstruction {
     // A branch whose destination is written as a distance. Collected for the
     // sweep, refused inside the range being taken.
     bool relativeBranch = false;
+
+    // Whether this hands control somewhere, by any means: a call or jump
+    // through a register or memory, a return, or an entry into the kernel.
+    //
+    // Separate from relativeBranch, which is about an instruction that would
+    // mean something different somewhere else. This is about an instruction
+    // that can put a thread outside these bytes with a way back into them. A
+    // thread parked in a callee has its return address in the range about to be
+    // overwritten, and no policy that reads instruction pointers can see it.
+    //
+    // The sweep cannot help either: where an indirect branch goes is decided at
+    // run time, so a scan cannot prove it does not enter the taken bytes.
+    bool transfersControl = false;
+
+    // Whether where it goes cannot be established by reading the function.
+    //
+    // An indirect jump takes its destination from a register or memory at the
+    // moment it runs. A sweep can see that the instruction is there and can say
+    // nothing about where it lands, so a body containing one is a body in which
+    // nothing can be shown not to enter the bytes being taken. An indirect call
+    // is different in one way that matters: it returns, so what it threatens is
+    // a return address and not an entry, which is why the two are told apart.
+    bool unprovableTarget = false;
     const std::uint8_t* branchTarget = nullptr;
 };
 

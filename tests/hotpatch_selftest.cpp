@@ -391,6 +391,72 @@ int main(int argc, char** argv)
             return 52;
         }
 
+        // A function that leaves something in r11 among the bytes being moved
+        // still returns it.
+        //
+        // r11 is caller-saved, so a gateway at an entry may use it. The jump
+        // back at the end of a copy is not at an entry: the instructions just
+        // copied are the function's own, and one of them putting a value in
+        // r11 that the rest of the function reads is this. A jump through r11
+        // there returns a different number with nothing crashing.
+        {
+            const int expected = fixtureKeepsAValueInR11();
+            runtime_agent::ProloguePlan r11Plan;
+            std::string r11Why;
+            // Required to plan, not tried. This fixture is written so it can be,
+            // so a refusal here is a regression in the planner and not a
+            // reason to skip the check the fixture exists for.
+            if (!runtime_agent::planPrologueRelocation(
+                    reinterpret_cast<void*>(&fixtureKeepsAValueInR11), r11Plan, r11Why)) {
+                std::cerr << "the r11 fixture could not be planned: " << r11Why << '\n';
+                return 70;
+            }
+            {
+                runtime_agent::RelocatedPrologue moved;
+                runtime_agent::SingleThreadQuiescer alone;
+                if (!runtime_agent::installRelocatedPrologue(
+                        r11Plan, reinterpret_cast<void*>(&replacementAddsOne), alone,
+                        *runtime_agent::processTextWriter(), moved, r11Why)) {
+                    std::cerr << "the r11 fixture could not be relocated: " << r11Why << '\n';
+                    return 71;
+                }
+                const auto original =
+                    reinterpret_cast<int (*)()>(moved.original);
+                const int throughCopy = original();
+                if (!runtime_agent::restoreRelocatedPrologue(
+                        moved, alone, *runtime_agent::processTextWriter(), r11Why)) {
+                    std::cerr << "the r11 fixture could not be put back: " << r11Why << '\n';
+                    return 72;
+                }
+                if (throughCopy != expected) {
+                    std::cerr << "a value the function left in r11 did not survive the jump "
+                                 "back from the copy: expected " << expected << ", got "
+                              << throughCopy << '\n';
+                    return 73;
+                }
+                if (fixtureKeepsAValueInR11() != expected) {
+                    std::cerr << "the r11 fixture does not do what it did before\n";
+                    return 74;
+                }
+            }
+        }
+
+        // A call through a register in the opening bytes has to be refused.
+        {
+            runtime_agent::ProloguePlan callPlan;
+            std::string callWhy;
+            if (runtime_agent::planPrologueRelocation(
+                    reinterpret_cast<void*>(&fixtureCallsThroughARegister), callPlan,
+                    callWhy)) {
+                std::cerr << "a prologue calling through a register was accepted\n";
+                return 75;
+            }
+            if (callWhy.find("hands control somewhere else") == std::string::npos) {
+                std::cerr << "refused for the wrong reason: " << callWhy << '\n';
+                return 76;
+            }
+        }
+
         // A plan that succeeds, and what it says about the site.
         why.clear();
         if (!runtime_agent::planPrologueRelocation(

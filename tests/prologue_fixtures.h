@@ -26,4 +26,24 @@ int fixtureOpensWithABranch(void);
 // Loops back to a place inside the bytes a jump would be written over.
 int fixtureBranchesIntoItsPrologue(void);
 
+// Puts a value in r11 in its opening bytes and reads it afterwards.
+//
+// r11 is caller-saved, so a gateway at a function's entry may use it freely:
+// nothing has run yet. The jump back at the end of a relocated copy is not at
+// an entry, and the instructions just copied are the function's own. One of
+// them putting something in r11 that the rest of the function reads is exactly
+// this, and a jump through r11 there returns a different answer with no crash
+// to notice.
+int fixtureKeepsAValueInR11(void);
+
+// Calls through a register in its opening bytes. Planned, never called: the
+// register holds nothing.
+//
+//
+// A thread that has gone through that call is standing in the callee with its
+// return address inside the bytes a jump would be written over. Nothing that
+// reads instruction pointers sees it, and where the call goes is decided at run
+// time, so scanning the body cannot rule it out either.
+int fixtureCallsThroughARegister(void);
+
 } // extern "C"

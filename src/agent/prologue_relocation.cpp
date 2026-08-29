@@ -22,9 +22,24 @@ constexpr std::size_t jumpBytes = 5;
 // endbr64, which a function begins with on a build asking for landing pads.
 constexpr std::uint8_t landingPad[]{0xF3U, 0x0FU, 0x1EU, 0xFAU};
 
-// movabs r11, imm64; jmp r11. Reaches any address, which the jump back from the
-// copy needs, since nothing bounds how far the copy sits from the body.
-constexpr std::size_t absoluteJumpBytes = 13;
+// A direct relative jump, which is what the tail of the copy uses.
+//
+// An absolute jump through a register would reach anywhere, but there is no
+// register free to reach it with. r11 is caller-saved, so a gateway written at
+// a function's entry may use it: nothing has run yet. The tail of a relocated
+// prologue is not an entry. The instructions just copied are the function's
+// own, and one of them may have put something in r11 that the rest of the
+// function is about to read. Overwriting it there corrupts the function in a
+// way that shows up as a wrong value and not as a crash.
+//
+// It also keeps the jump direct, which matters where indirect branches must
+// land on a marker: the continuation is in the middle of a function and has
+// none.
+//
+// The copy is placed near the function for exactly this reason, so the
+// displacement fits. Refusing when it does not is the only other answer,
+// because the register this would need is not available.
+constexpr std::size_t relativeJumpBytes = 5;
 
 std::string hex(const std::uint8_t byte)
 {
@@ -223,10 +238,15 @@ bool decodeInstruction(const std::uint8_t* const at,
     unsigned form = formUnknown;
     bool impliedImm8 = false;
     std::uint8_t primaryOpcode = 0;
+    bool escaped = false;
 
     if (at[offset] == 0x0FU) {
+        escaped = true;
         ++offset;
         const std::uint8_t second = at[offset];
+        // Recorded, because what this instruction is has to be answerable
+        // afterwards and not only how long it is.
+        primaryOpcode = second;
         if (second == 0x38U || second == 0x3AU) {
             // The three-byte maps. Everything in the first takes an addressing
             // byte, everything in the second takes one and a byte of immediate.
@@ -315,7 +335,30 @@ bool decodeInstruction(const std::uint8_t* const at,
             delta = wide;
         }
         decoded.relativeBranch = true;
+        decoded.transfersControl = true;
         decoded.branchTarget = at + offset + delta;
+    }
+
+    // Anything that hands control somewhere, by whatever means.
+    //
+    // The addressing byte's middle field says which of the eight operations
+    // sharing 0xFF this is: two calls, two jumps, a push, and an increment or
+    // decrement. Only the middle four move control, and the two jumps are worse
+    // than the two calls: a jump's destination is decided at run time, so a
+    // sweep over the body cannot show it does not enter the bytes being taken.
+    if (!escaped && primaryOpcode == 0xFFU && modrmReg >= 2U && modrmReg <= 5U) {
+        decoded.transfersControl = true;
+        decoded.unprovableTarget = modrmReg == 4U || modrmReg == 5U;
+    }
+    if (!escaped
+        && (primaryOpcode == 0xC2U || primaryOpcode == 0xC3U || primaryOpcode == 0xCAU
+            || primaryOpcode == 0xCBU || primaryOpcode == 0xCCU || primaryOpcode == 0xCDU
+            || primaryOpcode == 0xCEU || primaryOpcode == 0xCFU)) {
+        decoded.transfersControl = true;  // returns and software interrupts
+    }
+    if (escaped
+        && (primaryOpcode == 0x05U || primaryOpcode == 0x34U || primaryOpcode == 0x35U)) {
+        decoded.transfersControl = true;  // syscall, sysenter, sysexit
     }
 
     std::size_t immediate = 0;
@@ -413,18 +456,23 @@ void* allocateNear(const std::uint8_t* const target, const std::size_t bytes)
     return anywhere == MAP_FAILED ? nullptr : anywhere;
 }
 
-void writeAbsoluteJump(std::uint8_t* const at, const void* const destination)
+[[nodiscard]] bool writeRelativeJump(std::uint8_t* const at, const void* const destination,
+                                     std::string& error)
 {
-    // movabs r11, <destination>. r11 is caller-saved under the System V AMD64
-    // ABI, so nothing arriving here is holding anything in it.
-    at[0] = 0x49U;
-    at[1] = 0xBBU;
-    const auto value = reinterpret_cast<std::uintptr_t>(destination);
-    std::memcpy(at + 2, &value, sizeof(value));
-    // jmp r11
-    at[10] = 0x41U;
-    at[11] = 0xFFU;
-    at[12] = 0xE3U;
+    const auto from = reinterpret_cast<std::uintptr_t>(at) + relativeJumpBytes;
+    const auto to = reinterpret_cast<std::uintptr_t>(destination);
+    const auto delta = static_cast<std::int64_t>(to) - static_cast<std::int64_t>(from);
+    if (delta < INT32_MIN || delta > INT32_MAX) {
+        error = "the copy was placed too far from the function for the jump back to reach "
+                "it, and there is no register free to make that jump through: whatever the "
+                "copied instructions left in one is about to be read by the rest of the "
+                "function";
+        return false;
+    }
+    at[0] = 0xE9U;
+    const auto narrowed = static_cast<std::int32_t>(delta);
+    std::memcpy(at + 1, &narrowed, sizeof(narrowed));
+    return true;
 }
 
 } // namespace
@@ -480,6 +528,15 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
                   "not rewrite branches, so the site is refused";
             return false;
         }
+        if (decoded.transfersControl) {
+            error = "the instruction at offset " + std::to_string(taken)
+                + " of this function's opening bytes hands control somewhere else. A thread "
+                  "that has gone through it is standing in the callee with its return "
+                  "address inside the bytes about to be overwritten, and nothing that reads "
+                  "instruction pointers can see that. Where it goes is decided at run time, "
+                  "so scanning the body cannot rule it out either";
+            return false;
+        }
         if (decoded.ripRelative) {
             plan.adjustedRipRelative = true;
         }
@@ -504,7 +561,26 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
             return false;
         }
 
-        if (decoded.relativeBranch && decoded.branchTarget > takenBegin
+        // An indirect jump anywhere in the body takes its destination at the
+        // moment it runs, so nothing read here can show it does not land in the
+        // bytes being taken. The sweep's whole claim is that no branch enters
+        // them, and one of these makes that claim unavailable.
+        if (decoded.unprovableTarget) {
+            std::ostringstream message;
+            message << "the instruction at offset " << offset
+                    << " jumps to an address it works out when it runs, so nothing read "
+                       "here can show it does not land in the "
+                    << taken << " bytes a jump would be written over";
+            error = message.str();
+            plan = ProloguePlan{};
+            return false;
+        }
+
+        // The first overwritten byte counts. A loop back to exactly there
+        // lands on the jump that was written, so the body starts calling the
+        // replacement, and the original handed out no longer behaves as the
+        // function did.
+        if (decoded.relativeBranch && decoded.branchTarget >= takenBegin
             && decoded.branchTarget < takenEnd) {
             std::ostringstream message;
             message << "the instruction at offset " << offset << " branches to offset "
@@ -565,7 +641,7 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
 
     // The copy, its landing pad, and the jump back.
     const std::size_t trampolineBytes =
-        sizeof(landingPad) + plan.takenBytes + absoluteJumpBytes;
+        sizeof(landingPad) + plan.takenBytes + relativeJumpBytes;
     void* const trampoline = allocateNear(patchAt, trampolineBytes);
     if (trampoline == nullptr) {
         error = "no memory could be mapped for the copy of this prologue";
@@ -614,7 +690,11 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         offset += decoded.length;
     }
 
-    writeAbsoluteJump(copy + sizeof(landingPad) + plan.takenBytes, patchAt + plan.takenBytes);
+    if (!writeRelativeJump(copy + sizeof(landingPad) + plan.takenBytes,
+                           patchAt + plan.takenBytes, error)) {
+        (void)::munmap(trampoline, trampolineBytes);
+        return false;
+    }
 
     if (::mprotect(trampoline, trampolineBytes, PROT_READ | PROT_EXEC) != 0) {
         const std::string reason = std::strerror(errno);
