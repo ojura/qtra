@@ -271,20 +271,13 @@ QJsonArray ModuleManager::list() const
 
 bool ModuleManager::activateDispatchPatch(const quint64 id, QString& error)
 {
-    LoadedModule* loaded = module(id);
-    if (loaded == nullptr || loaded->kind != Kind::CubePatch || loaded->cubePatch == nullptr) {
-        error = QStringLiteral("module %1 is not a cube patch").arg(id);
-        return false;
-    }
-    if (!resetActivePatch(error)) {
-        return false;
-    }
-
-    m_activeDispatchModule = id;
-    m_cube->installDispatchStep(
-        loaded->cubePatch->step,
-        QStringLiteral("dispatch: %1").arg(loaded->name));
-    return true;
+    Q_UNUSED(id)
+    error = QStringLiteral(
+        "the application holds no function pointer to replace. Replacing its step "
+        "function is done by rewriting the function's own entry, which is what "
+        "mode=entry does; a cooperative pointer is exercised by the hotpatch self-test "
+        "instead of by the application");
+    return false;
 }
 
 bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
@@ -349,6 +342,55 @@ bool ModuleManager::activateEntryPatch(const quint64 id, QString& error)
     m_cube->setActivePatchLabel(QStringLiteral("entry: %1").arg(loaded->name));
     return true;
 #endif
+}
+
+int ModuleManager::bindReplacement(void* target,
+                                   void* replacement,
+                                   const quint64 owner,
+                                   runtime_agent::PatchBinding& binding,
+                                   QString& error)
+{
+    if (target != reinterpret_cast<void*>(&cube_step_builtin)) {
+        error = QStringLiteral("this adapter resolves one target, the cube's step function");
+        return -1;
+    }
+
+    runtime_agent::PatchSite site;
+    std::string nativeError;
+    if (const auto recorded = m_patches.status().site; recorded.has_value()) {
+        site = *recorded;
+    } else if (!runtime_agent::resolvePatchSite(target,
+                                                runtime_agent::patchAreaBytes,
+                                                site,
+                                                nativeError)) {
+        error = QString::fromStdString(nativeError);
+        return -1;
+    } else {
+        site.name = QStringLiteral("cube_step_builtin").toStdString();
+    }
+
+    CubeTimerQuiescer quiescer(m_cube);
+    if (!m_patches.bind(site, replacement, owner, quiescer, binding, nativeError)) {
+        error = QString::fromStdString(nativeError);
+        return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;
+    }
+    m_cube->setActivePatchLabel(QStringLiteral("entry: binding %1").arg(binding.id));
+    return 0;
+}
+
+int ModuleManager::releaseBinding(const std::uint64_t bindingId,
+                                  const quint64 owner,
+                                  QString& error)
+{
+    std::string nativeError;
+    if (!m_patches.unbind(bindingId, owner, nativeError)) {
+        error = QString::fromStdString(nativeError);
+        return error.contains(QStringLiteral("another module")) ? -2 : -1;
+    }
+    if (!m_patches.replacementSelected()) {
+        m_cube->setActivePatchLabel(QStringLiteral("builtin"));
+    }
+    return 0;
 }
 
 bool ModuleManager::rollback(QString& error)
@@ -416,9 +458,6 @@ bool ModuleManager::resetActivePatch(QString& error)
 
     m_activeEntryModule = 0;
     m_activeDispatchModule = 0;
-    // Dispatch is the application's own seam, so putting it back is the
-    // adapter's job and not the patch manager's.
-    m_cube->resetDispatchStep();
     return true;
 }
 

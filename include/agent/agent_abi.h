@@ -27,7 +27,7 @@ extern "C" {
 // This is a prototype under active development: there is no compatibility path
 // and none is wanted. A refused load fails where the caller can see it, and a
 // mismatched one fails somewhere inside the process.
-inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0003'0000u;
+inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0004'0000u;
 
 // RUNTIME_AGENT_ABI covers this interface. It says nothing about the
 // application's own types, which a module compiled with -fno-access-control
@@ -68,6 +68,19 @@ enum RuntimeAgentLogLevel : std::int32_t {
 // This is intentionally a small, stable C ABI. A snippet may include all of the
 // application's C++ headers, but its entry point and host callbacks remain easy
 // to validate and version.
+// What a module gets back when it binds a replacement.
+struct RuntimeAgentPatchBinding {
+    std::uint64_t id;
+
+    // The original function, reached without reentering the redirection, so a
+    // replacement may call it. Valid as an indirect branch target under CET.
+    void* original;
+
+    // What this binding displaced, which is the original when nothing else was
+    // bound. A replacement that wants to chain calls this.
+    void* previous;
+};
+
 struct RuntimeAgentHost {
     std::uint32_t abi_version;
     std::uint32_t struct_size;
@@ -178,6 +191,34 @@ struct RuntimeAgentHost {
     // capacity of 0 queries the length. The host stamps each entry, so
     // provenance does not depend on the depositor reporting it honestly.
     std::int64_t (*stash_list)(void* agent_context, char* buffer, std::int64_t capacity);
+
+    // Replacing a function in the host.
+    //
+    // A module compiled against the host's headers can produce a function with
+    // the right signature, and this is how it asks for that function to be what
+    // the host reaches. The host installs whatever redirection the target needs
+    // the first time one is bound, so a caller does not have to know how the
+    // entry is arranged or whether anything is there already.
+    //
+    // Bindings are held as generations. Releasing one out of order is safe: a
+    // binding that is not the selected one leaves the selection alone, and the
+    // selected one falls back to the newest still live. Ownership comes from
+    // agent_context, so a module can only release its own.
+    //
+    // Nothing is ever unloaded, so a bound replacement stays reachable for the
+    // life of the process even after its binding is released.
+
+    // Returns 0 on success, filling *out. Negative on failure: -1 for a target
+    // that cannot be patched, -2 for a replacement the target cannot reach, and
+    // -3 when the host refused for a reason of its own.
+    std::int32_t (*patch_bind)(void* agent_context,
+                               void* target,
+                               void* replacement,
+                               RuntimeAgentPatchBinding* out);
+
+    // Returns 0 on success, -1 for an unknown binding, and -2 for one belonging
+    // to another module.
+    std::int32_t (*patch_unbind)(void* agent_context, std::uint64_t binding_id);
 };
 
 using RuntimeAgentSnippetRun = void (*)(const RuntimeAgentHost* host);

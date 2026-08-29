@@ -102,6 +102,15 @@ public:
     [[nodiscard]] bool activateDispatchPatch(quint64 id, QString& error);
     [[nodiscard]] bool activateEntryPatch(quint64 id, QString& error);
     [[nodiscard]] bool rollback(QString& error);
+
+    // Binding a replacement on behalf of a loaded module. Returns 0, or the
+    // negative code the host ABI documents.
+    [[nodiscard]] int bindReplacement(void* target,
+                                      void* replacement,
+                                      quint64 owner,
+                                      runtime_agent::PatchBinding& binding,
+                                      QString& error);
+    [[nodiscard]] int releaseBinding(std::uint64_t bindingId, quint64 owner, QString& error);
     [[nodiscard]] QJsonObject patchStatus() const;
 
 private:

@@ -270,11 +270,11 @@ struct VizState {
 
     std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
 
-    // The step function and label this one displaced. Release puts them back,
-    // so a dispatch patch that was already driving the cube goes on driving it
-    // afterwards.
-    CubeStepFunction previousStep = nullptr;
-    QString previousLabel;
+    // The binding the host gave us, and what it displaced. Releasing the
+    // binding is what puts things back: the host decides what the entry names
+    // afterwards, so a replacement bound after this one is not overwritten.
+    std::uint64_t binding = 0;
+    void* previousStep = nullptr;
 
     std::uint64_t framesDrawn = 0;
 };
@@ -1114,12 +1114,6 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
 
     seedParticles(*state);
 
-    // Whatever is driving the cube now, recorded so release can restore it. A
-    // dispatch patch already installed here keeps the cube once this module
-    // lets go.
-    state->previousStep = cube->m_stepFunction.load(std::memory_order_acquire);
-    state->previousLabel = cube->m_activePatch;
-
     analyzer = candidate;
     audio_analysis::Analyzer::spawn(analyzer);
     lastDeviceName = QString::fromStdString(analyzer->device());
@@ -1128,7 +1122,31 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
     drive.active = true;
 
     viz = state;
-    cube->installDispatchStep(&audioStep, QStringLiteral("audio beat visualizer"));
+
+    // Asking the host to make audioStep what the cube's step function reaches.
+    // Nothing in the application holds a pointer for this: the host installs
+    // whatever redirection the target needs and hands back the binding.
+    RuntimeAgentPatchBinding bound{};
+    const std::int32_t boundResult = hookHost.patch_bind(
+        hookHost.agent_context,
+        reinterpret_cast<void*>(&cube_step_builtin),
+        reinterpret_cast<void*>(&audioStep),
+        &bound);
+    if (boundResult != 0) {
+        error = QStringLiteral("the host refused to bind the audio step function (%1)")
+                    .arg(boundResult);
+        state->glowArray.destroy();
+        state->glowBuffer.destroy();
+        state->pointArray.destroy();
+        state->pointBuffer.destroy();
+        delete state;
+        viz = nullptr;
+        analyzer->requestStop();
+        analyzer.reset();
+        return false;
+    }
+    state->binding = bound.id;
+    state->previousStep = bound.previous;
     drawConnection = QObject::connect(
         cube, &CubeWidget::frameRendered, cube,
         [cube](qulonglong, float) { drawFrame(cube); },
@@ -1151,9 +1169,12 @@ void remove(CubeWidget* cube)
     }
 
     if (viz != nullptr) {
-        cube->installDispatchStep(viz->previousStep,
-                                  viz->previousLabel.isEmpty() ? QStringLiteral("builtin")
-                                                               : viz->previousLabel);
+        if (viz->binding != 0 && hookHostValid) {
+            // Releasing rather than restoring a pointer. Something bound after
+            // this one stays selected, which a raw store would have destroyed.
+            (void)hookHost.patch_unbind(hookHost.agent_context, viz->binding);
+            viz->binding = 0;
+        }
         viz->glowArray.destroy();
         viz->glowBuffer.destroy();
         viz->pointArray.destroy();
@@ -1371,7 +1392,7 @@ void run(const RuntimeAgentHost* host)
         {QStringLiteral("installed"), true},
         {QStringLiteral("connectionValid"), static_cast<bool>(drawConnection)},
         {QStringLiteral("device"), lastDeviceName},
-        {QStringLiteral("dispatchStep"), cube->m_activePatch},
+        {QStringLiteral("binding"), static_cast<qint64>(viz->binding)},
         {QStringLiteral("bands"), audio_analysis::bandCount},
         {QStringLiteral("fftSize"), audio_analysis::fftSize},
         {QStringLiteral("hopSize"), audio_analysis::hopSize},

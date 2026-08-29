@@ -1415,6 +1415,8 @@ void RuntimeAgent::runSnippet(ModuleManager::LoadedModule* module,
         &RuntimeAgent::hostStashGet,
         &RuntimeAgent::hostStashDrop,
         &RuntimeAgent::hostStashList,
+        &RuntimeAgent::hostPatchBind,
+        &RuntimeAgent::hostPatchUnbind,
     };
 
     publishEvent(QStringLiteral("operation.started"), QJsonObject{
@@ -1633,6 +1635,45 @@ std::uint64_t RuntimeAgent::hostMonotonicTimeNs(void* agentContext)
 {
     auto* agent = agentOf(agentContext);
     return static_cast<std::uint64_t>(agent->m_monotonicClock.nsecsElapsed());
+}
+
+std::int32_t RuntimeAgent::hostPatchBind(void* agentContext,
+                                         void* target,
+                                         void* replacement,
+                                         RuntimeAgentPatchBinding* out)
+{
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    if (context == nullptr || context->agent == nullptr || out == nullptr
+        || target == nullptr || replacement == nullptr) {
+        return -3;
+    }
+
+    QString error;
+    runtime_agent::PatchBinding binding;
+    const int result = context->agent->m_modules.bindReplacement(
+        target, replacement, context->moduleId, binding, error);
+    if (result != 0) {
+        context->agent->publishEvent(QStringLiteral("patch.bindRefused"), QJsonObject{
+            {QStringLiteral("moduleId"), QString::number(context->moduleId)},
+            {QStringLiteral("error"), error},
+        });
+        return result;
+    }
+
+    out->id = binding.id;
+    out->original = binding.original;
+    out->previous = binding.previous;
+    return 0;
+}
+
+std::int32_t RuntimeAgent::hostPatchUnbind(void* agentContext, const std::uint64_t bindingId)
+{
+    auto* context = static_cast<ModuleContext*>(agentContext);
+    if (context == nullptr || context->agent == nullptr) {
+        return -1;
+    }
+    QString error;
+    return context->agent->m_modules.releaseBinding(bindingId, context->moduleId, error);
 }
 
 std::int32_t RuntimeAgent::hostStashPut(void* agentContext,

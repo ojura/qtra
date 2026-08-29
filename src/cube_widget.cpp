@@ -176,21 +176,6 @@ void CubeWidget::setWireframe(const bool wireframe)
     update();
 }
 
-void CubeWidget::installDispatchStep(CubeStepFunction function, const QString& patchName)
-{
-    if (function == nullptr) {
-        function = &cube_step_builtin;
-    }
-    m_stepFunction.store(function, std::memory_order_release);
-    setActivePatchLabel(patchName.isEmpty() ? QStringLiteral("dispatch patch") : patchName);
-}
-
-void CubeWidget::resetDispatchStep()
-{
-    m_stepFunction.store(&cube_step_builtin, std::memory_order_release);
-    setActivePatchLabel(QStringLiteral("builtin"));
-}
-
 void CubeWidget::setActivePatchLabel(const QString& label)
 {
     if (m_activePatch == label) {
@@ -394,10 +379,9 @@ void CubeWidget::advanceAnimation()
         m_elapsedSeconds,
         m_frameIndex,
     };
-    const CubeStepFunction step = m_stepFunction.load(std::memory_order_acquire);
-    const CubeStepOutput output = step != nullptr
-        ? step(&input)
-        : cube_step_builtin(&input);
+    // A direct call. Replacing this is the tooling's job, done by rewriting the
+    // function's own entry, so the application holds no pointer for it.
+    const CubeStepOutput output = cube_step_builtin(&input);
 
     m_angleDegrees = normalizeAngle(output.angle_degrees);
     m_tint = QVector3D(output.tint_r, output.tint_g, output.tint_b);

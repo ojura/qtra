@@ -266,6 +266,11 @@ private:
                                      void* buffer,
                                      std::int64_t capacity);
     static std::int32_t hostStashDrop(void* agentContext, const char* key);
+    static std::int32_t hostPatchBind(void* agentContext,
+                                      void* target,
+                                      void* replacement,
+                                      RuntimeAgentPatchBinding* out);
+    static std::int32_t hostPatchUnbind(void* agentContext, std::uint64_t bindingId);
     static std::int64_t hostStashList(void* agentContext, char* buffer, std::int64_t capacity);
 
     [[nodiscard]] ModuleContext* contextForModule(quint64 moduleId);
