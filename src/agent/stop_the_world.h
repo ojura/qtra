@@ -23,7 +23,24 @@
 //
 //   A thread created while this is arranging itself would not be signalled. The
 //   task list is read again once everyone has arrived, and a thread that
-//   appeared in between makes this refuse, because it was never asked.
+//   appeared in between makes this refuse, because it was never asked. The two
+//   readings are compared by thread id and by the inode of the task's own
+//   directory, because an id alone is a number the kernel reuses and a thread
+//   that exited while another took its number would otherwise compare equal.
+//
+//   A thread that has the signal blocked is refused before anything is sent. A
+//   signal queued to such a thread waits there until it unblocks, which may be
+//   never, so sending would time out and leave the queue entry spent against a
+//   limit this user's other processes share.
+//
+//   A stop that gave up leaves its signals queued on whichever threads never
+//   took them. The next stop asks whether those have drained before adding any
+//   more, so repeated timeouts cost a delay and not the ability to signal
+//   anything again.
+//
+//   The handler is checked to still be this one before every send. It is
+//   claimed once and the process runs on, so something may have installed over
+//   it since, and sending then delivers into whatever is there now.
 //
 //   The instruction pointer says where a thread is, not where it has been. A
 //   thread standing outside the range with a return address inside it is a
@@ -41,7 +58,10 @@
 //   redirected by, is what would close it.
 //
 // The handler runs on threads doing arbitrary work, so it touches nothing but
-// atomics and makes no library call that could allocate or lock.
+// atomics and makes no library call that could allocate or lock. The waiting
+// the controller does alongside it is the same: system calls and atomics only,
+// including reading the clock, because a parked thread may hold the loader's
+// lock and an ordinary clock call can need the loader the first time.
 //
 // The signal has to be one nothing else in the process uses, and that is a
 // requirement on whoever embeds this and not something it can establish. There
