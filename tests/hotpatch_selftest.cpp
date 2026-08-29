@@ -477,6 +477,7 @@ int main(int argc, char** argv)
                 {"ud2", {0x0FU, 0x0BU}},
                 {"hlt", {0xF4U}},
                 {"rsm", {0x0FU, 0xAAU}},
+                {"xabort", {0xC6U, 0xF8U, 0x00U}},
             };
             for (const Form& form : immovable) {
                 std::uint8_t buffer[16] = {};

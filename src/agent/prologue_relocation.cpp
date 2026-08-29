@@ -390,6 +390,20 @@ bool decodeInstruction(const std::uint8_t* at,
         decoded.relativeBranch = true;
         decoded.transfersControl = true;
         decoded.transfer = DecodedInstruction::Transfer::Call;
+        // Its distance is not read, so where it goes on an abort is not known
+        // here. Marked unprovable, which refuses it in the body as well as in
+        // the bytes being taken: without the target, the sweep cannot say it
+        // does not enter them.
+        decoded.unprovableTarget = true;
+    }
+
+    // XABORT, which shares its opcode with an ordinary byte-sized move and is
+    // told apart the same way. It ends the transaction and continues where the
+    // matching XBEGIN said, so it does not reach the instruction after it.
+    if (!escaped && primaryOpcode == 0xC6U && modrmByte == 0xF8U) {
+        decoded.transfersControl = true;
+        decoded.transfer = DecodedInstruction::Transfer::Exit;
+        decoded.unprovableTarget = true;
     }
 
     // Leaving in a way this cannot copy: a return to a different privilege
