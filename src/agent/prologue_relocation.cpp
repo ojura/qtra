@@ -613,6 +613,7 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
     plan.functionBytes = functionBytes;
     plan.patchAddress = const_cast<std::uint8_t*>(patchAt);
     plan.takenBytes = taken;
+    plan.expectedBytes.assign(patchAt, patchAt + taken);
     plan.keepsLandingPad = keepsLandingPad;
     return true;
 }
@@ -725,6 +726,26 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
         quiescer.acquire(WriteRegion{plan.patchAddress, plan.takenBytes}, error);
     if (lease == nullptr) {
         (void)::munmap(trampoline, trampolineBytes);
+        return false;
+    }
+
+    // The bytes have to still be the ones that were swept. Anything may write
+    // to a function's entry between planning and now: another patcher, a probe,
+    // a debugger. If they changed, what was copied into the trampoline is not
+    // what is here, and the conclusion that nothing branches into these bytes
+    // was reached about different instructions. Compared with execution stopped,
+    // because comparing while they can change answers nothing.
+    const bool unchanged = std::memcmp(patchAt, plan.expectedBytes.data(),
+                                       plan.takenBytes) == 0;
+    if (!unchanged) {
+        // Threads first: formatting the refusal can wait on a lock a parked
+        // thread is holding.
+        lease.reset();
+        (void)::munmap(trampoline, trampolineBytes);
+        error = "the function's opening bytes are not the ones this plan was made from, so "
+                "something wrote to them in between. What was copied is not what is there, "
+                "and the sweep that found nothing branching into them was about different "
+                "instructions. Plan again";
         return false;
     }
 

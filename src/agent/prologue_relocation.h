@@ -154,7 +154,21 @@ struct ProloguePlan {
     bool keepsLandingPad = false;
     bool adjustedRipRelative = false;
 
-    [[nodiscard]] bool valid() const noexcept { return patchAddress != nullptr; }
+    // Exactly the bytes the planner read, kept so installing can check they
+    // are still what it decided about.
+    //
+    // Planning and installing are separate calls with a gap between them, and
+    // anything may write to a function's entry in that gap: another patcher, a
+    // probe, a debugger. What was swept is then not what would be copied, and
+    // the sweep's conclusion that no branch enters these bytes was reached
+    // about different instructions.
+    std::vector<std::uint8_t> expectedBytes;
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return patchAddress != nullptr && takenBytes != 0
+            && expectedBytes.size() == takenBytes;
+    }
 };
 
 // Whether this function's opening instructions can be moved, and which ones.
