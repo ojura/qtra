@@ -299,16 +299,20 @@ QJsonObject ModuleManager::coverage() const
     };
 }
 
-bool ModuleManager::admits(const bool acceptIncompleteCoverage, QString& error) const
+bool ModuleManager::admits(const bool acceptIncompleteCoverage, QString& error)
 {
     // What the build established about replacing this function. Refused by
     // default: a build that recorded nothing has not been asked whether the
     // replacement reaches every call, and treating silence as approval is the
     // thing the manifest exists to prevent.
-    return runtime_agent::admitsEntryWrite(
-        runtime_agent::readCoverageManifest(manifestPath(), runtime_agent::hostBuildId(),
-                                            QStringLiteral("cube_step_builtin")),
-        acceptIncompleteCoverage, error);
+    const runtime_agent::CoverageDecision decision = runtime_agent::readCoverageManifest(
+        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
+    if (!runtime_agent::admitsEntryWrite(decision, acceptIncompleteCoverage, error)) {
+        return false;
+    }
+    // Kept so recovery can answer to what admitted the write it is undoing.
+    m_admitted = decision;
+    return true;
 }
 
 bool ModuleManager::activateEntryPatch(const quint64 id,
@@ -553,7 +557,20 @@ bool ModuleManager::resetActivePatch(QString& error)
                                    "on the thread that owns it");
             return false;
         }
-        if (!admits(true, error)) {
+        // What admitted the install admits putting it back. Reading the
+        // manifest again would ask about the file as it stands now: a rebuild
+        // between the failed install and this call gives the binary a new build
+        // id, the manifest on disk describes that one, and recovery would be
+        // refused with the entry left mid-install and nothing able to finish
+        // it. The bytes being restored are this process's own, so the decision
+        // taken when they were written is the one that governs restoring them.
+        if (m_admitted.has_value()) {
+            if (!runtime_agent::admitsEntryWrite(*m_admitted, true, error)) {
+                return false;
+            }
+        } else if (!admits(true, error)) {
+            // Only reachable if a gateway was installed without going through
+            // admits(), which nothing does. Asking now is the best left.
             return false;
         }
         std::string nativeError;

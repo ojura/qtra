@@ -1,6 +1,7 @@
 #pragma once
 
 #include "agent/agent_abi.h"
+#include "agent/coverage_manifest.h"
 #include "agent/patch_manager.h"
 #include "demo/cube_step_abi.h"
 
@@ -11,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 
 class CubeWidget;
@@ -110,7 +112,7 @@ public:
 private:
     // The one place that decides whether a write may go ahead, so both the
     // protocol and the host binding call answer to the same rules.
-    [[nodiscard]] bool admits(bool acceptIncompleteCoverage, QString& error) const;
+    [[nodiscard]] bool admits(bool acceptIncompleteCoverage, QString& error);
 
 public:
     [[nodiscard]] bool rollback(QString& error);
@@ -139,4 +141,9 @@ private:
     // The protocol's own binding, so releasing it goes through the same
     // generation rule a snippet's binding does.
     std::uint64_t m_entryBinding = 0;
+    // What admitted the write that installed the gateway. Kept because
+    // recovery restores the bytes that write left behind, and the decision
+    // covering those bytes is the one taken when they were written. Asking the
+    // manifest again would ask about whatever is on disk at that later moment.
+    std::optional<runtime_agent::CoverageDecision> m_admitted;
 };
