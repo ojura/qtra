@@ -269,6 +269,7 @@ private:
     static std::int32_t hostPatchBind(void* agentContext,
                                       void* target,
                                       void* replacement,
+                                      std::uint32_t flags,
                                       RuntimeAgentPatchBinding* out);
     static std::int32_t hostPatchUnbind(void* agentContext, std::uint64_t bindingId);
     static std::int64_t hostStashList(void* agentContext, char* buffer, std::int64_t capacity);

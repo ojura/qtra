@@ -122,20 +122,6 @@ def patchable_addresses(binary: pathlib.Path) -> list[int]:
     return words
 
 
-def patchable_entries(binary: pathlib.Path) -> int:
-    """How many functions this binary reserved an entry area for."""
-    for line in run(["readelf", "-SW", str(binary)]).splitlines():
-        if "__patchable_function_entries" in line:
-            fields = line.split()
-            # readelf -SW columns after the type are Address, Off, Size. The
-            # section is an array of addresses with no lengths, so its size in
-            # bytes over eight is how many functions were prepared.
-            for index, field in enumerate(fields):
-                if field == "PROGBITS" and index + 3 < len(fields):
-                    return int(fields[index + 3], 16) // 8
-    return 0
-
-
 CLONE = re.compile(
     r"^Callgraph clone;(?P<from>[^;]+);[^;]*;[^;]*;[^;]*;[^;]*;"
     r"(?P<to>[^;]+);.*;(?P<what>[a-z ]+)$"
@@ -197,8 +183,15 @@ def clone_records_in(dump: pathlib.Path, name: str) -> list[dict[str, str]]:
     return records
 
 
-def preparation(compile_db: pathlib.Path, source_hint: str) -> dict[str, object]:
-    """How the build stopped callers from reasoning about the body."""
+def preparation(compile_db: pathlib.Path,
+                source_hint: str,
+                owning: str | None) -> dict[str, object]:
+    """How the build stopped callers from reasoning about the body.
+
+    Read from the object this binary was built from. Two targets compiling the
+    same source can compile it differently, and taking whichever entry comes
+    first answers about one of them at random.
+    """
     flags: list[str] = []
     try:
         entries = json.loads(compile_db.read_text())
@@ -206,6 +199,8 @@ def preparation(compile_db: pathlib.Path, source_hint: str) -> dict[str, object]
         return {"provider": "unknown", "flags": []}
     for entry in entries:
         if source_hint not in entry.get("file", ""):
+            continue
+        if owning is not None and entry.get("output") != owning:
             continue
         command = entry.get("command") or " ".join(entry.get("arguments", []))
         flags = [f for f in command.split() if f.startswith("-f") or f.startswith("-g")]
@@ -262,20 +257,22 @@ def analyze(binary: pathlib.Path,
             "clones": [],
         }
 
-    prepared = preparation(compile_db, source_hint)
-    found_aliases = aliases_at(binary, target)
-
-    # Tied to the object this binary was built from, so a dump belonging to some
-    # other target cannot answer for this one.
+    # Tied to the object this binary was built from, so neither a dump nor a set
+    # of flags belonging to some other target answers for this one.
     owning = owning_object(compile_db, binary, source_hint)
+    prepared = preparation(compile_db, source_hint, owning)
+    found_aliases = aliases_at(binary, target)
     dump = clone_dump_for(build_dir, owning) if owning else None
     clones = clone_records_in(dump, target) if dump else []
 
     # This target's own reserved area, not merely the existence of somebody's.
     # The compiler records the address of the area, which is the function's own
     # address or four bytes past it where a CET landing pad comes first.
+    # The compiler records the function's own address, or four bytes past it
+    # where a CET landing pad comes first. Those are the two the runtime accepts,
+    # so accepting a wider window here would approve a site it will refuse.
     recorded = [a for a in patchable_addresses(binary)
-                if target_address <= a <= target_address + 8]
+                if a in (target_address, target_address + 4)]
 
     evidence: list[dict[str, object]] = [
         {"modality": "final ELF symbols", "answered": True,

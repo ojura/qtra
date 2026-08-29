@@ -862,8 +862,8 @@ store is atomic, so a thread reading the slot gets the old address or the new
 one and never half of either. Going back to the original is the same store with
 the continuation's address.
 
-This is the point of the arrangement. Writing 13 bytes of code into a live
-function is the dangerous part, and it happens once. Every choice after that
+This is the point of the arrangement. Writing the gateway into a live function
+is the dangerous part, and it happens once. Every choice after that
 costs nothing and needs no coordination.
 
 Under `-fcf-protection=full` GCC puts an `ENDBR64` at the function's entry.
@@ -1048,9 +1048,10 @@ when a failure occurs.
 
 - The entry patcher is Linux/x86-64 only and supports prepared all-NOP entries;
   it does not relocate arbitrary prologues.
-- Writing 13 bytes is not atomic. General multi-threaded targets need cooperative
-  quiescence, thread suspension, trap-assisted staging, or a different patch
-  strategy.
+- Installing the gateway writes the whole reserved area and is not atomic.
+  Choosing a replacement afterwards is one aligned pointer store and is. A
+  general multi-threaded target needs every thread accounted for before that
+  one write, which is why a policy that cannot do so refuses.
 - Only successful DSO loads are retained; a failed load is closed.
 - The semantic registry covers the main-window QObject tree and explicitly
   registered objects; non-QObject domain state needs generated/manual adapters.

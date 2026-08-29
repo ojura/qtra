@@ -273,6 +273,12 @@ QJsonArray ModuleManager::list() const
 namespace {
 
 // Where the build left its decision, beside the artifacts it describes.
+// Where the build left its decision, beside the artifacts it describes.
+//
+// Baked in at compile time, so moving the executable away from its build tree
+// leaves this pointing at nothing and every activation refuses. A generic
+// version would look beside the running executable and fall back to a path the
+// caller supplies.
 QString manifestPath()
 {
     return QStringLiteral("%1/coverage-manifest.json").arg(QStringLiteral(DEMO_BUILD_DIR));
@@ -294,6 +300,45 @@ QJsonObject ModuleManager::coverage() const
     };
 }
 
+bool ModuleManager::admits(const bool acceptIncompleteCoverage, QString& error) const
+{
+    // What the build established about replacing this function. Refused by
+    // default: a build that recorded nothing has not been asked whether the
+    // replacement reaches every call, and treating silence as approval is the
+    // thing the manifest exists to prevent.
+    const runtime_agent::CoverageDecision decided = runtime_agent::readCoverageManifest(
+        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
+
+    if (!decided.allow) {
+        if (acceptIncompleteCoverage) {
+            return true;
+        }
+        error = QStringLiteral("%1. Accept incomplete coverage to proceed anyway, which "
+                               "installs a replacement that may not reach every caller")
+                    .arg(decided.reason);
+        return false;
+    }
+
+    // The write happens because this thread is the only one that reaches the
+    // target, and that claim comes from the manifest. A claim that was only
+    // observed does not support it: having seen one thread arrive says nothing
+    // about one that arrives under a condition nobody exercised.
+    // Not overridable. Accepting incomplete coverage accepts that some callers
+    // keep running the original, which is a wrong effect. This is a different
+    // question: whether writing the bytes at all is safe while the process
+    // runs. Nobody can consent to that on the strength of not knowing.
+    if (!decided.authorizesRequestBoundary) {
+        error = QStringLiteral(
+            "the recorded claim about which threads reach this function is %1, which "
+            "does not support writing its entry while the process runs. Only a proved "
+            "or declared claim does")
+            .arg(decided.domainStrength.isEmpty() ? QStringLiteral("absent")
+                                                  : decided.domainStrength);
+        return false;
+    }
+    return true;
+}
+
 bool ModuleManager::activateEntryPatch(const quint64 id,
                                        const bool acceptIncompleteCoverage,
                                        QString& error)
@@ -303,10 +348,6 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         error = QStringLiteral("module %1 is not a cube patch").arg(id);
         return false;
     }
-    if (!resetActivePatch(error)) {
-        return false;
-    }
-
 #if !defined(__linux__) || !defined(__x86_64__)
     error = QStringLiteral("entry patch mode is implemented only for Linux/x86-64");
     return false;
@@ -316,16 +357,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         return false;
     }
 
-    // What the build established about replacing this function. Refused by
-    // default: a build that recorded nothing has not been asked whether the
-    // replacement reaches every call, and treating silence as approval is the
-    // thing the manifest exists to prevent.
-    const runtime_agent::CoverageDecision decided = runtime_agent::readCoverageManifest(
-        manifestPath(), runtime_agent::hostBuildId(), QStringLiteral("cube_step_builtin"));
-    if (!decided.allow && !acceptIncompleteCoverage) {
-        error = QStringLiteral("%1. Pass acceptIncompleteCoverage to proceed anyway, "
-                               "which activates a replacement that may not reach every "
-                               "caller").arg(decided.reason);
+    if (!admits(acceptIncompleteCoverage, error)) {
         return false;
     }
 
@@ -347,6 +379,9 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         site.name = QStringLiteral("cube_step_builtin").toStdString();
     }
 
+    const std::uint64_t previousBinding = m_entryBinding;
+    const quint64 previousModule = m_activeEntryModule;
+
     SameThreadRequestBoundary quiescer(m_cube);
     runtime_agent::PatchBinding binding;
     if (!m_patches.bind(site,
@@ -366,6 +401,21 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         return false;
     }
 
+    // The old binding goes only once the new one is selected. Releasing first
+    // meant a refusal further down left the previous replacement deselected and
+    // the label describing something that was no longer running. The generations
+    // exist so a switch does not have to pass through nothing.
+    if (previousBinding != 0) {
+        std::string releaseError;
+        if (!m_patches.unbind(previousBinding, previousModule, releaseError)) {
+            // Put it back the way it was, so a failed switch changes nothing.
+            std::string undoError;
+            (void)m_patches.unbind(binding.id, id, undoError);
+            error = QString::fromStdString(releaseError);
+            return false;
+        }
+    }
+
     m_entryBinding = binding.id;
     m_activeEntryModule = id;
     m_cube->setActivePatchLabel(QStringLiteral("entry: %1").arg(loaded->name));
@@ -376,6 +426,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
 int ModuleManager::bindReplacement(void* target,
                                    void* replacement,
                                    const quint64 owner,
+                                   const bool acceptIncompleteCoverage,
                                    runtime_agent::PatchBinding& binding,
                                    QString& error)
 {
@@ -391,6 +442,13 @@ int ModuleManager::bindReplacement(void* target,
             "the thread that owns it. A snippet should bind from the executor its "
             "target runs on");
         return -3;
+    }
+
+    // The same admission the protocol answers to. Without this a module reaches
+    // a write that a request over the socket would have refused, and the build's
+    // decision only binds whoever happened to ask the other way.
+    if (!admits(acceptIncompleteCoverage, error)) {
+        return -1;
     }
 
     if (target != reinterpret_cast<void*>(&cube_step_builtin)) {
@@ -511,6 +569,20 @@ ModuleManager::LoadedModule* ModuleManager::insertModule(std::unique_ptr<LoadedM
 
 bool ModuleManager::resetActivePatch(QString& error)
 {
+    // The one way back from an install that changed bytes and could not finish.
+    // Without this the state told a caller to recover and no command could.
+    if (m_patches.state() == runtime_agent::PatchState::RecoveryRequired) {
+        std::string nativeError;
+        if (!m_patches.recover(nativeError)) {
+            error = QString::fromStdString(nativeError);
+            return false;
+        }
+        m_entryBinding = 0;
+        m_activeEntryModule = 0;
+        m_cube->setActivePatchLabel(QStringLiteral("builtin"));
+        return true;
+    }
+
     if (m_entryBinding != 0) {
         std::string nativeError;
         if (!m_patches.unbind(m_entryBinding, m_activeEntryModule, nativeError)) {

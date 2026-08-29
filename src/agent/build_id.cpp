@@ -11,7 +11,6 @@ namespace {
 
 struct NoteSearch {
     std::string buildId;
-    bool visitedMainObject = false;
 };
 
 QString toHex(const unsigned char* bytes, const std::size_t size)
@@ -31,11 +30,8 @@ int visitObject(dl_phdr_info* info, std::size_t, void* data)
     auto* search = static_cast<NoteSearch*>(data);
     // dl_iterate_phdr reports the main program first, and that is the build this
     // process is. Everything after it is a shared library it loaded, which
-    // includes the snippet modules being checked.
-    if (search->visitedMainObject) {
-        return 1;
-    }
-    search->visitedMainObject = true;
+    // includes the snippet modules being checked. Returning non-zero stops the
+    // walk, and every path here does, so only the main program is ever seen.
 
     for (int index = 0; index < info->dlpi_phnum; ++index) {
         const ElfW(Phdr)& header = info->dlpi_phdr[index];

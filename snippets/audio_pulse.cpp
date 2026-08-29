@@ -1127,10 +1127,16 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
     // Nothing in the application holds a pointer for this: the host installs
     // whatever redirection the target needs and hands back the binding.
     RuntimeAgentPatchBinding bound{};
+    // Accepting incomplete coverage on purpose. If the build cannot show that
+    // replacing the step function reaches every call, the worst outcome here is
+    // that some of the cube's motion is still computed the old way, which is a
+    // visualization that is partly wrong. A module whose replacement had to be
+    // the only thing running should pass zero and be refused.
     const std::int32_t boundResult = hookHost.patch_bind(
         hookHost.agent_context,
         reinterpret_cast<void*>(&cube_step_builtin),
         reinterpret_cast<void*>(&audioStep),
+        RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE,
         &bound);
     if (boundResult != 0) {
         error = QStringLiteral("the host refused to bind the audio step function (%1)")

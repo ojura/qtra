@@ -27,7 +27,7 @@ extern "C" {
 // This is a prototype under active development: there is no compatibility path
 // and none is wanted. A refused load fails where the caller can see it, and a
 // mismatched one fails somewhere inside the process.
-inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0004'0000u;
+inline constexpr std::uint32_t RUNTIME_AGENT_ABI = 0x0005'0000u;
 
 // RUNTIME_AGENT_ABI covers this interface. It says nothing about the
 // application's own types, which a module compiled with -fno-access-control
@@ -68,6 +68,11 @@ enum RuntimeAgentLogLevel : std::int32_t {
 // This is intentionally a small, stable C ABI. A snippet may include all of the
 // application's C++ headers, but its entry point and host callbacks remain easy
 // to validate and version.
+// Proceed even when the build did not establish that replacing the target
+// reaches every call, or did not establish which threads reach it. A module
+// asking for this is accepting that some callers may keep running the original.
+inline constexpr std::uint32_t RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE = 1u << 0;
+
 // What a module gets back when it binds a replacement.
 struct RuntimeAgentPatchBinding {
     std::uint64_t id;
@@ -217,9 +222,14 @@ struct RuntimeAgentHost {
     // that cannot be patched, -2 for a replacement the target cannot reach, and
     // -3 when the host refused for a reason of its own, including being called
     // from the wrong thread.
+    // flags is zero or RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE. Zero means the
+    // host answers to whatever its build recorded about this target, the same
+    // way a request over the socket does, so a module cannot reach a write the
+    // protocol would have refused.
     std::int32_t (*patch_bind)(void* agent_context,
                                void* target,
                                void* replacement,
+                               std::uint32_t flags,
                                RuntimeAgentPatchBinding* out);
 
     // Returns 0 on success, -1 for an unknown binding, and -2 for one belonging

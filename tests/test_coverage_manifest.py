@@ -15,11 +15,36 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 ANALYZER = REPO / "tools" / "analyze_coverage.py"
 
 
-def build(source: str, flags: list[str], directory: pathlib.Path) -> pathlib.Path:
-    (directory / "t.c").write_text(source)
-    binary = directory / "t"
-    subprocess.run(["gcc", "-O2", *flags, str(directory / "t.c"), "-o", str(binary)],
-                   cwd=directory, check=True)
+def build(sources: dict[str, str],
+          flags: list[str],
+          directory: pathlib.Path,
+          target: str = "t",
+          per_file_flags: dict[str, list[str]] | None = None) -> pathlib.Path:
+    """Compile like CMake does, one object per source under CMakeFiles/<target>.dir.
+
+    The layout matters. The analyzer finds the object a binary was built from by
+    looking for that directory in the compile database, and a fixture that runs
+    gcc straight from a temporary directory has no database at all, so every
+    modality comes back unanswered and a test passes without exercising anything
+    it names.
+    """
+    objects = []
+    entries = []
+    objdir = directory / "CMakeFiles" / f"{target}.dir"
+    objdir.mkdir(parents=True, exist_ok=True)
+    for name, text in sources.items():
+        (directory / name).write_text(text)
+        output = f"CMakeFiles/{target}.dir/{name}.o"
+        file_flags = flags + (per_file_flags or {}).get(name, [])
+        command = ["gcc", "-O2", *file_flags, "-c", name, "-o", output]
+        subprocess.run(command, cwd=directory, check=True)
+        objects.append(output)
+        entries.append({"directory": str(directory), "file": str(directory / name),
+                        "output": output, "command": " ".join(command)})
+
+    (directory / "compile_commands.json").write_text(json.dumps(entries, indent=2))
+    binary = directory / target
+    subprocess.run(["gcc", *objects, "-o", target], cwd=directory, check=True)
     return binary
 
 
@@ -39,71 +64,84 @@ PREPARED = ["-fpatchable-function-entry=20,0", "-fno-lto", "-fno-ipa-icf",
 
 class CoverageAnalyzer(unittest.TestCase):
     def test_missing_target_is_refused(self):
-        """A name that is not in the binary has no aliases and no clones, which
+        """A name absent from the binary has no aliases and no clones, which
         once read as every question answered."""
         with tempfile.TemporaryDirectory() as raw:
             directory = pathlib.Path(raw)
-            binary = build("int f(int x){return x+1;}\nint main(void){return f(1);}",
+            binary = build({"t.c": "int f(int x){return x+1;}\nint main(void){return f(1);}"},
                            PREPARED, directory)
             report = analyze(binary, directory, target="nothing_of_this_name")
             self.assertEqual(report["decision"], "refuse")
             self.assertIn("target symbol", report["unknown"])
 
-    def test_unprepared_target_is_refused(self):
-        """Another function having a reserved area says nothing about this one."""
+    def test_unprepared_target_is_refused_on_its_own_ground(self):
+        """One function having a reserved area says nothing about another. The
+        prepared flag is applied to one file only, so the other really is
+        unprepared and has to be refused for that reason and not another."""
         with tempfile.TemporaryDirectory() as raw:
             directory = pathlib.Path(raw)
             binary = build(
-                "__attribute__((noinline)) int prepared(int x){return x+1;}\n"
-                "int main(void){return prepared(1);}", PREPARED, directory)
-            report = analyze(binary, directory, target="main")
+                {"prepared.c": "__attribute__((noinline)) int prepared(int x){return x+1;}",
+                 "plain.c": "int prepared(int);\nint bare(int x){return x*2;}\n"
+                            "int main(void){return prepared(1)+bare(2);}"},
+                ["-fno-lto", "-fno-ipa-icf", "-fdump-ipa-clones"], directory,
+                per_file_flags={"prepared.c": ["-fpatchable-function-entry=20,0"]})
+            report = analyze(binary, directory, target="bare", source_hint="plain.c")
             self.assertEqual(report["decision"], "refuse")
+            self.assertIn("prepared entry for this target", report["unknown"])
 
-    def test_alias_is_refused_unless_accepted(self):
+    def test_prepared_target_in_the_same_binary_is_allowed(self):
+        """The counterpart, so the refusal above is about this target and not
+        about something wrong with the fixture."""
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            binary = build(
+                {"prepared.c": "__attribute__((noinline)) int prepared(int x){return x+1;}",
+                 "plain.c": "int prepared(int);\nint main(void){return prepared(1);}"},
+                ["-fno-lto", "-fno-ipa-icf", "-fdump-ipa-clones"], directory,
+                per_file_flags={"prepared.c": ["-fpatchable-function-entry=20,0"]})
+            report = analyze(binary, directory, target="prepared",
+                             source_hint="prepared.c")
+            self.assertEqual(report["decision"], "allow", report["unknown"])
+
+    def test_alias_is_refused(self):
         """Two names at one address means replacing one replaces both."""
         with tempfile.TemporaryDirectory() as raw:
             directory = pathlib.Path(raw)
             binary = build(
-                "__attribute__((noinline)) int alpha(int x){return x*3+1;}\n"
-                "int beta(int x) __attribute__((alias(\"alpha\")));\n"
-                "int main(void){return alpha(1)+beta(2);}", PREPARED, directory)
+                {"t.c": "__attribute__((noinline)) int alpha(int x){return x*3+1;}\n"
+                        "int beta(int x) __attribute__((alias(\"alpha\")));\n"
+                        "int main(void){return alpha(1)+beta(2);}"},
+                PREPARED, directory)
             report = analyze(binary, directory, target="alpha")
             self.assertIn("beta", report["aliases"])
             self.assertTrue(any(s["what"] == "beta" for s in report["skipped"]))
-
-    def test_absent_clone_dumps_are_not_an_answer(self):
-        """A build that recorded nothing has not been asked the question."""
-        with tempfile.TemporaryDirectory() as raw:
-            directory = pathlib.Path(raw)
-            unprobed = [f for f in PREPARED if f != "-fdump-ipa-clones"]
-            binary = build("__attribute__((noinline)) int f(int x){return x+1;}\n"
-                           "int main(void){return f(1);}", unprobed, directory)
-            report = analyze(binary, directory, target="f")
-            self.assertEqual(report["coverage"], "unknown")
-            self.assertTrue(any("clone dumps" in u for u in report["unknown"]), report["unknown"])
-
-    def test_unrelated_dump_cannot_answer_for_the_owning_object(self):
-        """More than one target can compile the same source, and each gets its
-        own dump. A dump belonging to a different object says nothing about the
-        translation unit that is actually in this binary."""
-        with tempfile.TemporaryDirectory() as raw:
-            directory = pathlib.Path(raw)
-            binary = build("__attribute__((noinline)) int f(int x){return x+1;}\n"
-                           "int main(void){return f(1);}", PREPARED, directory)
-            # A dump exists in the tree, but not the one beside this object.
-            for dump in directory.glob("*.ipa-clones"):
-                dump.rename(directory / "somebody_elses.ipa-clones")
-            report = analyze(binary, directory, target="f")
             self.assertEqual(report["decision"], "refuse")
-            self.assertTrue(any("owning object" in u for u in report["unknown"]),
-                            report["unknown"])
+
+    def test_dump_belonging_to_another_object_cannot_answer(self):
+        """Two targets can compile the same source, each with its own dump. The
+        one beside this binary's object is the only one that describes it, and
+        renaming it has to change the verdict."""
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            binary = build({"t.c": "__attribute__((noinline)) int f(int x){return x+1;}\n"
+                                   "int main(void){return f(1);}"}, PREPARED, directory)
+            before = analyze(binary, directory, target="f")
+            self.assertEqual(before["decision"], "allow", before["unknown"])
+            self.assertIsNotNone(before["cloneDump"])
+
+            owning = pathlib.Path(before["cloneDump"])
+            owning.rename(owning.parent / "belongs_to_something_else.ipa-clones")
+            after = analyze(binary, directory, target="f")
+            self.assertEqual(after["decision"], "refuse")
+            self.assertIn("IPA clone dumps for the owning object", after["unknown"])
 
     def test_observed_domain_does_not_authorize(self):
         """Having seen one thread is not proof another never arrives."""
         with tempfile.TemporaryDirectory() as raw:
             directory = pathlib.Path(raw)
-            binary = build("__attribute__((noinline)) int f(int x){return x+1;}\n"
-                           "int main(void){return f(1);}", PREPARED, directory)
+            binary = build({"t.c": "__attribute__((noinline)) int f(int x){return x+1;}\n"
+                                   "int main(void){return f(1);}"}, PREPARED, directory)
             observed = analyze(binary, directory, target="f",
                                caller_domain="only the main thread was seen",
                                caller_domain_strength="observed")

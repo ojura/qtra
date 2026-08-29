@@ -25,11 +25,18 @@ const char* describe(const PatchState state) noexcept
 
 PatchManager::~PatchManager()
 {
-    // Destroying the lease here would resume execution through an entry holding
-    // a half-written gateway, so reaching this state is a bug in the shutdown
-    // path and not something to paper over.
+    // In recovery the entry holds a complete gateway whose mapping could not be
+    // put back, and the lease is what keeps execution away from it. Destroying
+    // that lease would resume execution, and freeing the saved bytes would make
+    // recovery impossible, so neither happens: both are released, the same way
+    // the record is. The assert is for a developer, and it is not what makes
+    // this safe, because NDEBUG deletes it from the build that ships.
     assert(m_state != PatchState::RecoveryRequired
-           && "roll back before destroying a manager that is holding recovery state");
+           && "recover before destroying a manager that is holding recovery state");
+    if (m_state == PatchState::RecoveryRequired) {
+        (void)m_recoveryLease.release();
+        m_original.clear();
+    }
 
     // The gateway is permanent and carries this record's slot address as an
     // immediate, so the storage has to outlive whatever installed it. Freeing it

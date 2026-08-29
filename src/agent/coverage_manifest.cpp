@@ -59,6 +59,12 @@ CoverageDecision readCoverageManifest(const QString& manifestPath,
         return decision;
     }
 
+    const QJsonObject domain =
+        report.value(QStringLiteral("callerExecutionDomain")).toObject();
+    decision.domainStrength = domain.value(QStringLiteral("strength")).toString();
+    decision.authorizesRequestBoundary =
+        domain.value(QStringLiteral("authorizesRequestBoundary")).toBool(false);
+
     if (decision.coverage != QStringLiteral("complete")) {
         decision.allow = false;
         const QJsonArray unknown = report.value(QStringLiteral("unknown")).toArray();

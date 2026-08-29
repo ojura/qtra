@@ -1632,6 +1632,7 @@ std::uint64_t RuntimeAgent::hostMonotonicTimeNs(void* agentContext)
 std::int32_t RuntimeAgent::hostPatchBind(void* agentContext,
                                          void* target,
                                          void* replacement,
+                                         const std::uint32_t flags,
                                          RuntimeAgentPatchBinding* out)
 {
     auto* context = static_cast<ModuleContext*>(agentContext);
@@ -1643,7 +1644,8 @@ std::int32_t RuntimeAgent::hostPatchBind(void* agentContext,
     QString error;
     runtime_agent::PatchBinding binding;
     const int result = context->agent->m_modules.bindReplacement(
-        target, replacement, context->moduleId, binding, error);
+        target, replacement, context->moduleId,
+        (flags & RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE) != 0, binding, error);
     if (result != 0) {
         context->agent->publishEvent(QStringLiteral("patch.bindRefused"), QJsonObject{
             {QStringLiteral("moduleId"), QString::number(context->moduleId)},

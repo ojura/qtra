@@ -106,6 +106,13 @@ public:
                                           bool acceptIncompleteCoverage,
                                           QString& error);
     [[nodiscard]] QJsonObject coverage() const;
+
+private:
+    // The one place that decides whether a write may go ahead, so both the
+    // protocol and the host binding call answer to the same rules.
+    [[nodiscard]] bool admits(bool acceptIncompleteCoverage, QString& error) const;
+
+public:
     [[nodiscard]] bool rollback(QString& error);
 
     // Binding a replacement on behalf of a loaded module. Returns 0, or the
@@ -113,6 +120,7 @@ public:
     [[nodiscard]] int bindReplacement(void* target,
                                       void* replacement,
                                       quint64 owner,
+                                      bool acceptIncompleteCoverage,
                                       runtime_agent::PatchBinding& binding,
                                       QString& error);
     [[nodiscard]] int releaseBinding(std::uint64_t bindingId, quint64 owner, QString& error);
