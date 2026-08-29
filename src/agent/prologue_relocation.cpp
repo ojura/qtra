@@ -664,7 +664,12 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     // Reached through a pointer, which is an indirect branch, so it begins with
     // a landing pad whatever the target did.
     std::memcpy(copy, landingPad, sizeof(landingPad));
-    std::memcpy(copy + sizeof(landingPad), patchAt, plan.takenBytes);
+    // From what the plan recorded, not from the function. Reading the live
+    // bytes here means a writer changing them during this copy and putting them
+    // back before the comparison below leaves a trampoline holding half of each
+    // while the check finds nothing wrong. The plan already owns the bytes it
+    // decided about, and those are the ones being moved.
+    std::memcpy(copy + sizeof(landingPad), plan.expectedBytes.data(), plan.takenBytes);
 
     // Every operand naming an address as a distance from where it sat has to
     // name the same address from where it now sits.

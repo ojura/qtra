@@ -380,21 +380,27 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         (void)::syscall(SYS_sched_yield);
     }
 
+    // From here the lease exists, and destroying it is the only thing that may
+    // clear this stop's state. Calling the pre-lease path as well would write
+    // into whatever stop had started in the meantime.
     if (!readThreadIds(after, maxParked + 1, afterCount, failure)) {
         lease.reset();
-        return giveUp(std::string("could not read this process's thread list: ")
-                      + std::strerror(failure));
+        error = std::string("could not read this process's thread list: ")
+            + std::strerror(failure);
+        return nullptr;
     }
     if (!sameThreads(before, beforeCount, after, afterCount)) {
         lease.reset();
-        return giveUp("the threads changed while this was stopping them, so at least one "
-                      "was never asked where it stands");
+        error = "the threads changed while this was stopping them, so at least one was "
+                "never asked where it stands";
+        return nullptr;
     }
 
     const unsigned recorded = nextSlot.load(std::memory_order_relaxed);
     if (recorded != others) {
         lease.reset();
-        return giveUp("a different number of threads reported in than were asked");
+        error = "a different number of threads reported in than were asked";
+        return nullptr;
     }
     for (unsigned i = 0; i < recorded; ++i) {
         m_parked.push_back(ParkedThread{parkedTid[i].load(std::memory_order_relaxed),
@@ -405,9 +411,10 @@ std::unique_ptr<QuiescenceLease> StopTheWorldQuiescer::acquire(const WriteRegion
         if (region.contains(thread.instructionPointer)) {
             const int standing = thread.tid;
             lease.reset();
-            return giveUp("thread " + std::to_string(standing)
-                          + " is standing inside the bytes about to change, so writing them "
-                            "would change the instruction it is about to execute");
+            error = "thread " + std::to_string(standing)
+                + " is standing inside the bytes about to change, so writing them would "
+                  "change the instruction it is about to execute";
+            return nullptr;
         }
     }
 
