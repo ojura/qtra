@@ -17,6 +17,10 @@ int fixtureAddsOne(int value);
 int fixtureCounter(void);
 extern int fixtureCounterStorage;
 
+// Opens with CPUID, which this decoder can step over but has not approved for
+// relocation. Planned, never called.
+int fixtureKnownButUnapproved(void);
+
 // Opens with a floating-point instruction, which this decoder does not read.
 int fixtureUndecodable(void);
 

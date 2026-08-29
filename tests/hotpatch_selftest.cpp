@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -20,10 +19,6 @@
 #include <chrono>
 #include <thread>
 #include <atomic>
-
-#if defined(__linux__)
-#  include <sys/mman.h>
-#endif
 
 namespace {
 
@@ -77,42 +72,6 @@ __attribute__((noinline)) void copyThroughTheTable(char* to, const char* from,
     char* volatile opaqueDestination = to;
     std::memcpy(opaqueDestination, from, opaqueCount);
 }
-
-#if defined(__linux__) && defined(__x86_64__)
-// Allows the mapping to be made writable and refuses to put it back, which is
-// the order that leaves the bytes changed after the caller has been told the
-// write failed.
-int failRestoreProtect(void* address, std::size_t length, int protection)
-{
-    if ((protection & PROT_WRITE) != 0) {
-        return ::mprotect(address, length, protection);
-    }
-    errno = EACCES;
-    return -1;
-}
-
-// Fails the restore on its first write and behaves normally afterwards, so one
-// manager can be driven into recovery and then back out of it: a manager is
-// given its writer once, and recovery is itself a write. The count belongs to
-// the writer, so another one made here starts again from the beginning.
-class FailFirstRestoreWriter final : public runtime_agent::TextWriter {
-public:
-    [[nodiscard]] runtime_agent::TextWriteResult write(void* address,
-                                                       const std::uint8_t* bytes,
-                                                       const std::size_t size) override
-    {
-        if (m_pending) {
-            m_pending = false;
-            return runtime_agent::writeText(address, bytes, size, &failRestoreProtect);
-        }
-        return m_mapped.write(address, bytes, size);
-    }
-
-private:
-    bool m_pending = true;
-    runtime_agent::MappedTextWriter m_mapped;
-};
-#endif
 
 // The two operations composed, which is what a caller wanting "make this run"
 // does. Stated here so every use below reads the same and the admission is
@@ -376,6 +335,16 @@ int main(int argc, char** argv)
 
         why.clear();
         if (runtime_agent::planPrologueRelocation(
+                reinterpret_cast<void*>(&fixtureKnownButUnapproved), plan, why)
+            || why.find("known length") == std::string::npos
+            || why.find("not been approved for relocation") == std::string::npos) {
+            std::cerr << "a prologue opening with a decoded but unapproved instruction was "
+                         "planned anyway: " << why << '\n';
+            return 79;
+        }
+
+        why.clear();
+        if (runtime_agent::planPrologueRelocation(
                 reinterpret_cast<void*>(&fixtureOpensWithABranch), plan, why)
             || why.find("branches somewhere named as a distance") == std::string::npos) {
             std::cerr << "a prologue opening with a branch was planned anyway: " << why << '\n';
@@ -470,14 +439,16 @@ int main(int argc, char** argv)
             struct Form {
                 const char* name;
                 std::vector<std::uint8_t> bytes;
+                bool controlTransfer;
             };
             const std::vector<Form> immovable{
-                {"xbegin", {0xC7U, 0xF8U, 0x00U, 0x00U, 0x00U, 0x00U}},
-                {"sysret", {0x0FU, 0x07U}},
-                {"ud2", {0x0FU, 0x0BU}},
-                {"hlt", {0xF4U}},
-                {"rsm", {0x0FU, 0xAAU}},
-                {"xabort", {0xC6U, 0xF8U, 0x00U}},
+                {"cpuid", {0x0FU, 0xA2U}, false},
+                {"xbegin", {0xC7U, 0xF8U, 0x00U, 0x00U, 0x00U, 0x00U}, true},
+                {"sysret", {0x0FU, 0x07U}, true},
+                {"ud2", {0x0FU, 0x0BU}, true},
+                {"hlt", {0xF4U}, true},
+                {"rsm", {0x0FU, 0xAAU}, true},
+                {"xabort", {0xC6U, 0xF8U, 0x00U}, true},
             };
             for (const Form& form : immovable) {
                 std::uint8_t buffer[16] = {};
@@ -488,11 +459,47 @@ int main(int argc, char** argv)
                     std::cerr << form.name << " could not be decoded at all: " << why << '\n';
                     return 77;
                 }
-                if (!decoded.transfersControl && !decoded.relativeBranch) {
+                if (decoded.movable) {
                     std::cerr << form.name
-                              << " decoded as an ordinary instruction, so it would be moved "
-                                 "into a copy where it means something else\n";
+                              << " was approved for relocation merely because its length is "
+                                 "known\n";
                     return 78;
+                }
+                const bool classifiedAsControl =
+                    decoded.transfersControl || decoded.relativeBranch;
+                if (classifiedAsControl != form.controlTransfer) {
+                    std::cerr << form.name << " has the wrong control-transfer classification\n";
+                    return 80;
+                }
+            }
+        }
+
+        // Group opcodes are approved by their ModR/M extension, not as one
+        // indivisible opcode. These forms share opcodes with refused forms above
+        // and must remain usable in ordinary compiler prologues.
+        {
+            struct Form {
+                const char* name;
+                std::vector<std::uint8_t> bytes;
+            };
+            const std::vector<Form> movable{
+                {"mov immediate", {0xC7U, 0xC0U, 0x01U, 0x00U, 0x00U, 0x00U}},
+                {"push through ff", {0xFFU, 0xF0U}},
+                {"test from the unary group", {0xF7U, 0xC0U, 0x01U, 0x00U, 0x00U, 0x00U}},
+                {"bit test from 0f ba", {0x0FU, 0xBAU, 0xE0U, 0x01U}},
+                {"vector xor", {0x66U, 0x0FU, 0xEFU, 0xC0U}},
+            };
+            for (const Form& form : movable) {
+                runtime_agent::DecodedInstruction decoded;
+                std::string why;
+                if (!runtime_agent::decodeInstruction(form.bytes.data(), form.bytes.size(),
+                                                       decoded, why)) {
+                    std::cerr << form.name << " could not be decoded: " << why << '\n';
+                    return 81;
+                }
+                if (!decoded.movable || decoded.transfersControl || decoded.relativeBranch) {
+                    std::cerr << form.name << " was not approved as a straight-line form\n";
+                    return 82;
                 }
             }
         }
@@ -807,9 +814,9 @@ int main(int argc, char** argv)
     }
 
     std::cout << "PASS: " << patch->name_utf8
-              << " selected and deselected through a permanent gateway, a failed"
-                 " install left recoverable state, and a refused install with an"
-                 " unaccounted thread changed nothing\n";
+              << " selected and deselected through a permanent gateway; the GOT and"
+                 " relocated-prologue checks passed; an unaccounted-thread refusal changed"
+                 " nothing\n";
     // Intentionally do not dlclose: the running app follows the same policy.
     return 0;
 #endif

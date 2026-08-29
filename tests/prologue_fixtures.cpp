@@ -67,6 +67,23 @@ fixtureUndecodable:
 .size fixtureUndecodable, .-fixtureUndecodable
 )");
 
+// Opens with CPUID, whose length is known so the body sweep can pass it, but
+// which has not been approved for copying into a trampoline. Planned and never
+// called: the fixture exists to prove that decoding a form does not approve it.
+asm(R"(
+.text
+.globl fixtureKnownButUnapproved
+.type fixtureKnownButUnapproved, @function
+fixtureKnownButUnapproved:
+    endbr64
+    cpuid
+    nop
+    nop
+    nop
+    ret
+.size fixtureKnownButUnapproved, .-fixtureKnownButUnapproved
+)");
+
 // Opens with a jump, which names where it goes as a distance from itself, so
 // moving it would send it somewhere else.
 asm(R"(

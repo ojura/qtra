@@ -56,12 +56,13 @@ std::string hex(const std::uint8_t byte)
     return text;
 }
 
-// What follows an opcode, so a length is computed and never guessed.
+// What follows an opcode, so a length is computed and never guessed, plus the
+// separate positive decision that its forms may be relocated.
 //
-// Anything left unset is refused. A length this is not sure of would be a wrong
-// length, and nothing downstream would notice: the sweep would walk into the
-// middle of an instruction and every answer after that would be invented.
-enum OperandFlags : unsigned {
+// Anything left unset is refused. An uncertain length can make the sweep start
+// in the middle of an instruction, after which every boundary and branch target
+// it reports is wrong.
+enum OpcodeFlags : unsigned {
     formUnknown = 0U,
     formKnown = 1U << 0U,
     formModRM = 1U << 1U,
@@ -83,6 +84,12 @@ enum OperandFlags : unsigned {
 
     // An absolute address inside the instruction, eight bytes wide in long mode.
     formMemoryOffset = 1U << 8U,
+
+    // Positive approval for copying every form represented by this table entry.
+    // Entries without it can still be decoded for the body sweep. Opcodes whose
+    // ModR/M extension selects between movable and nonmovable forms are decided
+    // explicitly after that byte is read.
+    formMovable = 1U << 9U,
 };
 
 struct OpcodeTables {
@@ -98,6 +105,11 @@ constexpr OpcodeTables buildTables()
     const auto fill = [](unsigned* table, unsigned from, unsigned to, unsigned flags) {
         for (unsigned index = from; index <= to; ++index) {
             table[index] = flags;
+        }
+    };
+    const auto approve = [](unsigned* table, unsigned from, unsigned to) {
+        for (unsigned index = from; index <= to; ++index) {
+            table[index] |= formMovable;
         }
     };
 
@@ -182,6 +194,44 @@ constexpr OpcodeTables buildTables()
     tables.two[0xC7U] = formKnown | formModRM;              // the compare-exchange group
     fill(tables.two, 0xC8U, 0xCFU, formKnown);              // bswap
     fill(tables.two, 0xD0U, 0xFEU, formKnown | formModRM);  // the rest of the vector block
+
+    // Relocation approval is deliberately separate from length decoding. A new
+    // table entry above stays nonmovable until it is added here after review.
+    // These are straight-line integer arithmetic, data movement, stack work,
+    // comparisons, shifts, no-ops, and the vector forms compilers commonly put
+    // at an opening. Group opcodes with both approved and refused operations are
+    // handled from their ModR/M extension below.
+    for (unsigned base = 0x00U; base <= 0x38U; base += 8U) {
+        approve(tables.one, base, base + 5U);                // integer arithmetic
+    }
+    approve(tables.one, 0x50U, 0x5FU);                      // push and pop registers
+    approve(tables.one, 0x63U, 0x63U);                      // movsxd
+    approve(tables.one, 0x68U, 0x6BU);                      // push and imul immediates
+    approve(tables.one, 0x80U, 0x81U);                      // arithmetic immediates
+    approve(tables.one, 0x83U, 0x83U);
+    approve(tables.one, 0x84U, 0x8DU);                      // test, xchg, mov, lea
+    approve(tables.one, 0x90U, 0x99U);                      // nop, xchg, sign extension
+    approve(tables.one, 0xA0U, 0xA3U);                      // mov with an absolute address
+    approve(tables.one, 0xA8U, 0xA9U);                      // accumulator test
+    approve(tables.one, 0xB0U, 0xBFU);                      // mov immediates
+    approve(tables.one, 0xC0U, 0xC1U);                      // shifts by an immediate
+    approve(tables.one, 0xC9U, 0xC9U);                      // leave
+    approve(tables.one, 0xD0U, 0xD3U);                      // shifts by one or cl
+
+    approve(tables.two, 0x0DU, 0x0DU);                      // prefetch
+    approve(tables.two, 0x10U, 0x1FU);                      // vector moves, endbr, nop
+    approve(tables.two, 0x28U, 0x2FU);                      // vector moves and conversions
+    approve(tables.two, 0x40U, 0x4FU);                      // conditional moves
+    approve(tables.two, 0x50U, 0x77U);                      // vector arithmetic and tests
+    approve(tables.two, 0x7CU, 0x7FU);                      // vector arithmetic and moves
+    approve(tables.two, 0x90U, 0x9FU);                      // conditional sets
+    approve(tables.two, 0xA3U, 0xA5U);                      // bit test and shld
+    approve(tables.two, 0xABU, 0xADU);                      // bts and shrd
+    approve(tables.two, 0xAFU, 0xB1U);                      // imul and cmpxchg
+    approve(tables.two, 0xB3U, 0xB3U);                      // btr
+    approve(tables.two, 0xB6U, 0xB7U);                      // movzx
+    approve(tables.two, 0xBBU, 0xC6U);                      // btc, scans, movsx, vector work
+    approve(tables.two, 0xC8U, 0xFEU);                      // bswap and vector arithmetic
 
     return tables;
 }
@@ -289,7 +339,7 @@ bool decodeInstruction(const std::uint8_t* at,
             form = formKnown | formModRM;
         } else {
             form = tables.two[second];
-            if (form == formUnknown) {
+            if ((form & formKnown) == 0U) {
                 error = "the two-byte opcode 0f " + hex(second)
                     + " is not one this decoder reads, so its length is unknown and "
                       "guessing it would be silent";
@@ -299,7 +349,7 @@ bool decodeInstruction(const std::uint8_t* at,
     } else {
         primaryOpcode = at[offset];
         form = tables.one[primaryOpcode];
-        if (form == formUnknown) {
+        if ((form & formKnown) == 0U) {
             error = "the opcode " + hex(primaryOpcode)
                 + " is not one this decoder reads, so its length is unknown and guessing "
                   "it would be silent";
@@ -351,6 +401,38 @@ bool decodeInstruction(const std::uint8_t* at,
             }
             offset += displacement;
         }
+    }
+
+    bool movable = (form & formMovable) != 0U;
+
+    // These opcode groups mix operations that can be copied with operations
+    // that transfer control or encodings that have not been reviewed. Approval
+    // is positive for the individual ModR/M extension, not inherited from the
+    // fact that the group's length is known.
+    if (!escaped) {
+        switch (primaryOpcode) {
+        case 0x8FU:
+            movable = modrmReg == 0U;                        // pop
+            break;
+        case 0xC6U:
+        case 0xC7U:
+            movable = modrmReg == 0U;                        // mov immediate
+            break;
+        case 0xF6U:
+        case 0xF7U:
+            movable = modrmReg != 1U;                        // test, not, neg, mul, div
+            break;
+        case 0xFEU:
+            movable = modrmReg <= 1U;                        // inc and dec
+            break;
+        case 0xFFU:
+            movable = modrmReg <= 1U || modrmReg == 6U;      // inc, dec, push
+            break;
+        default:
+            break;
+        }
+    } else if (primaryOpcode == 0xBAU) {
+        movable = modrmReg >= 4U;                            // bt, bts, btr, btc
     }
 
     if ((form & (formRel8 | formRelZ)) != 0U) {
@@ -497,6 +579,11 @@ bool decodeInstruction(const std::uint8_t* at,
             + " belong to this function, so reading it would be reading past the end of it";
         return false;
     }
+
+    // Control forms retain their specific classification even if a table range
+    // includes their opcode. This is an invariant rather than the planner's only
+    // protection; the planner reports the control-specific reason first.
+    decoded.movable = movable && !decoded.relativeBranch && !decoded.transfersControl;
     return true;
 }
 
@@ -681,6 +768,14 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
             }
             return false;
         }
+        if (!decoded.movable) {
+            error = "the instruction at offset " + std::to_string(taken)
+                + " of this function's opening bytes has a known length, but its form has "
+                  "not been approved for relocation. The body decoder can step over it while "
+                  "checking branch targets; that does not prove that moving it preserves what "
+                  "it does";
+            return false;
+        }
         if (decoded.ripRelative) {
             plan.adjustedRipRelative = true;
         }
@@ -813,19 +908,25 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     // name the same address from where it now sits.
     std::size_t offset = 0;
     while (offset < plan.takenBytes) {
+        const std::uint8_t* const plannedAt = plan.expectedBytes.data() + offset;
         DecodedInstruction decoded;
         std::string why;
-        if (!decodeInstruction(patchAt + offset, plan.takenBytes - offset, decoded,
-                               why)) {
+        if (!decodeInstruction(plannedAt, plan.takenBytes - offset, decoded, why)) {
             (void)::munmap(trampoline, trampolineBytes);
-            error = "the prologue changed between planning and installing: " + why;
+            error = "the recorded prologue cannot be decoded while building its copy: " + why;
+            return false;
+        }
+        if (!decoded.movable) {
+            (void)::munmap(trampoline, trampolineBytes);
+            error = "the recorded prologue contains an instruction that is not approved for "
+                    "relocation";
             return false;
         }
         if (decoded.ripRelative) {
             const std::uint8_t* const originalAt = patchAt + offset;
             std::uint8_t* const copiedAt = copy + sizeof(landingPad) + offset;
             std::int32_t displacement = 0;
-            std::memcpy(&displacement, originalAt + decoded.displacementOffset,
+            std::memcpy(&displacement, plannedAt + decoded.displacementOffset,
                         sizeof(displacement));
 
             const auto originalEnd =

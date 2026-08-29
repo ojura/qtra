@@ -127,7 +127,8 @@ struct DecodedInstruction {
     // is different in one way that matters: it returns, so what it threatens is
     // a return address and not an entry, which is why the two are told apart.
     bool unprovableTarget = false;
-// As an integer, not a pointer.
+
+    // As an integer, not a pointer.
     //
     // A call reaches another function, so this address is outside the object
     // the instruction bytes belong to. Forming it by adding to a pointer, and
@@ -138,7 +139,8 @@ struct DecodedInstruction {
     std::uintptr_t branchTarget = 0;
 };
 
-// Reads one instruction. Refuses anything outside the list above.
+// Reads one instruction. Refuses any form whose length this decoder does not
+// know. A successful decode can still report movable=false.
 //
 // available is how many bytes belong to what is being read, and an instruction
 // that would run past it is refused. Without that this reads whatever follows,
