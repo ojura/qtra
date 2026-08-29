@@ -134,8 +134,8 @@ cmake --preset release
 cmake --build --preset release --parallel
 ```
 
-Each build runs its tests. Qt is found from the `CMAKE_PREFIX_PATH`
-environment variable, which the presets do not set:
+Each build runs its tests. The presets do not name a Qt, so where cmake cannot
+already find one, say where it is:
 
 ```bash
 export CMAKE_PREFIX_PATH=/path/to/Qt/6.9.3/gcc_64
@@ -172,13 +172,13 @@ compiler, include, macro, language, target, and ABI context.
 Use an existing display:
 
 ```bash
-./build/release/qt_runtime_cube --unsafe-agent
+./build/release/qt_runtime_cube
 ```
 
 Or let the wrapper create an Xvfb display and force Mesa software rendering:
 
 ```bash
-./scripts/run_xvfb.sh --unsafe-agent
+./scripts/run_xvfb.sh
 ```
 
 By default the Unix socket is:
@@ -188,8 +188,9 @@ By default the Unix socket is:
 ```
 
 Override it with `--agent-socket PATH` or `QT_RUNTIME_AGENT_SOCKET`.
-`--unsafe-agent` enables raw memory read/write and deliberate crash commands;
-it is not required for snippets or function patches.
+Add `--unsafe-agent` for raw memory read and write and the deliberate crash
+command. Snippets and function patches need none of them, so the commands below
+work without it.
 
 ## Basic control
 
@@ -574,9 +575,14 @@ Compile and immediately hot-activate a replacement generation:
 ```bash
 python3 tools/jit_patch.py patches/wobble_patch.cpp \
   --compile-db build/release/compile_commands.json \
-  --context src/cube_step.cpp \
-  --mode entry --optimization O3
+  --context hotpatch_selftest.dir/src/cube_step.cpp.o \
+  --optimization O3
 ```
+
+The context names an object and not the source, because the application and the
+self-test each compile `src/cube_step.cpp` and the oracle refuses a context that
+matches more than one compilation. Add `--accept-incomplete` to activate where
+the build could not show the replacement reaches every call.
 
 Each automatically named output uses a fresh path because `dlopen()` otherwise
 reuses an already loaded object with the same canonical filename.
@@ -890,6 +896,11 @@ python3 tools/agentctl.py call patch.status
 python3 tools/agentctl.py call patch.rollback
 ```
 
+Rolling back stores the original's address into the gateway's slot. It does not
+put the entry's own bytes back: the gateway stays for the life of the process,
+and `entryState` goes to `original` and not to `pristine`. Restoring the entry
+happens only when an install changed bytes and could not finish.
+
 ### Preparing the target
 
 Three things have to be true of a function before its entry can be rewritten,
@@ -978,8 +989,16 @@ RuntimeAgentPatchBinding bound{};
 host->patch_bind(host->agent_context,
                  reinterpret_cast<void*>(&cube_step_builtin),
                  reinterpret_cast<void*>(&myStep),
+                 0,
                  &bound);
 ```
+
+The flags are zero here, so the host answers to whatever its build recorded
+about this target and refuses where that build recorded nothing.
+`RUNTIME_AGENT_PATCH_ACCEPT_INCOMPLETE` proceeds where the build could not show
+the replacement reaches every call, and reaches that question and no other:
+whether the entry may be written at all is decided by what the build recorded
+about which threads reach the target.
 
 It gets back an id, the address of the original, and whatever its binding
 displaced, so a replacement can call either. `patch_unbind` releases it.
@@ -1084,6 +1103,8 @@ src/agent/build_id.*            the running executable's GNU build id
 src/agent/entry_hotpatch.*      writing mapped text, and encoding the gateway
 src/agent/patch_site.*          where a function may be patched, from the compiler's record
 src/agent/patch_manager.*       what is installed, and which replacement is selected
+src/agent/patch_registry.*      owns a manager per entry for the life of the process
+src/agent/write_admission.*     what a write into live text was admitted under
 src/agent/gateway_record.h      one gateway's slot, never freed
 src/agent/quiescence*.h         when writing an entry is safe, and who says so
 src/agent/coverage_manifest.*   reading the build's decision back at runtime
