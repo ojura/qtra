@@ -80,7 +80,23 @@ class CoverageAnalyzer(unittest.TestCase):
                            "int main(void){return f(1);}", unprobed, directory)
             report = analyze(binary, directory, target="f")
             self.assertEqual(report["coverage"], "unknown")
-            self.assertIn("IPA clone dumps", report["unknown"])
+            self.assertTrue(any("clone dumps" in u for u in report["unknown"]), report["unknown"])
+
+    def test_unrelated_dump_cannot_answer_for_the_owning_object(self):
+        """More than one target can compile the same source, and each gets its
+        own dump. A dump belonging to a different object says nothing about the
+        translation unit that is actually in this binary."""
+        with tempfile.TemporaryDirectory() as raw:
+            directory = pathlib.Path(raw)
+            binary = build("__attribute__((noinline)) int f(int x){return x+1;}\n"
+                           "int main(void){return f(1);}", PREPARED, directory)
+            # A dump exists in the tree, but not the one beside this object.
+            for dump in directory.glob("*.ipa-clones"):
+                dump.rename(directory / "somebody_elses.ipa-clones")
+            report = analyze(binary, directory, target="f")
+            self.assertEqual(report["decision"], "refuse")
+            self.assertTrue(any("owning object" in u for u in report["unknown"]),
+                            report["unknown"])
 
     def test_observed_domain_does_not_authorize(self):
         """Having seen one thread is not proof another never arrives."""

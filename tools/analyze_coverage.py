@@ -142,33 +142,59 @@ CLONE = re.compile(
 )
 
 
-def clone_records(build_dir: pathlib.Path,
-                  name: str) -> tuple[list[dict[str, str]], int]:
-    """What the compiler recorded doing to this function, and how many dumps said so.
+def owning_object(compile_db: pathlib.Path,
+                  binary: pathlib.Path,
+                  source_hint: str) -> str | None:
+    """The object file that this binary's build compiled the target from.
+
+    More than one target can compile the same source, and this tree does: the
+    application and the self-test both build cube_step.cpp, each producing its
+    own object and its own dump. Matching on the source name alone picks
+    whichever comes first, so the answer could describe a translation unit that
+    is not in the binary being analyzed.
+    """
+    try:
+        entries = json.loads(compile_db.read_text())
+    except (OSError, ValueError):
+        return None
+    # CMake puts each target's objects under CMakeFiles/<target>.dir.
+    marker = f"CMakeFiles/{binary.name}.dir/"
+    for entry in entries:
+        output = entry.get("output", "")
+        if source_hint in entry.get("file", "") and marker in output:
+            return output
+    return None
+
+
+def clone_dump_for(build_dir: pathlib.Path, object_path: str) -> pathlib.Path | None:
+    """The dump GCC wrote beside that object.
+
+    Named from the output path with the object suffix replaced, so it is found
+    by where it sits rather than by searching for anything that looks like one.
+    """
+    obj = build_dir / object_path
+    stem = obj.with_suffix("")
+    matches = sorted(stem.parent.glob(stem.name + "*.ipa-clones"))
+    return matches[0] if matches else None
+
+
+def clone_records_in(dump: pathlib.Path, name: str) -> list[dict[str, str]]:
+    """What that one dump recorded the compiler doing to this function.
 
     An inline or a clone is a copy the entry never sees, so each one is a hole
     in what replacing the entry covers.
-
-    The dump count is returned because no records and no dumps are different
-    answers. A build that emitted none has not been asked the question, and
-    reporting that as "no clones" would turn a missing modality into a clean
-    bill of health.
     """
     records = []
-    dumps = list(build_dir.rglob("*.ipa-clones"))
-    for dump in dumps:
-        for line in dump.read_text(errors="replace").splitlines():
-            match = CLONE.match(line.strip())
-            if match is None:
-                continue
-            if match.group("from") != name:
-                continue
-            records.append({
-                "into": match.group("to"),
-                "kind": match.group("what").strip(),
-                "recordedIn": dump.name,
-            })
-    return records, len(dumps)
+    for line in dump.read_text(errors="replace").splitlines():
+        match = CLONE.match(line.strip())
+        if match is None or match.group("from") != name:
+            continue
+        records.append({
+            "into": match.group("to"),
+            "kind": match.group("what").strip(),
+            "recordedIn": dump.name,
+        })
+    return records
 
 
 def preparation(compile_db: pathlib.Path, source_hint: str) -> dict[str, object]:
@@ -239,12 +265,17 @@ def analyze(binary: pathlib.Path,
     prepared = preparation(compile_db, source_hint)
     found_aliases = aliases_at(binary, target)
 
+    # Tied to the object this binary was built from, so a dump belonging to some
+    # other target cannot answer for this one.
+    owning = owning_object(compile_db, binary, source_hint)
+    dump = clone_dump_for(build_dir, owning) if owning else None
+    clones = clone_records_in(dump, target) if dump else []
+
     # This target's own reserved area, not merely the existence of somebody's.
     # The compiler records the address of the area, which is the function's own
     # address or four bytes past it where a CET landing pad comes first.
     recorded = [a for a in patchable_addresses(binary)
                 if target_address <= a <= target_address + 8]
-    clones, dump_count = clone_records(build_dir, target)
 
     evidence: list[dict[str, object]] = [
         {"modality": "final ELF symbols", "answered": True,
@@ -253,11 +284,15 @@ def analyze(binary: pathlib.Path,
          "finding": f"reserved at +{recorded[0] - target_address}" if recorded
                     else "this target has no reserved area, so its entry cannot be "
                          "rewritten without relocating real instructions"},
-        {"modality": "IPA clone dumps", "answered": dump_count > 0,
-         "finding": f"{len(clones)} record(s) naming this function, from {dump_count} dump(s)"
-                    if dump_count
-                    else "no clone dumps in this build, so inlining and specialization "
-                         "were never recorded; build with PATCH_READY"},
+        {"modality": "IPA clone dumps for the owning object",
+         "answered": dump is not None,
+         "finding": f"{len(clones)} record(s) naming this function in {dump.name}"
+                    if dump is not None
+                    else ("the object this binary compiled the target from has no clone "
+                          "dump, so inlining and specialization were never recorded for "
+                          "it; build with PATCH_READY" if owning
+                          else "no object in this binary's build compiled the target's "
+                               "source, so there is nothing to have recorded")},
         {"modality": "preparation", "answered": prepared["provider"] != "none",
          "finding": prepared["provider"]},
     ]
@@ -320,6 +355,8 @@ def analyze(binary: pathlib.Path,
         "skipped": skipped,
         "unknown": unknown,
         "evidence": evidence,
+        "compileOutput": owning,
+        "cloneDump": str(dump) if dump is not None else None,
         "callerExecutionDomain": domain,
         "aliases": found_aliases,
         "clones": clones,
