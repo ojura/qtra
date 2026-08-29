@@ -16,54 +16,51 @@
 
 namespace {
 
-// Stopping the cube long enough to write its step function's entry.
+// Why writing this target's entry is safe here.
 //
-// The animation timer is the only thing that calls it, so pausing the timer is
-// this application's whole quiescence story. A general target has to account
-// for every thread, which is why the interface is separate from the manager
-// that uses it.
-class CubeTimerQuiescer final : public runtime_agent::Quiescer {
+// The only thing that calls it is the widget's animation slot, and that runs on
+// the thread that owns the widget. Every path that writes the entry, the
+// protocol handler and the host binding calls, is refused unless it is already
+// on that thread. So a write happens between two ticks of a single-threaded
+// event loop, with the target not on the stack, and nothing else can be inside
+// it.
+//
+// That is the reason, and it is worth naming precisely, because stopping the
+// animation timer also looks like a reason and is not one: the timer cannot
+// fire while this thread is in the handler doing the writing. Pausing it would
+// change what the cube does without changing what makes the write safe, and
+// reporting it as the reason would describe the wrong thing.
+class SameThreadRequestBoundary final : public runtime_agent::Quiescer {
 public:
-    [[nodiscard]] const char* name() const noexcept override { return "cube-animation-timer"; }
-
-    explicit CubeTimerQuiescer(CubeWidget* cube)
+    explicit SameThreadRequestBoundary(CubeWidget* cube)
         : m_cube(cube)
     {
+    }
+
+    [[nodiscard]] const char* name() const noexcept override
+    {
+        return "same-thread-request-boundary";
     }
 
     std::unique_ptr<runtime_agent::QuiescenceLease> acquire(std::string& error) override
     {
         if (m_cube == nullptr) {
-            error = "there is no cube widget to stop";
+            error = "there is no widget whose thread this could be";
             return nullptr;
         }
-        return std::make_unique<TimerLease>(m_cube);
+        // Checked again here rather than assumed from the caller's check, since
+        // this is the object claiming the write is safe.
+        if (QThread::currentThread() != m_cube->thread()) {
+            error = "this is not the thread that owns the target, so occupying it proves "
+                    "nothing about what else may be running the target";
+            return nullptr;
+        }
+        // Nothing is stopped, so nothing is restored. Holding this thread is
+        // what the claim rests on, and the caller already holds it.
+        return std::make_unique<runtime_agent::QuiescenceLease>();
     }
 
 private:
-    // Restores only what it stopped, so a timer that was already paused stays
-    // paused when the lease goes away.
-    class TimerLease final : public runtime_agent::QuiescenceLease {
-    public:
-        explicit TimerLease(CubeWidget* cube)
-            : m_cube(cube)
-            , m_wasRunning(cube->isRunning())
-        {
-            m_cube->setRunning(false);
-        }
-
-        ~TimerLease() override
-        {
-            if (m_wasRunning) {
-                m_cube->setRunning(true);
-            }
-        }
-
-    private:
-        CubeWidget* m_cube = nullptr;
-        bool m_wasRunning = false;
-    };
-
     CubeWidget* m_cube = nullptr;
 };
 
@@ -350,7 +347,7 @@ bool ModuleManager::activateEntryPatch(const quint64 id,
         site.name = QStringLiteral("cube_step_builtin").toStdString();
     }
 
-    CubeTimerQuiescer quiescer(m_cube);
+    SameThreadRequestBoundary quiescer(m_cube);
     runtime_agent::PatchBinding binding;
     if (!m_patches.bind(site,
                         reinterpret_cast<void*>(loaded->cubePatch->step),
@@ -420,7 +417,7 @@ int ModuleManager::bindReplacement(void* target,
         site.name = QStringLiteral("cube_step_builtin").toStdString();
     }
 
-    CubeTimerQuiescer quiescer(m_cube);
+    SameThreadRequestBoundary quiescer(m_cube);
     if (!m_patches.bind(site, replacement, owner, quiescer, binding, nativeError)) {
         error = QString::fromStdString(nativeError);
         return m_patches.state() == runtime_agent::PatchState::RecoveryRequired ? -3 : -2;

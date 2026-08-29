@@ -14,6 +14,7 @@
 #include <dlfcn.h>
 #include <iostream>
 #include <string>
+#include <chrono>
 #include <thread>
 #include <atomic>
 
@@ -235,6 +236,24 @@ int main(int argc, char** argv)
         if (beforeRefusal != afterRefusal) {
             std::cerr << "a refused install changed the entry\n";
             return 37;
+        }
+
+        // Joining means the thread has finished, and its /proc/self/task entry
+        // can outlive that by a moment. Everything below counts threads, so it
+        // waits for the count to settle instead of racing the kernel tearing
+        // the entry down.
+        bool settled = false;
+        for (int attempt = 0; attempt < 200 && !settled; ++attempt) {
+            const auto now = runtime_agent::observedThreadCount();
+            settled = now.has_value() && *now == 1;
+            if (!settled) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        if (!settled) {
+            std::cerr << "the worker's task entry did not go away, so a thread count "
+                         "cannot be trusted here\n";
+            return 38;
         }
     }
 
