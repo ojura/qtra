@@ -523,6 +523,13 @@ if(BUILD_TESTING)
     # non-CET presets ask for none there, which would strip the markers this
     # target compiles itself to have and refuse every replacement it offers.
     target_link_options(got_reach_selftest PRIVATE -fcf-protection=branch)
+    # One object holding a lazy slot and a bound slot for the same symbol, which
+    # is the mix a redirect has to refuse. Lazy binding is what makes the first
+    # of those lazy, so this one object opts out of binding at load time.
+    add_library(mixed_slot_caller SHARED tests/mixed_slot_caller.cpp)
+    target_compile_options(mixed_slot_caller PRIVATE -fplt)
+    target_link_options(mixed_slot_caller PRIVATE -Wl,-z,lazy)
+    target_link_libraries(got_reach_selftest PRIVATE mixed_slot_caller)
     # Both no-stub objects stay loaded even though the test calls into only one.
     # The linker drops a library nothing references, and the second one exists
     # to be a second match for a suffix, which is a reason the linker cannot

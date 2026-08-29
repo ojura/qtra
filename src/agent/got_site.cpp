@@ -426,11 +426,26 @@ bool resolveGotSlots(const CallerQuery& caller,
         sites.clear();
         return false;
     }
-    if (sites.empty() && search.sawUnbound) {
-        error = "'" + symbol + "' is not bound yet in that object, so its slot holds the "
-                "loader's own stub. Storing a replacement there works until some thread "
-                "takes that path, and the resolver then writes the real function over it. "
-                "Load the object with its symbols bound before redirecting it";
+    // An unbound slot is refused whether or not others were found.
+    //
+    // Answering with the bound ones alone would be a partial redirect reported
+    // as a complete one: the caller redirects what it was handed, the resolver
+    // later writes the real function into the slots that were left out, and
+    // those calls reach the original with nothing to say why. A caller asking
+    // for every slot has no way to tell that from a caller whose object only
+    // ever had these.
+    if (search.sawUnbound) {
+        error = sites.empty()
+            ? "'" + symbol + "' is not bound yet in that object, so its slot holds the "
+              "loader's own stub. Storing a replacement there works until some thread "
+              "takes that path, and the resolver then writes the real function over it. "
+              "Load the object with its symbols bound before redirecting it"
+            : "'" + symbol + "' is reached through " + std::to_string(sites.size())
+              + " slot(s) that are bound and at least one that is not. Redirecting only "
+                "the bound ones leaves the rest reaching the original as soon as the "
+                "resolver runs, and nothing afterwards reports that. Load the object with "
+                "its symbols bound before redirecting it";
+        sites.clear();
         return false;
     }
     if (sites.empty()) {

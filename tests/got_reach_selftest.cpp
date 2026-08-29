@@ -300,6 +300,26 @@ int main()
         check(registry.unbind(accepted.id, 3, error), "then released");
     }
 
+    std::printf("a redirect spanning a bound slot and an unbound one\n");
+    {
+        // Three of this process's libraries end in "caller.so". Two reach malloc
+        // through a slot the loader filled in before anything ran; the third
+        // reaches it by a call nothing here has made, so its slot still holds
+        // the resolver stub.
+        //
+        // Answering with the two would be a partial redirect reported as a whole
+        // one, and the third would reach the original as soon as something calls
+        // it.
+        std::vector<runtime_agent::GotSite> spanning;
+        std::string spanError;
+        const bool resolved = runtime_agent::resolveGotSlots(
+            runtime_agent::CallerQuery::byName("caller.so"), "malloc", spanning, spanError);
+        check(!resolved, "resolving across them is refused");
+        check(spanError.find("bound and at least one that is not") != std::string::npos,
+              spanError.empty() ? "with a reason" : spanError.c_str());
+        check(spanning.empty(), "and hands back nothing to redirect");
+    }
+
     std::printf("a caller built with no stubs, whose slots are in the other table\n");
     {
         const runtime_agent::CallerQuery noPlt =
