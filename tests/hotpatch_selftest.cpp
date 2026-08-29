@@ -1,4 +1,5 @@
 #include "agent/entry_hotpatch.h"
+#include "agent/patch_site.h"
 #include "demo/cube_step_abi.h"
 
 #include <algorithm>
@@ -148,6 +149,42 @@ int main(int argc, char** argv)
         || !approximatelyEqual(after.scale, before.scale)) {
         std::cerr << "rollback did not restore the builtin function\n";
         return 13;
+    }
+
+    // The compiler's own record of where this function may be patched, against
+    // the address the patcher works out for itself. They have to agree, because
+    // the plan is to delete the arithmetic and keep the record.
+    {
+        runtime_agent::PatchSite site;
+        std::string resolveError;
+        if (!runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&cube_step_builtin),
+                                             site,
+                                             resolveError)) {
+            std::cerr << "resolving the recorded patch site failed: " << resolveError << '\n';
+            return 20;
+        }
+        if (reinterpret_cast<std::uintptr_t>(site.patchAddress) != expectedPatchAddress) {
+            std::cerr << "the recorded patch address disagrees with the one derived from "
+                         "ENDBR64\n";
+            return 21;
+        }
+        if (site.reservedBytes != 16) {
+            std::cerr << "the reserved area measured " << site.reservedBytes
+                      << " bytes, expected 16\n";
+            return 22;
+        }
+
+        // A function nothing prepared has to be refused rather than patched at
+        // whatever happens to follow it.
+        runtime_agent::PatchSite unprepared;
+        std::string refusal;
+        if (runtime_agent::resolvePatchSite(reinterpret_cast<void*>(&approximatelyEqual),
+                                            unprepared,
+                                            refusal)
+            || refusal.empty()) {
+            std::cerr << "an unprepared function resolved to a patch site\n";
+            return 23;
+        }
     }
 
     // A permission restore that fails after the copy is the one path that

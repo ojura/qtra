@@ -67,6 +67,7 @@ if(BUILD_HOTPATCH_SELFTEST)
         tests/hotpatch_selftest.cpp
         src/cube_step.cpp
         src/agent/entry_hotpatch.cpp
+        src/agent/patch_site.cpp
     )
     target_include_directories(hotpatch_selftest PRIVATE include src)
     target_link_libraries(hotpatch_selftest PRIVATE ${CMAKE_DL_LIBS})
@@ -95,6 +96,8 @@ if(BUILD_QT_APP)
         src/cube_step.cpp
         src/agent/entry_hotpatch.h
         src/agent/entry_hotpatch.cpp
+        src/agent/patch_site.h
+        src/agent/patch_site.cpp
         src/agent/object_registry.h
         src/agent/object_registry.cpp
         src/agent/module_manager.h
