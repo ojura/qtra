@@ -269,7 +269,48 @@ int main(int argc, char** argv)
             application.processEvents();
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        check(handlerRan, "and dispatches it, so the late reply left it intact");
+        check(handlerRan, "and dispatches it");
+
+        // The reply is read back and checked exactly, not merely awaited.
+        //
+        // This is a liveness check and it detects the wrong way round: a write
+        // into storage that has already been freed and reused can leave a fresh
+        // caller working perfectly, so serving one proves nothing about the
+        // write. What it can do is aim where a stray write would most likely
+        // land. The freed socket's memory is most plausibly taken by the next
+        // connection's own objects, so the frame that connection receives is
+        // where corruption would surface first, and requiring the exact id and
+        // payload is stricter than requiring that something arrived.
+        replying->sendSuccess(held, heldId, QJsonObject{{QStringLiteral("late"), false}});
+
+        // Events share this stream, and one arrives on connect, so the reply is
+        // the line carrying this request's id rather than the first line read.
+        QByteArray stream;
+        QJsonObject reply;
+        const auto readBy = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (reply.isEmpty() && std::chrono::steady_clock::now() < readBy) {
+            application.processEvents();
+            if (after.waitForReadyRead(50)) {
+                stream += after.readAll();
+            }
+            for (const QByteArray& line : stream.split('\n')) {
+                if (line.isEmpty()) {
+                    continue;
+                }
+                const QJsonObject candidate = QJsonDocument::fromJson(line).object();
+                if (candidate.value(QStringLiteral("id")).toInt() == 8) {
+                    reply = candidate;
+                    break;
+                }
+            }
+        }
+        check(reply.value(QStringLiteral("id")).toInt() == 8,
+              "the reply names the request that asked for it");
+        check(reply.value(QStringLiteral("ok")).toBool(),
+              "and reports success");
+        check(reply.value(QStringLiteral("result")).toObject()
+                  .contains(QStringLiteral("late")),
+              "with the payload the handler sent, byte for byte from this socket");
         after.disconnectFromServer();
 
         replying.reset();
