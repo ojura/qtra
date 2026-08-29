@@ -190,7 +190,8 @@ constexpr OpcodeTables tables = buildTables();
 
 } // namespace
 
-bool decodeInstruction(const std::uint8_t* const at,
+bool decodeInstruction(const std::uint8_t* at,
+                       const std::size_t available,
                        DecodedInstruction& decoded,
                        std::string& error)
 {
@@ -199,6 +200,28 @@ bool decodeInstruction(const std::uint8_t* const at,
         error = "an address is required";
         return false;
     }
+    if (available == 0) {
+        error = "there are no bytes here to read";
+        return false;
+    }
+
+    // Read through a copy of what belongs to this function, so no read can
+    // leave it. Checking the length afterwards would already have read past the
+    // end, and the byte after a function can be in a page that is not mapped.
+    //
+    // Fifteen because nothing on this architecture is longer. Where fewer bytes
+    // belong here than that, the rest of the window is zero, and any
+    // instruction whose length depends on those reads longer than what belongs
+    // and is refused below.
+    std::uint8_t window[15] = {};
+    const std::size_t readable = available < sizeof(window) ? available : sizeof(window);
+    std::memcpy(window, at, readable);
+
+    // Where the instruction really is, kept because a branch names where it
+    // goes as a distance from the instruction after it. Working that out from
+    // the copy's address would give somewhere on this stack.
+    const std::uint8_t* const origin = at;
+    at = window;
 
     std::size_t offset = 0;
     bool operandSize16 = false;
@@ -342,7 +365,7 @@ bool decodeInstruction(const std::uint8_t* const at,
         }
         decoded.relativeBranch = true;
         decoded.transfersControl = true;
-        decoded.branchTarget = reinterpret_cast<std::uintptr_t>(at + offset)
+        decoded.branchTarget = reinterpret_cast<std::uintptr_t>(origin + offset)
             + static_cast<std::uintptr_t>(delta);
     }
 
@@ -391,10 +414,44 @@ bool decodeInstruction(const std::uint8_t* const at,
     offset += immediate;
 
     decoded.length = offset;
+
+    // Nothing on this architecture is longer than fifteen bytes, so a longer
+    // answer means the decode went wrong and reading it as an instruction would
+    // be reading somebody else's.
+    if (decoded.length > 15U) {
+        error = "the instruction decoded to " + std::to_string(decoded.length)
+            + " bytes, and nothing here is longer than fifteen, so this decode is wrong";
+        return false;
+    }
+    // And it has to fit in what belongs to the thing being read. A symbol of one
+    // byte otherwise yields an instruction five bytes long, made of itself and
+    // whatever follows it.
+    if (decoded.length > available) {
+        error = "the instruction at this address needs " + std::to_string(decoded.length)
+            + " bytes and only " + std::to_string(available)
+            + " belong to this function, so reading it would be reading past the end of it";
+        return false;
+    }
     return true;
 }
 
 namespace {
+
+// A summary of a run of bytes, for noticing that they changed.
+//
+// Not a defence against an arranged collision: it answers whether the function
+// is still the one that was swept, where the other answer means a second
+// patcher or a probe wrote to it. Allocates nothing, because it is recomputed
+// with every thread stopped.
+std::uint64_t digestOf(const std::uint8_t* const from, const std::size_t bytes) noexcept
+{
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (std::size_t i = 0; i < bytes; ++i) {
+        hash ^= from[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 // The function's extent, which the sweep needs and nothing else provides.
 bool extentOf(void* const function, const std::uint8_t*& entry, std::size_t& bytes,
@@ -521,7 +578,8 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
 
         DecodedInstruction decoded;
         std::string why;
-        if (!decodeInstruction(patchAt + taken, decoded, why)) {
+        if (!decodeInstruction(patchAt + taken, functionBytes - reached,
+                               decoded, why)) {
             error = "the instruction at offset " + std::to_string(taken)
                 + " of this function's opening bytes cannot be read: " + why
                 + ". A prologue using forms this decoder does not know cannot be moved; the "
@@ -561,7 +619,7 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
     while (offset < functionBytes) {
         DecodedInstruction decoded;
         std::string why;
-        if (!decodeInstruction(entry + offset, decoded, why)) {
+        if (!decodeInstruction(entry + offset, functionBytes - offset, decoded, why)) {
             error = "sweeping this function for branches stopped at offset "
                 + std::to_string(offset) + ": " + why
                 + ". Without a complete sweep there is no way to know whether something "
@@ -614,6 +672,7 @@ bool planPrologueRelocation(void* const function, ProloguePlan& plan, std::strin
     plan.patchAddress = const_cast<std::uint8_t*>(patchAt);
     plan.takenBytes = taken;
     plan.expectedBytes.assign(patchAt, patchAt + taken);
+    plan.bodyDigest = digestOf(entry, functionBytes);
     plan.keepsLandingPad = keepsLandingPad;
     return true;
 }
@@ -677,7 +736,8 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     while (offset < plan.takenBytes) {
         DecodedInstruction decoded;
         std::string why;
-        if (!decodeInstruction(patchAt + offset, decoded, why)) {
+        if (!decodeInstruction(patchAt + offset, plan.takenBytes - offset, decoded,
+                               why)) {
             (void)::munmap(trampoline, trampolineBytes);
             error = "the prologue changed between planning and installing: " + why;
             return false;
@@ -740,8 +800,13 @@ bool installRelocatedPrologue(const ProloguePlan& plan,
     // what is here, and the conclusion that nothing branches into these bytes
     // was reached about different instructions. Compared with execution stopped,
     // because comparing while they can change answers nothing.
-    const bool unchanged = std::memcmp(patchAt, plan.expectedBytes.data(),
-                                       plan.takenBytes) == 0;
+    // Both: the bytes being moved, and the whole body the sweep read. Changing
+    // a later instruction into a branch back into the opening leaves the
+    // opening equal, and that is what the second check is for.
+    const bool unchanged =
+        std::memcmp(patchAt, plan.expectedBytes.data(), plan.takenBytes) == 0
+        && digestOf(static_cast<const std::uint8_t*>(plan.entry), plan.functionBytes)
+            == plan.bodyDigest;
     if (!unchanged) {
         // Threads first: formatting the refusal can wait on a lock a parked
         // thread is holding.

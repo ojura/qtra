@@ -127,7 +127,15 @@ struct DecodedInstruction {
 };
 
 // Reads one instruction. Refuses anything outside the list above.
+//
+// available is how many bytes belong to what is being read, and an instruction
+// that would run past it is refused. Without that this reads whatever follows,
+// which for a short function is the next one: a symbol of one byte otherwise
+// yields a plan five bytes long, and installing it would overwrite something
+// nobody named. No instruction is longer than fifteen bytes, so an answer
+// longer than that is a decoding mistake and not a long instruction.
 [[nodiscard]] bool decodeInstruction(const std::uint8_t* at,
+                                     std::size_t available,
                                      DecodedInstruction& decoded,
                                      std::string& error);
 
