@@ -621,11 +621,24 @@ int main(int argc, char** argv)
             std::cerr << "the plan takes fewer bytes than a jump needs\n";
             return 54;
         }
-        if (!plan.keepsLandingPad
-            || plan.patchAddress != static_cast<std::uint8_t*>(plan.entry) + 4) {
+        // A landing pad exists to be kept only where the build emits one. The
+        // fixtures carry one exactly when the build does, so this asks the same
+        // question of the plan that the build answers for the fixture.
+        const bool fixtureHasLandingPad = runtime_agent::processRequiresLandingPads();
+        if (plan.keepsLandingPad != fixtureHasLandingPad) {
+            std::cerr << "the plan disagrees with the build about whether this entry has a "
+                         "landing pad\n";
+            return 55;
+        }
+        if (fixtureHasLandingPad
+            && plan.patchAddress != static_cast<std::uint8_t*>(plan.entry) + 4) {
             std::cerr << "the plan would write over the landing pad, leaving every indirect "
                          "call to this function faulting\n";
-            return 55;
+            return 126;
+        }
+        if (!fixtureHasLandingPad && plan.patchAddress != plan.entry) {
+            std::cerr << "with no landing pad the plan should start at the entry itself\n";
+            return 127;
         }
 
         if (fixtureAddsOne(10) != 11) {

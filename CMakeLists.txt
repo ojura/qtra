@@ -38,14 +38,25 @@ if(PATCH_READY)
     set(RUNTIME_AGENT_COVERAGE_MANIFEST "${CMAKE_BINARY_DIR}/coverage-manifest.json")
 endif()
 
-if(ENABLE_CET)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
-       AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+# Branch protection, stated in both directions.
+#
+# Distributions ship GCC configured with -fcf-protection=full already, so a
+# build that says nothing about it emits landing pads and carries the IBT
+# property note. A preset meant as the control for the CET one has to ask for
+# none explicitly, or the two produce the same binary and comparing them proves
+# nothing: measured here, both carried 2612 endbr64 instructions and the same
+# note until this asked.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    if(ENABLE_CET)
         add_compile_options(-fcf-protection=full)
         add_link_options(-fcf-protection=full)
     else()
-        message(FATAL_ERROR "ENABLE_CET currently requires GCC/Clang on x86-64")
+        add_compile_options(-fcf-protection=none)
+        add_link_options(-fcf-protection=none)
     endif()
+elseif(ENABLE_CET)
+    message(FATAL_ERROR "ENABLE_CET currently requires GCC/Clang on x86-64")
 endif()
 
 # Preparing a function for entry replacement.
@@ -507,6 +518,11 @@ if(BUILD_TESTING)
     # not, which is what the nocf_check attribute is for.
     target_compile_options(got_reach_selftest PRIVATE
         -Wall -Wextra -Wpedantic -fcf-protection=branch)
+    # And at link time, so the choice survives LTO. With link-time code
+    # generation the options given to the link decide what is emitted, and the
+    # non-CET presets ask for none there, which would strip the markers this
+    # target compiles itself to have and refuse every replacement it offers.
+    target_link_options(got_reach_selftest PRIVATE -fcf-protection=branch)
     # Both no-stub objects stay loaded even though the test calls into only one.
     # The linker drops a library nothing references, and the second one exists
     # to be a second match for a suffix, which is a reason the linker cannot
