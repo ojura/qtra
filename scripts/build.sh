@@ -7,6 +7,6 @@ preset=${1:-release}
 cmake --preset "$preset" -S "$root"
 cmake --build --preset "$preset" --parallel
 
-if [[ "$preset" == selftest-* || "$preset" == "selftest-only" ]]; then
+if [[ "$preset" == selftest-* || "$preset" == "selftest-only" || "$preset" == "release" ]]; then
   ctest --preset "$preset"
 fi

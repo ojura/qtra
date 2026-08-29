@@ -363,6 +363,19 @@ if(BUILD_QT_APP)
     stamp_with_host_build_id(agent_snippet_jack_in_the_box)
 endif()
 
+if(BUILD_QT_APP AND BUILD_TESTING)
+    # The admission rule reads a manifest and answers a question about it, so it
+    # needs Qt's JSON and nothing else: no window, no display, no build artifact.
+    add_executable(coverage_admission_selftest
+        tests/coverage_admission_selftest.cpp
+        src/agent/coverage_manifest.cpp
+    )
+    target_include_directories(coverage_admission_selftest PRIVATE include src)
+    target_link_libraries(coverage_admission_selftest PRIVATE Qt6::Core)
+    target_compile_options(coverage_admission_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME coverage-admission-order COMMAND coverage_admission_selftest)
+endif()
+
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)

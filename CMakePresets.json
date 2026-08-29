@@ -108,6 +108,13 @@
   ],
   "testPresets": [
     {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "selftest-only",
       "configurePreset": "selftest-only",
       "output": {
