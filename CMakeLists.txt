@@ -485,6 +485,57 @@ if(BUILD_TESTING)
     add_test(NAME module-teardown
              COMMAND module_teardown_selftest $<TARGET_FILE:teardown_module>)
 
+    # Destroying an agent while module code runs, in its own process because a
+    # process that has destroyed one is not what other tests assume.
+    add_library(lifetime_module MODULE tests/lifetime_module.cpp)
+    target_include_directories(lifetime_module PRIVATE include src)
+    set_target_properties(lifetime_module PROPERTIES PREFIX "" OUTPUT_NAME "lifetime_module")
+
+    qt_add_executable(agent_lifetime_selftest
+        tests/agent_lifetime_selftest.cpp
+        src/agent/runtime_agent.h
+        src/agent/runtime_agent.cpp
+        src/agent/module_registry.h
+        src/agent/module_registry.cpp
+        src/agent/object_registry.h
+        src/agent/object_registry.cpp
+        src/agent/coverage_manifest.h
+        src/agent/coverage_manifest.cpp
+        src/agent/build_id.cpp
+    )
+    target_include_directories(agent_lifetime_selftest
+        PRIVATE include src ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/generated)
+    target_link_libraries(agent_lifetime_selftest
+        PRIVATE Qt6::Core Qt6::Network Qt6::Gui Qt6::Widgets ${CMAKE_DL_LIBS})
+    target_compile_options(agent_lifetime_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(agent_lifetime_selftest lifetime_module)
+    add_test(NAME agent-lifetime
+             COMMAND agent_lifetime_selftest $<TARGET_FILE:lifetime_module>)
+
+    # A host with no build id, which is the only way to reach the case where a
+    # module reports one and there is nothing to compare it with. The id comes
+    # from the running executable's ELF note, so this binary is linked without
+    # one; every other test binary has a note and can never take that path.
+    add_executable(unstamped_host_selftest
+        tests/unstamped_host_selftest.cpp
+        src/agent/module_registry.cpp
+        src/agent/build_id.cpp
+    )
+    target_include_directories(unstamped_host_selftest PRIVATE include src)
+    target_link_libraries(unstamped_host_selftest PRIVATE Qt6::Core ${CMAKE_DL_LIBS})
+    target_link_options(unstamped_host_selftest PRIVATE -Wl,--build-id=none)
+    target_compile_options(unstamped_host_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    # The same trivial module as teardown_module, stamped. It needs a build id
+    # to report and nothing else, so a host that exports no application symbols
+    # can still load it.
+    add_library(stamped_module MODULE tests/teardown_module.cpp)
+    target_include_directories(stamped_module PRIVATE include src)
+    set_target_properties(stamped_module PROPERTIES PREFIX "" OUTPUT_NAME "stamped_module")
+    stamp_with_host_build_id(stamped_module)
+
+    add_test(NAME unstamped-host
+             COMMAND unstamped_host_selftest $<TARGET_FILE:stamped_module>)
+
     # A caller whose calls go straight through a slot with no stub in between,
     # so the relocations that fill them are in the object's ordinary data
     # relocations and not in the table kept for stubs. Reading only one of those
