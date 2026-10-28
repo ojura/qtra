@@ -11,8 +11,15 @@ ctest --preset release --output-on-failure
 Expected tests:
 
 ```text
+thread-accounting
+writable-page
 raw-entry-hotpatch-wobble
 raw-entry-hotpatch-reverse
+module-teardown
+agent-lifetime
+unstamped-host
+got-reach
+kangaroo-physics
 coverage-admission-order
 python-tool-tests
 ```

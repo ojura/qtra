@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -55,7 +56,11 @@ namespace kangaroo {
 struct Water {
     static constexpr int cells = 40;
     static constexpr int stride = cells + 1;
-    static constexpr float maxDepth = 0.3F;
+    // The deepest the water is allowed to stand. The depth comes from the
+    // level's height in potential over the force holding the water down,
+    // which is only a good approximation while that force is firm and the
+    // depth small; past this the water is spread wider instead.
+    static constexpr float maxDepth = 0.12F;
     // How far below the ground the water's surface is followed where the
     // ground is dry. Only the sign matters there, but a field that carries on
     // past the shore crosses zero along a smooth line, which is where the
@@ -87,6 +92,12 @@ struct Water {
 
     float volume = 0.0F;
     float level = 0.0F;
+    // Ground holds water only where the force holding it down is at least
+    // this. A spinning planet's lowest potential lies far from the axle,
+    // which is where that force is weakest; letting water collect wherever it
+    // was merely positive stood it up in walls at the corners, the depth
+    // formula dividing by almost nothing.
+    float firmHold = 3.5F;
     float preparedFor = -1.0F;
     float solvedFor = -1.0F;
     bool spilled = false;
@@ -106,6 +117,7 @@ struct Water {
     {
         const double k = planet.gravityScale();
         const V3 axle = fromVec(planet.axle);
+        firmHold = 0.25F * static_cast<float>(planet.surfaceGravity);
         for (int face = 0; face < faceCount; ++face) {
             V3 u;
             V3 v;
@@ -176,7 +188,7 @@ struct Water {
                 for (int i = 0; i < stride; ++i) {
                     const int index = j * stride + i;
                     float h = -dryReach;
-                    if (hold[index] > 0.6F) {
+                    if (hold[index] > firmHold) {
                         h = std::clamp((candidate - phi[index]) / hold[index], -dryReach, maxDepth);
                     }
                     if (out != nullptr) {
@@ -661,11 +673,18 @@ inline std::string quote(const std::string& s)
     return out + "\"";
 }
 
+// A JSON number. std::to_chars and not printf, because the application runs
+// under the user's locale and printf follows it: under one with a decimal
+// comma, 5.851 came out as 5,851 and every event carrying a number was
+// invalid JSON.
 inline std::string number(const double value)
 {
+    if (!std::isfinite(value)) {
+        return "null";
+    }
     char buffer[48];
-    std::snprintf(buffer, sizeof buffer, "%.4g", value);
-    return buffer;
+    const auto written = std::to_chars(buffer, buffer + sizeof buffer, value, std::chars_format::general, 4);
+    return std::string(buffer, written.ptr);
 }
 
 inline float smoothstep(const float a, const float b, const float x)

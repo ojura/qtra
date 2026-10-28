@@ -202,14 +202,15 @@ clean exit. A process killed with `SIGKILL` leaves a stale
 ./scripts/validate.sh
 ```
 
-Three Release configurations, ten tests each: ordinary `-O3` with branch
+Three Release configurations, eleven tests each: ordinary `-O3` with branch
 protection off, `-O3` with GCC LTO, and `-O3` with Intel CET/IBT. Against its
 own binary, each configuration runs the two raw hotpatch tests, the
 admission-order checks, thread accounting, what a second adapter finds after the
 first one is gone, a redirect through the GOT of a function the loader already
 resolved, what an entry holds when its page cannot be made executable again,
 what destroying the agent does to module code still running, what a module
-carrying a build id means to a host reporting none, and the Python tests, which
+carrying a build id means to a host reporting none, the kangaroo planet's
+physics, and the Python tests, which
 cover
 compilation-command transformation, retained-event replay, quiet event streams,
 socket protocol behavior, and activation over the socket. For
@@ -426,12 +427,12 @@ python3 tools/agentctl.py snippet SOME_SNIPPET.so \
 
 ### Ready-made scene modifications
 
-Six prebuilt snippets change what the widget draws. Each installs a direct
+Seven prebuilt snippets change what the widget draws. Each installs a direct
 connection to `CubeWidget::frameRendered`, which is emitted at the end of
 `paintGL()` while the context is still current and the depth buffer still holds
 the cube, so a hook there gets correct occlusion without touching `paintGL()`.
-All six read private `CubeWidget` state for the frame's angle, scale, tint,
-elapsed time, and projection, and all six are compiled with
+All seven read private `CubeWidget` state for the frame's angle, scale, tint,
+elapsed time, and projection, and all seven are compiled with
 `-fno-access-control`.
 
 ```bash
@@ -447,6 +448,8 @@ python3 tools/agentctl.py snippet \
   build/release/agent_snippet_jack_in_the_box.so --executor render --request '{}'
 python3 tools/agentctl.py snippet \
   build/release/agent_snippet_audio_pulse.so --executor render --request '{}'
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_kangaroo_planet.so --executor render --request '{}'
 ```
 
 | module | what it does | parameters |
@@ -457,10 +460,11 @@ python3 tools/agentctl.py snippet \
 | `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
 | `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front` |
 | `agent_snippet_audio_pulse` | drives the cube and a rig around it from the system audio mix | `device`, `sensitivity`, `dynamicRangeDb`, `events` |
+| `agent_snippet_kangaroo_planet` | turns the cube into a planet with a mob of kangaroos on it, under the cube's real gravity | `mob`, `gravity`, `water`, `seed`, `inertia`, `inheritSpin`, `contours`, `events`, `hopEvents`; see [A planet with kangaroos on it](#a-planet-with-kangaroos-on-it) |
 
 ### Switching them on and off
 
-All six add a checkable entry to the application's Cube menu when the snippet
+All seven add a checkable entry to the application's Cube menu when the snippet
 is loaded, under a separator that marks off everything added at runtime:
 
 | entry | shortcut | object name |
@@ -471,6 +475,7 @@ is loaded, under a separator that marks off everything added at runtime:
 | Pillow mode | `Ctrl+Shift+P` | `actionPillowMode` |
 | Jack in the box | `Ctrl+Shift+J` | `actionJackInTheBox` |
 | Beat visualizer | `Ctrl+Shift+B` | `actionBeatVisualizer` |
+| Kangaroo planet | `Ctrl+Shift+K` | `actionKangarooPlanet` |
 
 The application has no knowledge of these snippets and must not acquire any:
 they are separate shared objects that may never be loaded at all. Each entry is
@@ -506,9 +511,9 @@ second entry. It would carry the same name while driving different state, so the
 module that got there first keeps the menu, and the later one is reachable only
 through its own `moduleId`.
 
-**They exclude each other through the claims they leave in the stash.** Three of
-them replace part of the mesh: `catmull_clark`, `pillow_cube` and
-`jack_in_the_box` displace some region of the widget's vertex buffer by
+**They exclude each other through the claims they leave in the stash.** Four of
+them replace part of the mesh: `catmull_clark`, `pillow_cube`,
+`jack_in_the_box` and `kangaroo_planet` displace some region of the widget's vertex buffer by
 overwriting it with zeros, and record that in the host's byte stash: the
 displaced originals under `cube.vertexBuffer/<offset>+<length>`, and a claim
 alongside it saying a displacement is in effect. Installing asks whether any
@@ -704,6 +709,158 @@ analysis without drawing anything. `{"events": false}` turns that off.
 
 Its CMake target sits behind a `pkg-config` check for `libpulse-simple`. A
 machine without that library loses this one target and configures normally.
+
+### A planet with kangaroos on it
+
+`agent_snippet_kangaroo_planet` turns the cube into a small planet and puts a
+mob of kangaroos on it:
+
+```bash
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_kangaroo_planet.so --executor render --request '{}'
+```
+
+Each face becomes an Australian landscape that keeps the hue the widget gave
+it: pink salt lakes on the magenta face, eucalypt woodland on the green one,
+Mitchell grass plains on the yellow one, coastal heath on the blue one, red
+dunes and spinifex on the red one, and a white salt crust on the cyan one. Every
+face has a billabong and grass that the mob grazes down and that grows back,
+all but the salt crust have gum trees, and the grassland has a kangaroo road
+sign. The kangaroos hop, graze on five legs
+with the tail and forepaws planted, drink, lick their forearms, box, and thump
+the ground when something startles them, after which the whole mob bolts. One
+mother carries a joey that looks out of her pouch when she is settled. Another
+has a joey at foot that dives into her pouch at an alarm and climbs out again
+when things are calm.
+
+The motion is not scripted. It is the physics of a uniform solid cube turning on
+a fixed axle:
+
+- Gravity is the cube's own, computed exactly in `snippets/cube_gravity.h`. It
+  points at the centre only along the lines through face centres, edges and
+  corners, and everywhere else tilts toward the nearest face centre. Measured
+  against gravity a face is a bowl: walking from its centre to an edge climbs
+  as far as 0.28 half-sides of height would at the centre's gravity. The
+  kangaroos lean into that slope, the water lies at the centres, and the grass
+  and the trees grow along the local "up", which leans near an edge.
+- The kangaroos are simulated in the cube's own frame, which turns. A body in it
+  feels a centrifugal push away from the axle, a Coriolis force sideways to its
+  motion, and, while the spin rate changes, an Euler force as the ground turns
+  under it. Hops curve, and the hop planner aims off to allow for it.
+- The billabongs are level surfaces of gravity plus the centrifugal term. The
+  one level that holds the planet's water is solved for every time the spin
+  changes, so when the spin rises the water runs off the faces nearest the axle
+  and onto the faces furthest from it, until on a fast planet it lies in long
+  lakes across the parts of each face furthest from the axle. Water stands only
+  where the ground holds it down with at least a quarter of the surface
+  gravity: the lowest potential on a spinning planet is where that hold is
+  weakest, and water allowed to collect wherever it was merely positive stood
+  up in walls.
+
+Spin the cube up with `Ctrl++` and the planet loses its hold on the mob, corners
+first. With the default gravity of 14 at a face centre:
+
+| spin | presses from 75 deg/s | what happens |
+| --- | --- | --- |
+| 75 deg/s | 0 | near the face centres gravity already tilts by up to 24 degrees |
+| 101 deg/s | 1 | the jolt startles the mob, which stampedes |
+| 137 deg/s | 2 | the corners furthest from the axle can no longer hold anything |
+| 185 deg/s | 3 | 15% of the surface cannot hold anything, and the kangaroos hunker down instead of hopping |
+| 249 deg/s | 4 | 60% of the surface cannot hold anything, and the mob is thrown into space |
+
+A kangaroo thrown off tumbles away and a few seconds later is dropped back over
+the face that holds best, from as high up as the planet will still pull it
+down. Slow the cube down and the mob is back within seconds.
+
+The planet answers the mob. Every push-off and landing changes a kangaroo's
+angular momentum about the axle, and the planet takes the opposite change,
+because the axle is fixed and that component is conserved between them. The
+snippet binds its own step function with `patch_bind`, since the step function
+owns the angle, and adds the spin the mob handed over; the cube's motor then
+pulls the rate back to its setting over a few seconds. A stampede turns the
+planet by up to about 10 deg/s. `inertia` sets how heavy the planet is against
+the mob. Its default of 40 already exaggerates how little a real planet would
+notice; small values make it lively.
+
+The planet turns on its own axle at the cube's set rate. The binding calls the
+step function it displaced and keeps that function's tint and scale, so the beat
+visualizer bound before it still pulses the planet's size and colour with the
+music, but its kicks to the rate are not taken. A planet lurching several times
+a second startles the mob into a stampede as often as the alarm allows and
+throws whoever is in the air; with the kicks taken, a song at 162 deg/s flung
+26 kangaroos in two simulated minutes, and without them none.
+`{"inheritSpin": true}` takes the displaced function's rate as well, which is
+what a patch that changes the rate, such as the wobble, needs to reach the
+planet.
+
+It uses three seams, each for what it owns:
+
+| seam | what it is used for |
+| --- | --- |
+| the widget's vertex buffer | the planet draws all six faces itself, so the widget's cube is displaced and claimed like the other mesh replacements, and they refuse each other |
+| `frameRendered` | the scene, drawn while the context is current |
+| a host patch binding | the angle, which is where the mob's pushes become spin |
+
+Two rules carry over to any snippet that simulates something in the turning
+cube's frame:
+
+- **Read the rate from the turn, not from the angle.** The drawn angle moves
+  without anything turning when the cube is reset, when `angleDegrees` is set
+  or when a snippet nudges it, and the step function returns its angle modulo
+  360, so one tick of every revolution reads as a turn of almost -360 degrees.
+  Read as a rate, either one gives a single frame a spin of thousands of
+  degrees a second, and the centrifugal term at that rate throws everything off
+  the planet within the frame. The snippet takes the rate from its own step
+  function's record of each turn, unwrapped. It falls back to the drawn angle,
+  ignoring one-frame jumps, only when a binding made later stops calling it.
+- **Measure momentum at the rate the velocity was measured against.** While the
+  spin changes, the Euler force shoves anything in the air. That shove is a
+  change of frame, not a push. Measuring an airborne body's momentum at one rate
+  at both ends of a step reads the shove as momentum gained and bills the planet
+  for it, and the bill speeds up a planet that is already speeding up, so the
+  loop runs away. An early version of this snippet did exactly that and reached
+  67,000 deg/s. `kangaroo_sim.h` uses the rate at each end of the step.
+
+Requests:
+
+| request | effect |
+| --- | --- |
+| `{}` | install, or report what the mob is doing |
+| `{"status": true}` | every kangaroo with its position, activity and tallies, the water on each face, and the planet's spin |
+| `{"alarm": true}` | the biggest adult thumps an alarm and the mob bolts |
+| `{"box": true}` | the two nearest males start a bout |
+| `{"throw": "Big Red"}` | throws that kangaroo off the ground; `throwSpeed` sets how hard, default 4.5 |
+| `{"mob": 6, "gravity": 14, "water": 0.05, "seed": 1}` | rebuilds the scene with that many kangaroos (1 to 12), that gravity at a face centre, that depth of water at a face centre at rest, and that seed |
+| `{"inertia": 40}` | the planet's moment of inertia about its axle |
+| `{"inheritSpin": true}` | turn at the rate a step function bound before this one produces, beat kicks included, instead of the cube's set rate |
+| `{"contours": false}` | hides the equipotential lines drawn on the ground |
+| `{"events": false}`, `{"hopEvents": true}` | stops the events below, or adds one per hop |
+| `{"restore": true}`, `{"toggle": true}` | as for the other scene snippets |
+
+The events are `kangaroo.flung`, `kangaroo.returned`, `kangaroo.alarm`,
+`kangaroo.bout.started`, `kangaroo.bout.ended` with the winner, the loser and
+the kicks each landed, `kangaroo.drink`, `kangaroo.joey`, and `kangaroo.hop`
+when `hopEvents` is on:
+
+```bash
+python3 tools/agentctl.py --timeout 12 events --prefix kangaroo.
+```
+
+The kangaroos are not meshes. `kangaroo_rig.h` turns a pose (crouch, leg swing,
+body pitch, tail, head and arms) into about thirty-five rounded cones, and the
+fragment shader ray marches their smooth union inside each animal's bounding
+box and writes the depth of the surface it finds, so they hide and are hidden
+correctly.
+
+The physics, the rig and the mob need only the standard library
+(`cube_gravity.h`, `kangaroo_math.h`, `kangaroo_rig.h`, `kangaroo_sim.h`), so
+`kangaroo_physics_selftest` checks them without a display. It compares the
+gravity with numerical integration over the solid, with finite differences of
+the potential, with Poisson's and Laplace's equations, with the cube's symmetry
+and with the point-mass limit; checks that flight conserves the Jacobi
+integral and that the water keeps its volume under spin; and runs the mob for
+simulated minutes, including with the planet's answer fed back into it under
+spin-ups and beat-like kicks, which is the loop that once ran away.
 
 ### Project-aware on-demand compilation
 
@@ -905,7 +1062,7 @@ number fails to load rather than reading fields the host never wrote. Rebuild th
 snippets when the header changes; a stale `.so` under `runtime-snippets/` is
 rejected at load.
 
-A null `release` declares that the module has nothing to undo. Of the ten
+A null `release` declares that the module has nothing to undo. Of the
 snippets here, `inspect_cube`, `install_observer` and `render_probe` install
 nothing that outlives the call, and `install_observer` says as much in its own
 result.
@@ -1285,13 +1442,20 @@ snippets/                       native runtime code examples and scene modificat
 snippets/scene_toggle.h         runtime-added Cube menu entry shared by the scene snippets
 snippets/cube_mesh.h            vertex-buffer claim and overlap rules for the scene snippets
 snippets/audio_pulse.cpp        drives the cube and a rig around it from system audio
+snippets/cube_gravity.h         the gravity of a uniform cube in closed form, and the forces
+                                in its turning frame
+snippets/kangaroo_math.h        vectors and walking over the cube's surface
+snippets/kangaroo_rig.h         a kangaroo as rounded cones, from a pose
+snippets/kangaroo_sim.h         the mob, the billabongs and the planet's answer to the mob;
+                                standard library only
+snippets/kangaroo_planet.cpp    draws the planet and the mob and binds the step function
 snippets/audio_analysis.h       capture, FFT and onset detection; depends on PulseAudio
                                 and the standard library only, so unlike cube_mesh.h and
                                 scene_toggle.h beside it, it knows nothing of Qt, the
                                 agent ABI, or this demo
 patches/                        function replacement examples
-tests/                          hotpatch_selftest.cpp and the Python protocol,
-                                agentctl and compile-oracle tests
+tests/                          hotpatch_selftest.cpp, kangaroo_physics_selftest.cpp,
+                                and the Python protocol, agentctl and compile-oracle tests
 tools/agentctl.py               protocol client, including snippet reload
 tools/compile_snippet.py        compile-database build oracle
 tools/read_build_id.py          reads the GNU build id modules are stamped with

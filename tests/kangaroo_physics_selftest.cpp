@@ -16,6 +16,7 @@
 #include "kangaroo_sim.h"
 
 #include <array>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -811,6 +812,53 @@ void lostKangaroosComeBackOnAFastPlanet()
     check(home >= 4, format("and most of the mob is on the planet again (%.0f)", home));
 }
 
+// The application runs under the user's locale. Under one that writes a
+// decimal comma, printf-formatted numbers made every event that carried one
+// invalid JSON, and the agent passed it on as a raw string.
+void eventsAreJsonUnderAnyLocale()
+{
+    const char* chosen = nullptr;
+    for (const char* name : {"hr_HR.UTF-8", "hr_HR.utf8", "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "ru_RU.UTF-8"}) {
+        if (std::setlocale(LC_ALL, name) != nullptr) {
+            chosen = name;
+            break;
+        }
+    }
+    if (chosen == nullptr) {
+        std::printf("info: no locale with a decimal comma is installed, so events were not checked under one\n");
+        return;
+    }
+    kangaroo::Mob mob;
+    kangaroo::Settings settings;
+    settings.mob = 2;
+    mob.reset(settings, kangaroo::V3{0.72F, 1.0F, 0.31F});
+    for (int frame = 0; frame < 120 && mob.roos[0].gait != kangaroo::Gait::Stand; ++frame) {
+        mob.advance(1.0F / 60.0F, degrees(75.0F));
+    }
+    const kangaroo::V3 n = kangaroo::faceNormal(mob.roos[0].face);
+    mob.launch(0, n * 9.0F + mob.roos[0].heading * 2.0F);
+    bool flung = false;
+    bool commaInNumber = false;
+    for (int frame = 0; frame < 60 * 15; ++frame) {
+        mob.advance(1.0F / 60.0F, degrees(75.0F));
+        (void)mob.takeImpulse();
+        for (const kangaroo::Event& event : mob.events) {
+            flung = flung || event.name == "kangaroo.flung";
+            const std::string& json = event.json;
+            for (std::size_t i = 1; i + 1 < json.size(); ++i) {
+                if (json[i] == ',' && std::isdigit(static_cast<unsigned char>(json[i - 1]))
+                    && std::isdigit(static_cast<unsigned char>(json[i + 1]))) {
+                    commaInNumber = true;
+                }
+            }
+        }
+        mob.events.clear();
+    }
+    std::setlocale(LC_ALL, "C");
+    check(flung, format("a kangaroo thrown at 9 units a second is flung", 0.0));
+    check(!commaInNumber, std::string("under ") + chosen + ", the events' numbers still use a decimal point");
+}
+
 void simulationChecks()
 {
     rigStaysWhole();
@@ -821,6 +869,7 @@ void simulationChecks()
     rateMeterReadsTurnsNotAngles();
     hopsGoWhereTheyAim();
     lostKangaroosComeBackOnAFastPlanet();
+    eventsAreJsonUnderAnyLocale();
     sameSeedSameMob();
     mobLivesOnThePlanet();
     spinThrowsThemOff();

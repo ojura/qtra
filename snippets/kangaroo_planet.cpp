@@ -37,6 +37,9 @@
 //   {"mob": 6, "gravity": 14, "water": 0.05, "seed": 1}
 //                            rebuild the scene with these
 //   {"inertia": 40}          the planet's moment of inertia; small is lively
+//   {"inheritSpin": true}    turn at the rate a step bound before this one
+//                            produces, beat kicks included, instead of the
+//                            cube's set rate
 //   {"contours": true}       equipotential lines on the ground
 //   {"events": true, "hopEvents": false}
 //
@@ -900,6 +903,12 @@ struct Options {
     kangaroo::Settings settings;
     bool contours = true;
     bool events = true;
+    // Whether the planet turns at whatever rate a step function bound before
+    // this one produces, or on its own axle at the cube's set rate. Off by
+    // default: the beat visualizer kicks the rate on every beat, and a planet
+    // that lurches several times a second startles the mob into a stampede
+    // as often as the alarm allows and throws whoever is in the air.
+    bool inheritSpin = false;
 };
 
 struct GlScene {
@@ -988,6 +997,12 @@ CubeStepOutput kangarooStep(const CubeStepInput* input) noexcept
         return output;
     }
     const float dt = std::clamp(input->delta_seconds, 0.0F, 0.1F);
+    // The planet turns on its own axle at the cube's set rate. A step bound
+    // before this one still sets the tint and the scale, so music still
+    // shows on the planet; only its idea of the rate is not taken.
+    if (!options.inheritSpin) {
+        output.angle_degrees = input->angle_degrees + input->angular_velocity_degrees_per_second * dt;
+    }
     // The mob's pushes, as angular impulse about the axle, become spin.
     const double impulse = planet->mob.takeImpulse();
     planet->spin.apply(planet->spinFeedback ? impulse : 0.0, options.settings.planetInertia, dt);
@@ -1958,6 +1973,7 @@ QJsonObject summary(const bool detailed)
     result.insert(QStringLiteral("simulateMs"), planet->simulateMs);
     result.insert(QStringLiteral("submitMs"), planet->drawMs);
     result.insert(QStringLiteral("contours"), options.contours);
+    result.insert(QStringLiteral("inheritSpin"), options.inheritSpin);
 
     QJsonArray faces;
     for (int face = 0; face < kangaroo::faceCount; ++face) {
@@ -2101,6 +2117,9 @@ void run(const RuntimeAgentHost* host)
     }
     if (request.contains(QStringLiteral("events"))) {
         options.events = request.value(QStringLiteral("events")).toBool();
+    }
+    if (request.contains(QStringLiteral("inheritSpin"))) {
+        options.inheritSpin = request.value(QStringLiteral("inheritSpin")).toBool();
     }
     if (request.contains(QStringLiteral("hopEvents"))) {
         options.settings.hopEvents = request.value(QStringLiteral("hopEvents")).toBool();
