@@ -453,6 +453,19 @@ set_target_properties(agent_snippet_jack_in_the_box PROPERTIES
     PREFIX "" OUTPUT_NAME "agent_snippet_jack_in_the_box")
 stamp_with_host_build_id(agent_snippet_jack_in_the_box)
 
+# The cube as a planet with a mob of kangaroos on it. It displaces the
+# widget's mesh, draws from frameRendered, and binds the step function so the
+# mob's pushes turn the planet. The physics headers beside it need only the
+# standard library, which is what lets the self-test below check them.
+add_library(agent_snippet_kangaroo_planet MODULE snippets/kangaroo_planet.cpp)
+target_include_directories(agent_snippet_kangaroo_planet PRIVATE include src)
+target_link_libraries(agent_snippet_kangaroo_planet PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+target_compile_options(agent_snippet_kangaroo_planet PRIVATE -fno-access-control)
+set_target_properties(agent_snippet_kangaroo_planet PROPERTIES
+    PREFIX "" OUTPUT_NAME "agent_snippet_kangaroo_planet")
+stamp_with_host_build_id(agent_snippet_kangaroo_planet)
+
 if(BUILD_TESTING)
     # The admission rule reads a manifest and answers a question about it, so it
     # needs Qt's JSON and nothing else: no window, no display, no build artifact.
@@ -605,6 +618,13 @@ if(BUILD_TESTING)
     # see.
     target_link_options(got_reach_selftest PRIVATE -Wl,--no-as-needed)
     add_test(NAME got-reach COMMAND got_reach_selftest)
+
+    # The kangaroo planet's physics against independent computations of the
+    # same quantities, and the mob run for simulated minutes at fixed seeds.
+    add_executable(kangaroo_physics_selftest tests/kangaroo_physics_selftest.cpp)
+    target_include_directories(kangaroo_physics_selftest PRIVATE snippets)
+    target_compile_options(kangaroo_physics_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME kangaroo-physics COMMAND kangaroo_physics_selftest)
 
     add_executable(coverage_admission_selftest
         tests/coverage_admission_selftest.cpp
