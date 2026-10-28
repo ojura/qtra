@@ -37,9 +37,8 @@
 //   {"mob": 6, "gravity": 14, "water": 0.05, "seed": 1}
 //                            rebuild the scene with these
 //   {"inertia": 40}          the planet's moment of inertia; small is lively
-//   {"inheritSpin": true}    turn at the rate a step bound before this one
-//                            produces, beat kicks included, instead of the
-//                            cube's set rate
+//   {"spinShare": 0.5}       how much of what a step bound before this one
+//                            does to the rate reaches the planet, 0 to 1
 //   {"contours": true}       equipotential lines on the ground
 //   {"events": true, "hopEvents": false}
 //
@@ -903,12 +902,9 @@ struct Options {
     kangaroo::Settings settings;
     bool contours = true;
     bool events = true;
-    // Whether the planet turns at whatever rate a step function bound before
-    // this one produces, or on its own axle at the cube's set rate. Off by
-    // default: the beat visualizer kicks the rate on every beat, and a planet
-    // that lurches several times a second startles the mob into a stampede
-    // as often as the alarm allows and throws whoever is in the air.
-    bool inheritSpin = false;
+    // How much of what a step function bound before this one does to the
+    // cube's rate reaches the planet; see kangaroo::InheritedSpin.
+    float spinShare = kangaroo::InheritedSpin::defaultShare;
 };
 
 struct GlScene {
@@ -958,6 +954,7 @@ struct Planet {
     bool spinFeedback = false;
     QString spinFeedbackNote;
     kangaroo::SpinResponse spin;
+    kangaroo::InheritedSpin inherited;
 
     // The widget's clock and angle when the last frame was simulated.
     bool clockSeen = false;
@@ -997,12 +994,14 @@ CubeStepOutput kangarooStep(const CubeStepInput* input) noexcept
         return output;
     }
     const float dt = std::clamp(input->delta_seconds, 0.0F, 0.1F);
-    // The planet turns on its own axle at the cube's set rate. A step bound
-    // before this one still sets the tint and the scale, so music still
-    // shows on the planet; only its idea of the rate is not taken.
-    if (!options.inheritSpin) {
-        output.angle_degrees = input->angle_degrees + input->angular_velocity_degrees_per_second * dt;
-    }
+    // The planet turns on its own axle at the cube's set rate, plus a share of
+    // whatever the step bound before this one did to that rate, softened so a
+    // beat arrives as a surge and not a jolt. That step's tint and scale are
+    // kept as they are.
+    output.angle_degrees = input->angle_degrees
+        + planet->inherited.turn(input->angle_degrees, output.angle_degrees,
+                                 input->angular_velocity_degrees_per_second, dt, options.spinShare,
+                                 kangaroo::InheritedSpin::attackSeconds);
     // The mob's pushes, as angular impulse about the axle, become spin.
     const double impulse = planet->mob.takeImpulse();
     planet->spin.apply(planet->spinFeedback ? impulse : 0.0, options.settings.planetInertia, dt);
@@ -1973,7 +1972,8 @@ QJsonObject summary(const bool detailed)
     result.insert(QStringLiteral("simulateMs"), planet->simulateMs);
     result.insert(QStringLiteral("submitMs"), planet->drawMs);
     result.insert(QStringLiteral("contours"), options.contours);
-    result.insert(QStringLiteral("inheritSpin"), options.inheritSpin);
+    result.insert(QStringLiteral("spinShare"), options.spinShare);
+    result.insert(QStringLiteral("inheritedDegreesPerSecond"), planet->inherited.extra);
 
     QJsonArray faces;
     for (int face = 0; face < kangaroo::faceCount; ++face) {
@@ -2118,8 +2118,8 @@ void run(const RuntimeAgentHost* host)
     if (request.contains(QStringLiteral("events"))) {
         options.events = request.value(QStringLiteral("events")).toBool();
     }
-    if (request.contains(QStringLiteral("inheritSpin"))) {
-        options.inheritSpin = request.value(QStringLiteral("inheritSpin")).toBool();
+    if (request.contains(QStringLiteral("spinShare"))) {
+        options.spinShare = std::clamp(static_cast<float>(number("spinShare", 0.5)), 0.0F, 1.0F);
     }
     if (request.contains(QStringLiteral("hopEvents"))) {
         options.settings.hopEvents = request.value(QStringLiteral("hopEvents")).toBool();

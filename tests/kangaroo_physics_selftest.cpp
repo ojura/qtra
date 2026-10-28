@@ -859,6 +859,69 @@ void eventsAreJsonUnderAnyLocale()
     check(!commaInNumber, std::string("under ") + chosen + ", the events' numbers still use a decimal point");
 }
 
+// The beat visualizer bound before the planet, as the application runs them:
+// it kicks the rate on every beat, and the planet passes on a share of that
+// through a short lag. The planet should still speed up with the music and
+// show the beats, without the mob being startled on every one.
+void musicReachesThePlanetGently()
+{
+    const auto song = [](const float share, const float attack, int& flung, int& alarms, float& mean, float& peak) {
+        kangaroo::Mob mob;
+        kangaroo::Settings settings;
+        settings.seed = 7;
+        mob.reset(settings, kangaroo::V3{0.72F, 1.0F, 0.31F});
+        kangaroo::SpinResponse spin;
+        kangaroo::RateMeter meter;
+        kangaroo::InheritedSpin inherited;
+        const float dt = 1.0F / 60.0F;
+        const float set = 162.0F;
+        float angle = 24.0F;
+        double sum = 0.0;
+        peak = 0.0F;
+        const int frames = 120 * 60;
+        for (int frame = 0; frame < frames; ++frame) {
+            const float t = static_cast<float>(frame) * dt;
+            const float since = std::fmod(t, 0.27F);
+            const int beat = static_cast<int>(t / 0.27F);
+            const float kick = (110.0F + 10.0F * static_cast<float>(beat % 3)) * std::exp(-2.9F * since);
+            const float displaced = std::fmod(angle + (set + kick) * dt + 360.0F, 360.0F);
+            float turned = inherited.turn(angle, displaced, set, dt, share, attack);
+            spin.apply(mob.takeImpulse(), settings.planetInertia, dt);
+            turned += static_cast<float>(spin.boost) * dt * 180.0F / 3.14159265F;
+            const float next = std::fmod(angle + turned + 360.0F, 360.0F);
+            meter.stepped(angle, next, dt);
+            const float omega = meter.frame(next - angle, dt) * 180.0F / 3.14159265F;
+            angle = next;
+            mob.advance(dt, omega * 3.14159265F / 180.0F);
+            mob.events.clear();
+            if (frame > 10 * 60) {
+                sum += omega;
+                peak = std::max(peak, omega);
+            }
+        }
+        mean = static_cast<float>(sum / (frames - 10 * 60 - 1));
+        flung = mob.flungTotal;
+        alarms = mob.alarmsTotal;
+    };
+    int flung = 0;
+    int alarms = 0;
+    float mean = 0.0F;
+    float peak = 0.0F;
+    song(kangaroo::InheritedSpin::defaultShare, kangaroo::InheritedSpin::attackSeconds, flung, alarms, mean, peak);
+    std::printf("info: a song at 162 deg/s with the default share: mean %.1f, peak %.1f deg/s, %d flung, %d alarms\n",
+                mean, peak, flung, alarms);
+    check(mean > 185.0F, format("the music still speeds the planet up (mean %.1f deg/s, set 162)", mean));
+    check(peak - mean > 5.0F, format("and each beat still shows, as a surge of %.1f deg/s", peak - mean));
+    check(alarms <= 4 && flung <= 10,
+          format("without startling the mob on every beat (%.0f alarms, %.0f flung in two minutes)", alarms, flung));
+    int fullFlung = 0;
+    int fullAlarms = 0;
+    song(1.0F, 0.0F, fullFlung, fullAlarms, mean, peak);
+    check(fullAlarms >= 10,
+          format("passed on whole and at once, the kicks do startle it (%.0f alarms), so the check above means something",
+                 fullAlarms));
+}
+
 void simulationChecks()
 {
     rigStaysWhole();
@@ -870,6 +933,7 @@ void simulationChecks()
     hopsGoWhereTheyAim();
     lostKangaroosComeBackOnAFastPlanet();
     eventsAreJsonUnderAnyLocale();
+    musicReachesThePlanetGently();
     sameSeedSameMob();
     mobLivesOnThePlanet();
     spinThrowsThemOff();

@@ -659,6 +659,48 @@ struct RateMeter {
     }
 };
 
+// How much of what a step function bound before the planet's does to the
+// cube's rate reaches the planet.
+//
+// The planet turns on its own axle at the cube's set rate. A step bound before
+// it can add to that rate or take from it: the beat visualizer kicks it on
+// every beat, the wobble patch halves it. `share` of that difference is
+// passed on, and it is passed on through a short lag, so a kick arrives as a
+// surge the mob can ride and not as a jolt. A jolt is what startles them:
+// the alarm goes on the suddenness of a change, and an airborne animal is
+// thrown by it.
+struct InheritedSpin {
+    // Half of the beat visualizer's kicks, through a lag of a few frames.
+    // Under a song at 3.7 beats a second with the cube set to 162 degrees a
+    // second, that still speeds the planet up by about 40 degrees a second
+    // with a visible surge on each beat, and costs about 4 kangaroos flung and
+    // 2 alarms in two minutes. The kicks passed on whole and at once cost 54
+    // and 14; without the lag, even at this share, an alarm went on every
+    // eight seconds, which is as often as the mob allows itself one.
+    static constexpr float defaultShare = 0.5F;
+    static constexpr float attackSeconds = 0.06F;
+
+    // Degrees per second on top of the set rate, as passed on so far.
+    float extra = 0.0F;
+
+    static double wrap(const double degrees) { return degrees - 360.0 * std::round(degrees / 360.0); }
+
+    // The planet's turn this tick, in degrees, given the angle it started the
+    // tick at and the angle the displaced step function returned for it.
+    float turn(const float inputDegrees, const float displacedDegrees, const float setRate,
+               const float dt, const float share, const float attackSeconds)
+    {
+        if (dt <= 0.0F) {
+            return 0.0F;
+        }
+        const float displacedRate = static_cast<float>(wrap(static_cast<double>(displacedDegrees) - inputDegrees)) / dt;
+        const float wanted = std::clamp(share, 0.0F, 1.0F) * (displacedRate - setRate);
+        const float follow = attackSeconds > 0.0F ? 1.0F - std::exp(-dt / attackSeconds) : 1.0F;
+        extra += (wanted - extra) * follow;
+        return (setRate + extra) * dt;
+    }
+};
+
 namespace sim_detail {
 
 inline std::string quote(const std::string& s)

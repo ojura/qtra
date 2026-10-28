@@ -460,7 +460,7 @@ python3 tools/agentctl.py snippet \
 | `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
 | `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front` |
 | `agent_snippet_audio_pulse` | drives the cube and a rig around it from the system audio mix | `device`, `sensitivity`, `dynamicRangeDb`, `events` |
-| `agent_snippet_kangaroo_planet` | turns the cube into a planet with a mob of kangaroos on it, under the cube's real gravity | `mob`, `gravity`, `water`, `seed`, `inertia`, `inheritSpin`, `contours`, `events`, `hopEvents`; see [A planet with kangaroos on it](#a-planet-with-kangaroos-on-it) |
+| `agent_snippet_kangaroo_planet` | turns the cube into a planet with a mob of kangaroos on it, under the cube's real gravity | `mob`, `gravity`, `water`, `seed`, `inertia`, `spinShare`, `contours`, `events`, `hopEvents`; see [A planet with kangaroos on it](#a-planet-with-kangaroos-on-it) |
 
 ### Switching them on and off
 
@@ -782,16 +782,22 @@ planet by up to about 10 deg/s. `inertia` sets how heavy the planet is against
 the mob. Its default of 40 already exaggerates how little a real planet would
 notice; small values make it lively.
 
-The planet turns on its own axle at the cube's set rate. The binding calls the
-step function it displaced and keeps that function's tint and scale, so the beat
-visualizer bound before it still pulses the planet's size and colour with the
-music, but its kicks to the rate are not taken. A planet lurching several times
-a second startles the mob into a stampede as often as the alarm allows and
-throws whoever is in the air; with the kicks taken, a song at 162 deg/s flung
-26 kangaroos in two simulated minutes, and without them none.
-`{"inheritSpin": true}` takes the displaced function's rate as well, which is
-what a patch that changes the rate, such as the wobble, needs to reach the
-planet.
+The planet turns on its own axle at the cube's set rate, plus a share of
+whatever a step function bound before it does to that rate. The binding calls
+the step function it displaced and keeps that function's tint and scale, so the
+beat visualizer still pulses the planet's size and colour with the music. Of
+its kicks to the rate, `spinShare` passes on a share, 0.5 by default, through a
+lag of 0.06 seconds, so a beat arrives as a surge and not as a jolt. A jolt is
+what startles the mob: the alarm goes on how sudden a change is, and an animal
+in the air is thrown by it. Under a song at 3.7 beats a second with the cube
+set to 162 deg/s, the default speeds the planet up by about 40 deg/s with a
+surge of about 10 on each beat, and in two simulated minutes 4 kangaroos are
+flung and 2 alarms go off. Passing the kicks on whole and at once, the planet
+reaches 291 deg/s, 54 are flung and an alarm goes off every eight seconds,
+which is as often as the mob allows itself one. `{"spinShare": 0}` keeps the
+planet at the set rate, and `1` passes everything on, still softened. The same
+share applies to a patch that changes the rate, such as the wobble, which
+halves it.
 
 It uses three seams, each for what it owns:
 
@@ -832,7 +838,7 @@ Requests:
 | `{"throw": "Big Red"}` | throws that kangaroo off the ground; `throwSpeed` sets how hard, default 4.5 |
 | `{"mob": 6, "gravity": 14, "water": 0.05, "seed": 1}` | rebuilds the scene with that many kangaroos (1 to 12), that gravity at a face centre, that depth of water at a face centre at rest, and that seed |
 | `{"inertia": 40}` | the planet's moment of inertia about its axle |
-| `{"inheritSpin": true}` | turn at the rate a step function bound before this one produces, beat kicks included, instead of the cube's set rate |
+| `{"spinShare": 0.5}` | how much of what a step function bound before this one does to the cube's rate reaches the planet, from 0 to 1 |
 | `{"contours": false}` | hides the equipotential lines drawn on the ground |
 | `{"events": false}`, `{"hopEvents": true}` | stops the events below, or adds one per hop |
 | `{"restore": true}`, `{"toggle": true}` | as for the other scene snippets |
