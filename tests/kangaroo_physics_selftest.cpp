@@ -781,6 +781,36 @@ void hopsGoWhereTheyAim()
     }
 }
 
+// A lost kangaroo comes back as soon as the planet can hold it, which on a
+// fast planet means a drop from just above the faces nearest the axle. When
+// they were always dropped from high up, a planet turning at 200 degrees a
+// second kept the whole mob in space.
+void lostKangaroosComeBackOnAFastPlanet()
+{
+    kangaroo::Mob mob;
+    kangaroo::Settings settings;
+    settings.seed = 4;
+    mob.reset(settings, kangaroo::V3{0.72F, 1.0F, 0.31F});
+    for (int frame = 0; frame < 20 * 60; ++frame) {
+        mob.advance(1.0F / 60.0F, degrees(260.0F));
+        (void)mob.takeImpulse();
+        mob.events.clear();
+    }
+    const int flung = mob.flungTotal;
+    for (int frame = 0; frame < 40 * 60; ++frame) {
+        mob.advance(1.0F / 60.0F, degrees(200.0F));
+        (void)mob.takeImpulse();
+        mob.events.clear();
+    }
+    int home = 0;
+    for (const kangaroo::Kangaroo& k : mob.roos) {
+        home += (k.present() && k.activity != kangaroo::Activity::Flung) ? 1 : 0;
+    }
+    check(flung >= 3 && mob.returnedTotal >= 3,
+          format("thrown off at 260 deg/s (%.0f), they come back at 200 (%.0f returned)", flung, mob.returnedTotal));
+    check(home >= 4, format("and most of the mob is on the planet again (%.0f)", home));
+}
+
 void simulationChecks()
 {
     rigStaysWhole();
@@ -790,6 +820,7 @@ void simulationChecks()
     spinFeedbackStaysBounded();
     rateMeterReadsTurnsNotAngles();
     hopsGoWhereTheyAim();
+    lostKangaroosComeBackOnAFastPlanet();
     sameSeedSameMob();
     mobLivesOnThePlanet();
     spinThrowsThemOff();

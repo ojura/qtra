@@ -2204,36 +2204,52 @@ private:
 
     void bringBack(Kangaroo& k)
     {
-        // Drop in over whichever face holds best right now. If none holds,
-        // wait: there is nowhere to land.
-        int best = -1;
-        float bestGrip = 0.45F * settings.surfaceGravity;
+        // Drop in over a face that holds, from as high up as the planet will
+        // still pull it down. On a fast planet the centrifugal push grows
+        // with distance from the axle faster than gravity falls off, so a drop
+        // from high up is thrown straight back out; the drop is then made
+        // lower, down to just above the ground, over whichever face holds
+        // best. If nothing holds even there, wait: there is nowhere to land.
+        std::array<int, faceCount> order{0, 1, 2, 3, 4, 5};
+        std::array<float, faceCount> holds{};
         for (int face = 0; face < faceCount; ++face) {
-            const float g = grip(faceNormal(face), face);
-            if (g > bestGrip) {
-                bestGrip = g;
-                best = face;
+            holds[face] = grip(faceNormal(face), face);
+        }
+        std::sort(order.begin(), order.end(), [&](const int a, const int b) { return holds[a] > holds[b]; });
+        const float pulledEnough = 0.2F * settings.surfaceGravity;
+        for (const int face : order) {
+            if (holds[face] < 0.45F * settings.surfaceGravity) {
+                break;
+            }
+            V3 u;
+            V3 v;
+            faceAxes(face, u, v);
+            const V3 n = faceNormal(face);
+            for (const float height : {1.6F, 1.0F, 0.55F, 0.3F}) {
+                const V3 offset = k.rng.inDisc(u, v, 0.4F * height / 1.6F);
+                bool pulled = true;
+                for (int sample = 0; sample <= 4 && pulled; ++sample) {
+                    const V3 point = n * (1.0F + height * static_cast<float>(sample) / 4.0F) + offset;
+                    pulled = -dot(effectiveGravity(point), n) >= pulledEnough;
+                }
+                if (!pulled) {
+                    continue;
+                }
+                k.p = n * (1.0F + height) + offset;
+                k.v = V3{};
+                k.face = face;
+                k.up = n;
+                k.heading = normalize(u);
+                k.gait = Gait::Flight;
+                k.gaitClock = 0.0F;
+                k.flightDuration = 1e3F;
+                k.activity = Activity::Flung;
+                k.tumbleRate = 1.5F;
+                k.teleported = true;
+                k.awayClock = 0.0F;
+                return;
             }
         }
-        if (best < 0) {
-            return;
-        }
-        V3 u;
-        V3 v;
-        faceAxes(best, u, v);
-        const V3 n = faceNormal(best);
-        k.p = n * 2.6F + k.rng.inDisc(u, v, 0.5F);
-        k.v = V3{};
-        k.face = best;
-        k.up = normalize(k.p);
-        k.heading = normalize(u);
-        k.gait = Gait::Flight;
-        k.gaitClock = 0.0F;
-        k.flightDuration = 1e3F;
-        k.activity = Activity::Flung;
-        k.tumbleRate = 1.5F;
-        k.teleported = true;
-        k.awayClock = 0.0F;
     }
 
     // ------------------------------------------------------------------
