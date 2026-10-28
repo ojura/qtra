@@ -1222,6 +1222,18 @@ private:
             }
             const V3 contact = lerp(p0, k.p, lo);
             const int face = faceOf(contact);
+            const V3 n = faceNormal(face);
+            if (grip(contact, face) < 0.5F && dot(k.v, n) < 0.0F) {
+                // Ground that cannot hold a body down gives it nothing to
+                // grip, so a landing there is a bounce: most of the speed
+                // into the face is lost and the speed along it is kept.
+                // Landing as if on firm ground would stop all of that
+                // sideways speed against the planet at once, which is a shove
+                // the planet would feel and the ground could not give.
+                k.p = onFace(contact, face) + n * 1e-4F;
+                k.v = flatten(k.v, n) - n * (0.3F * dot(k.v, n));
+                return;
+            }
             k.p = onFace(contact, face);
             land(k, face);
         }
@@ -1500,13 +1512,19 @@ private:
                 if (i == j || !b.present() || b.face != a.face || !b.grounded()) {
                     continue;
                 }
-                if ((a.activity == Activity::Box && a.partner == static_cast<int>(j))
-                    || (a.role == Role::Joey && a.mother == static_cast<int>(j))) {
+                if (a.activity == Activity::Box && a.partner == static_cast<int>(j)) {
+                    continue;
+                }
+                // A joey keeps close to its mother but not inside her, except
+                // while it is diving for the pouch.
+                const bool family = (a.role == Role::Joey && a.mother == static_cast<int>(j))
+                    || (b.role == Role::Joey && b.mother == static_cast<int>(i));
+                if (family && (a.calmClock < 0.0F || b.calmClock < 0.0F)) {
                     continue;
                 }
                 const V3 away = a.p - b.p;
                 const float d = length(away);
-                const float reach = 0.32F * (a.size + b.size);
+                const float reach = (family ? 0.2F : 0.32F) * (a.size + b.size);
                 if (d < reach && d > 1e-4F) {
                     const V3 n = faceNormal(a.face);
                     const V3 shove = normalize(flatten(away, n)) * ((reach - d) * std::min(1.0F, 3.0F * dt));
@@ -2139,11 +2157,13 @@ private:
             k.arrived = false;
             return;
         }
+        // At her side, clear of her body: behind her is her tail, which
+        // reaches most of her height back along the ground.
+        const SurfacePoint beside =
+            walk(SurfacePoint{mum.p, cross(mum.heading, faceNormal(mum.face)), mum.face}, 0.6F * mum.size);
         if (gap > 0.45F) {
-            const SurfacePoint beside = walk(SurfacePoint{mum.p, -mum.heading, mum.face}, 0.14F);
             setGoal(k, beside.p, beside.face, Move::Hop, std::max(mum.speed, 0.6F) * 1.15F);
-        } else if (gap > 0.2F && k.arrived) {
-            const SurfacePoint beside = walk(SurfacePoint{mum.p, cross(mum.heading, faceNormal(mum.face)), mum.face}, 0.13F);
+        } else if (gap > 0.3F && k.arrived) {
             setGoal(k, beside.p, beside.face, Move::Walk, 0.12F);
         } else if (k.arrived && k.rng.chance(0.4F * dt)) {
             // Potter about near her.

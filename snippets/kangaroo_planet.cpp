@@ -348,8 +348,8 @@ void main()
             d = length(local) - 0.02;
         }
         float fade = 1.0 - smoothstep(6.0, 14.0, printPosition[i].w);
-        float mark = 1.0 - smoothstep(-0.004, 0.004, d);
-        colour = mix(colour, colour * 0.58, mark * fade);
+        float mark = 1.0 - smoothstep(-0.003, 0.003, d);
+        colour = mix(colour, colour * 0.72, mark * fade);
     }
 
     // Shadows of the mob, softer and wider the higher an animal is.
@@ -1040,9 +1040,11 @@ void pushTube(std::vector<float>& out, const V3& a, const V3& b, const float ra,
     }
 }
 
-// A lumpy blob of foliage: an octahedron subdivided twice and pushed onto a
-// sphere, with its radius jittered so it does not read as a ball.
-void pushBlob(std::vector<float>& out, const V3& centre, const float radius, const V3& colour, kangaroo::Rng& rng)
+// A lumpy clump of foliage: an octahedron subdivided twice and pushed onto a
+// sphere, squashed along `up` and with its radius jittered, so it reads as a
+// clump of leaves and not as a ball.
+void pushBlob(std::vector<float>& out, const V3& centre, const float radius, const V3& colour,
+              kangaroo::Rng& rng, const V3& up = V3{0.0F, 1.0F, 0.0F}, const float flat = 1.0F)
 {
     std::vector<std::array<V3, 3>> faces;
     const std::array<V3, 6> o{{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}};
@@ -1070,7 +1072,9 @@ void pushBlob(std::vector<float>& out, const V3& centre, const float radius, con
     for (const auto& f : faces) {
         const V3 c = colour * rng.range(0.85F, 1.12F);
         for (const V3& d : f) {
-            pushVertex(out, centre + d * (radius * bump(d)), d, c, V3{0.0F, 0.0F, 1.0F});
+            const V3 squashed = d - up * (kangaroo::dot(d, up) * (1.0F - flat));
+            const V3 normal = kangaroo::normalize(d - up * (kangaroo::dot(d, up) * (1.0F - 1.0F / flat)));
+            pushVertex(out, centre + squashed * (radius * bump(d)), normal, c, V3{0.0F, 0.0F, 1.0F});
         }
     }
 }
@@ -1081,22 +1085,31 @@ std::vector<float> buildProps(const kangaroo::Mob& mob)
     kangaroo::Rng rng(mob.settings.seed * 977 + 3);
     for (const kangaroo::Tree& tree : mob.trees) {
         // A gum tree grows against the local gravity, so near an edge it
-        // leans away from the face centre's "down".
+        // leans away from the face centre's "down". The trunk forks part way
+        // up into limbs that spread out and up, and the leaves hang in open,
+        // flattened clumps at their ends, with sky between them.
         const V3 up = tree.up;
-        V3 side = kangaroo::normalize(kangaroo::cross(up, kangaroo::faceNormal(tree.face) + V3{0.3F, 0.1F, 0.2F}));
-        const V3 trunkTop = tree.p + up * tree.height + side * (0.04F * std::sin(tree.seed * 10.0F));
+        const V3 side = kangaroo::normalize(kangaroo::cross(up, kangaroo::faceNormal(tree.face) + V3{0.3F, 0.1F, 0.2F}));
+        const V3 other = kangaroo::cross(up, side);
         const V3 bark{0.86F, 0.84F, 0.78F};
-        pushTube(out, tree.p - up * 0.01F, trunkTop, 0.022F, 0.011F, bark);
-        const int branches = 3;
-        for (int b = 0; b < branches; ++b) {
-            const float angle = tree.seed * 6.0F + 2.1F * static_cast<float>(b);
-            const V3 out1 = kangaroo::normalize(side * std::cos(angle) + kangaroo::cross(up, side) * std::sin(angle));
-            const V3 from = tree.p + up * (tree.height * (0.55F + 0.12F * static_cast<float>(b)));
-            const V3 to = from + out1 * (0.09F + 0.03F * static_cast<float>(b)) + up * 0.08F;
-            pushTube(out, from, to, 0.009F, 0.005F, bark * 0.94F, 5);
-            pushBlob(out, to + up * 0.03F, 0.065F + 0.012F * static_cast<float>(b), V3{0.34F, 0.42F, 0.24F}, rng);
+        const V3 leaves{0.37F, 0.45F, 0.31F};
+        const V3 fork = tree.p + up * (tree.height * 0.48F) + side * (0.02F * std::sin(tree.seed * 10.0F));
+        pushTube(out, tree.p - up * 0.01F, fork, 0.022F, 0.014F, bark);
+        const int limbs = 3 + static_cast<int>(tree.seed * 2.0F);
+        for (int b = 0; b < limbs; ++b) {
+            const float angle = tree.seed * 6.0F + 2.0F * kangaroo::pi * static_cast<float>(b) / static_cast<float>(limbs);
+            const V3 outward = side * std::cos(angle) + other * std::sin(angle);
+            const float reach = 0.08F + 0.05F * rng.uniform();
+            const V3 elbow = fork + outward * (reach * 0.5F) + up * (tree.height * 0.28F);
+            const V3 tip = elbow + outward * (reach * 0.6F) + up * (tree.height * 0.2F);
+            pushTube(out, fork, elbow, 0.011F, 0.008F, bark * 0.96F, 6);
+            pushTube(out, elbow, tip, 0.008F, 0.004F, bark * 0.92F, 5);
+            for (int clump = 0; clump < 3; ++clump) {
+                const V3 jitter = side * rng.range(-0.04F, 0.04F) + other * rng.range(-0.04F, 0.04F)
+                    + up * rng.range(-0.015F, 0.03F);
+                pushBlob(out, tip + jitter, rng.range(0.044F, 0.064F), leaves, rng, up, 0.55F);
+            }
         }
-        pushBlob(out, trunkTop + up * 0.04F, 0.095F, V3{0.36F, 0.45F, 0.25F}, rng);
     }
 
     // The road sign: a post, and a diamond plate facing out over the edge.
