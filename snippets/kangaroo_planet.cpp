@@ -29,6 +29,7 @@
 // Requests:
 //   {}                       install, or report what the mob is doing
 //   {"restore": true}        take it all off and put the cube back
+//   {"recall": true}         drop everyone lost in space back onto the planet
 //   {"toggle": true}         flip it
 //   {"status": true}         every kangaroo, the water, the planet's spin
 //   {"alarm": true}          someone thumps; the mob stampedes
@@ -49,6 +50,7 @@
 #include "agent/agent_abi.h"
 #include "cube_mesh.h"
 #include "cube_widget.h"
+#include "kangaroo_panel.h"
 #include "kangaroo_sim.h"
 #include "scene_toggle.h"
 
@@ -62,6 +64,7 @@
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVersionFunctionsFactory>
+#include <QPointer>
 #include <QSignalBlocker>
 #include <QVector2D>
 #include <QVector3D>
@@ -969,12 +972,21 @@ struct Planet {
     double simulateMs = 0.0;
     double drawMs = 0.0;
     float grassClock = 0.0F;
+
+    // A throw asked for while that kangaroo was in the air, waiting for it to
+    // land. A kangaroo is airborne for most of a hop, so a throw that only
+    // worked from the ground would mostly do nothing.
+    QString pendingThrow;
+    float pendingThrowSpeed = 0.0F;
+    float pendingThrowSeconds = 0.0F;
 };
 
 Planet* planet = nullptr;
 Options options;
 QMetaObject::Connection drawConnection;
 QAction* toggleAction = nullptr;
+// The control panel docked beside the cube while the planet is on.
+QPointer<QDockWidget> panel;
 RuntimeAgentHost hookHost{};
 bool hookHostValid = false;
 
@@ -1440,6 +1452,8 @@ void uploadGrass(GlScene& scene, const kangaroo::Mob& mob)
     scene.grassCount = static_cast<GLsizei>(grass.size() / 12);
 }
 
+bool throwByName(const QString& name, float speed);
+
 void drawScene(CubeWidget* cube)
 {
     QOpenGLContext* context = QOpenGLContext::currentContext();
@@ -1466,6 +1480,12 @@ void drawScene(CubeWidget* cube)
     if (dt > 1e-5F) {
         planet->omega = planet->rate.frame(angle - planet->lastAngle, dt);
         mob.advance(std::min(dt, 0.1F), planet->omega);
+        if (!planet->pendingThrow.isEmpty()) {
+            planet->pendingThrowSeconds -= dt;
+            if (throwByName(planet->pendingThrow, planet->pendingThrowSpeed) || planet->pendingThrowSeconds <= 0.0F) {
+                planet->pendingThrow.clear();
+            }
+        }
         planet->lastElapsed = elapsed;
         planet->lastAngle = angle;
         planet->grassClock += dt;
@@ -1754,6 +1774,218 @@ V3 spinAxis()
     return kangaroo::normalize(V3{cubeSpinAxis[0], cubeSpinAxis[1], cubeSpinAxis[2]});
 }
 
+// ---------------------------------------------------------------------------
+// What the socket and the control panel both ask for
+// ---------------------------------------------------------------------------
+
+// A new mob and new scenery from the current settings. Needs the widget's
+// OpenGL context to be current, because the scenery is in GL buffers.
+bool rebuildScene(QString& error)
+{
+    if (planet == nullptr) {
+        error = QStringLiteral("no planet is installed");
+        return false;
+    }
+    planet->mob.reset(options.settings, spinAxis());
+    destroyScene(*planet->gl);
+    if (!buildScene(*planet->gl, planet->mob, error)) {
+        return false;
+    }
+    uploadGrass(*planet->gl, planet->mob);
+    planet->mob.grassChanged = false;
+    planet->clockSeen = false;
+    return true;
+}
+
+bool throwByName(const QString& name, const float speed)
+{
+    if (planet == nullptr) {
+        return false;
+    }
+    bool thrown = false;
+    for (std::size_t i = 0; i < planet->mob.roos.size(); ++i) {
+        kangaroo::Kangaroo& k = planet->mob.roos[i];
+        if (QString::fromStdString(k.name).compare(name, Qt::CaseInsensitive) == 0) {
+            const V3 n = kangaroo::faceNormal(k.face);
+            thrown = planet->mob.launch(static_cast<int>(i), n * speed + k.heading * (0.35F * speed)) || thrown;
+        }
+    }
+    return thrown;
+}
+
+// Everyone lost in space or still on the way out is put back over a face
+// that holds them, if one does. Returns how many were asked back.
+int recallLost()
+{
+    if (planet == nullptr) {
+        return 0;
+    }
+    int recalled = 0;
+    for (kangaroo::Kangaroo& k : planet->mob.roos) {
+        if (k.activity == kangaroo::Activity::Away || k.activity == kangaroo::Activity::Flung) {
+            planet->mob.recall(k);
+            ++recalled;
+        }
+    }
+    return recalled;
+}
+
+// ---------------------------------------------------------------------------
+// The control panel
+// ---------------------------------------------------------------------------
+
+constexpr std::array<const char*, kangaroo::faceCount> faceNames{
+    "pink lake", "woodland", "grassland", "heath", "red desert", "salt lake",
+};
+
+kangaroo_panel::Snapshot snapshot(const CubeWidget* cube)
+{
+    kangaroo_panel::Snapshot now;
+    now.spinShare = options.spinShare;
+    now.inertia = options.settings.planetInertia;
+    now.gravity = options.settings.surfaceGravity;
+    now.water = options.settings.waterDepth;
+    now.mob = options.settings.mob;
+    now.seed = static_cast<int>(options.settings.seed);
+    now.contours = options.contours;
+    now.events = options.events;
+    now.hopEvents = options.settings.hopEvents;
+    if (planet == nullptr) {
+        return now;
+    }
+    const kangaroo::Mob& mob = planet->mob;
+    now.installed = true;
+    now.setRate = cube->m_angularVelocity;
+    now.rate = planet->omega * 180.0F / kangaroo::pi;
+    now.fromMusic = planet->inherited.extra;
+    now.fromMob = static_cast<float>(planet->spin.boost * 180.0 / kangaroo::pi);
+    now.flung = mob.flungTotal;
+    now.returned = mob.returnedTotal;
+    now.alarms = mob.alarmsTotal;
+    now.bouts = mob.boutsTotal;
+    now.waterHeld = mob.water.volume > 0.0F ? mob.water.totalVolume() / mob.water.volume : 1.0F;
+    for (const kangaroo::Kangaroo& k : mob.roos) {
+        kangaroo_panel::Row row;
+        row.name = QString::fromStdString(k.name);
+        row.role = QString::fromLatin1(kangaroo::roleName(k.role));
+        row.doing = QString::fromLatin1(kangaroo::activityName(k.activity));
+        if (k.activity == kangaroo::Activity::Away || k.activity == kangaroo::Activity::Flung) {
+            row.where = QStringLiteral("in space");
+        } else if (k.activity == kangaroo::Activity::Pouched) {
+            row.where = QStringLiteral("in the pouch");
+        } else {
+            row.where = QString::fromLatin1(faceNames[k.face]);
+        }
+        row.hops = k.hops;
+        row.flung = k.flungCount;
+        row.wins = k.wins;
+        now.rows.push_back(row);
+    }
+    return now;
+}
+
+bool setEnabled(CubeWidget* cube, bool enabled, QString& error);
+
+// Built after the frame that installed the planet, not inside it: docking a
+// panel resizes the cube's widget, and that is not something to do from the
+// middle of its own paint.
+void createPanel(CubeWidget* cube)
+{
+    if (planet == nullptr || panel != nullptr) {
+        return;
+    }
+    auto* window = qobject_cast<QMainWindow*>(cube->window());
+    if (window == nullptr) {
+        return;
+    }
+    kangaroo_panel::Controls controls;
+    controls.snapshot = [cube] { return snapshot(cube); };
+    controls.alarm = [] {
+        if (planet != nullptr) {
+            planet->mob.raiseAlarm("thumped from the control panel");
+        }
+    };
+    controls.bout = [] {
+        if (planet != nullptr) {
+            planet->mob.startBout();
+        }
+    };
+    controls.recall = [] { (void)recallLost(); };
+    controls.calm = [cube] { cube->setAngularVelocity(75.0F); };
+    controls.remove = [cube] {
+        // Through the menu entry when this module holds it, so its checkbox
+        // follows; its handler defers the work to a frame, where the context
+        // the removal needs is current.
+        if (toggleAction != nullptr) {
+            toggleAction->setChecked(false);
+            return;
+        }
+        cube->enqueueRenderCallback([cube] {
+            QString ignored;
+            setEnabled(cube, false, ignored);
+        });
+    };
+    controls.throwKangaroo = [](const QString& name, const float speed) {
+        if (planet != nullptr && !throwByName(name, speed)) {
+            planet->pendingThrow = name;
+            planet->pendingThrowSpeed = speed;
+            planet->pendingThrowSeconds = 3.0F;
+        }
+    };
+    controls.setSpinShare = [](const float share) { options.spinShare = std::clamp(share, 0.0F, 1.0F); };
+    controls.setInertia = [](const float inertia) {
+        options.settings.planetInertia = std::clamp(inertia, 0.05F, 1e6F);
+        if (planet != nullptr) {
+            planet->mob.settings.planetInertia = options.settings.planetInertia;
+        }
+    };
+    controls.setContours = [](const bool on) { options.contours = on; };
+    controls.setEvents = [](const bool on) { options.events = on; };
+    controls.setHopEvents = [](const bool on) {
+        options.settings.hopEvents = on;
+        if (planet != nullptr) {
+            planet->mob.settings.hopEvents = on;
+        }
+    };
+    controls.rebuild = [cube](const int mob, const float gravity, const float water, const int seed) {
+        options.settings.mob = std::clamp(mob, 1, 12);
+        options.settings.surfaceGravity = std::clamp(gravity, 2.0F, 60.0F);
+        options.settings.waterDepth = std::clamp(water, 0.0F, 0.2F);
+        options.settings.seed = static_cast<std::uint64_t>(std::max(seed, 0));
+        cube->enqueueRenderCallback([] {
+            QString error;
+            if (planet != nullptr && !rebuildScene(error) && hookHostValid) {
+                hookHost.log(hookHost.agent_context, RUNTIME_AGENT_LOG_WARNING, error.toLocal8Bit().constData());
+            }
+        });
+    };
+    panel = kangaroo_panel::create(window, controls);
+
+    // Shown and hidden from the Cube menu, beside the planet's own entry. The
+    // entry belongs to the panel, so it goes when the panel does.
+    QAction* view = panel->toggleViewAction();
+    view->setObjectName(QStringLiteral("actionKangarooPanel"));
+    view->setText(QStringLiteral("Kangaroo &panel"));
+    view->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+D")));
+    if (QMenu* menu = scene_toggle::findMenu(window, QStringLiteral("&Cube"))) {
+        menu->addAction(view);
+    }
+}
+
+void destroyPanel()
+{
+    if (panel != nullptr) {
+        // Later, not now: the removal may have been asked for by one of the
+        // panel's own buttons, which is still on the stack.
+        panel->deleteLater();
+        panel = nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Install and remove, continued
+// ---------------------------------------------------------------------------
+
 // Needs the widget's OpenGL context to be current.
 bool install(CubeWidget* cube, QString& error)
 {
@@ -1843,6 +2075,7 @@ bool install(CubeWidget* cube, QString& error)
     drawConnection = QObject::connect(
         cube, &CubeWidget::frameRendered, cube, [cube](qulonglong, float) { drawScene(cube); },
         Qt::DirectConnection);
+    QMetaObject::invokeMethod(cube, [cube] { createPanel(cube); }, Qt::QueuedConnection);
     cube->update();
     return true;
 }
@@ -1876,6 +2109,7 @@ void remove(CubeWidget* cube)
         hookHost.stash_drop(hookHost.agent_context, planet->claimKey.constData());
     }
 
+    destroyPanel();
     destroyScene(*planet->gl);
     delete planet;
     planet = nullptr;
@@ -2148,17 +2382,15 @@ void run(const RuntimeAgentHost* host)
     if (planet != nullptr) {
         QJsonObject result;
         if (rebuild) {
-            // A new mob and new scenery; the GL scene is rebuilt with them.
-            planet->mob.reset(options.settings, spinAxis());
-            destroyScene(*planet->gl);
             QString error;
-            if (!buildScene(*planet->gl, planet->mob, error)) {
+            if (!rebuildScene(error)) {
                 host->fail(host->invocation_context, error.toLocal8Bit().constData());
                 return;
             }
-            uploadGrass(*planet->gl, planet->mob);
-            planet->clockSeen = false;
             result.insert(QStringLiteral("rebuilt"), true);
+        }
+        if (request.value(QStringLiteral("recall")).toBool()) {
+            result.insert(QStringLiteral("recalled"), recallLost());
         }
         if (request.value(QStringLiteral("alarm")).toBool()) {
             result.insert(QStringLiteral("alarm"), planet->mob.raiseAlarm("asked to over the socket"));
@@ -2167,17 +2399,9 @@ void run(const RuntimeAgentHost* host)
             result.insert(QStringLiteral("bout"), planet->mob.startBout());
         }
         if (request.contains(QStringLiteral("throw"))) {
-            const QString name = request.value(QStringLiteral("throw")).toString();
-            const float speed = static_cast<float>(number("throwSpeed", 4.5));
-            bool thrown = false;
-            for (std::size_t i = 0; i < planet->mob.roos.size(); ++i) {
-                kangaroo::Kangaroo& k = planet->mob.roos[i];
-                if (QString::fromStdString(k.name).compare(name, Qt::CaseInsensitive) == 0) {
-                    const V3 n = kangaroo::faceNormal(k.face);
-                    thrown = planet->mob.launch(static_cast<int>(i), n * speed + k.heading * (0.35F * speed));
-                }
-            }
-            result.insert(QStringLiteral("thrown"), thrown);
+            result.insert(QStringLiteral("thrown"),
+                          throwByName(request.value(QStringLiteral("throw")).toString(),
+                                      static_cast<float>(number("throwSpeed", 4.5))));
         }
         const QJsonObject status = summary(request.value(QStringLiteral("status")).toBool());
         for (auto it = status.begin(); it != status.end(); ++it) {

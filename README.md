@@ -827,6 +827,28 @@ cube's frame:
   loop runs away. An early version of this snippet did exactly that and reached
   67,000 deg/s. `kangaroo_sim.h` uses the rate at each end of the step.
 
+Installing the planet also docks a control panel beside the cube, and adds a
+Kangaroo panel entry (`Ctrl+Shift+D`, `actionKangarooPanel`) to the Cube menu
+that shows and hides it. The panel goes when the planet does.
+
+| part | what it does |
+| --- | --- |
+| Planet | what the planet is turning at and where that comes from (the cube's setting, the share of the visualizer's change, the mob's push), a button that calms the spin to 75 deg/s, and sliders for `spinShare` and the planet's weight |
+| Mob | thump an alarm, start a bout, bring back the lost, and throw any kangaroo at a chosen speed; a throw at a kangaroo in mid-hop waits for it to land. A table lists every kangaroo with what it is doing, which face it is on, and its hops, flings and wins, and a line below counts flings, returns, bouts, alarms and how much of the water is on the ground |
+| Scene | the number of kangaroos, gravity, water and seed, applied together by Rebuild the scene; and the equipotential lines and both kinds of events |
+| Take the planet off | puts the cube back, the same as unchecking its menu entry |
+
+Every control has an object name beginning with `kangaroo`, so the semantic API
+can work the panel too: `object.invoke` with `click` presses a button, and
+`object.set` on `value` moves a slider or a spin box.
+
+```bash
+python3 tools/agentctl.py call object.invoke \
+  --params '{"objectName":"kangarooAlarmButton","method":"click"}'
+python3 tools/agentctl.py call object.set \
+  --params '{"objectName":"kangarooSpinShareSlider","property":"value","value":30}'
+```
+
 Requests:
 
 | request | effect |
@@ -841,6 +863,7 @@ Requests:
 | `{"spinShare": 0.5}` | how much of what a step function bound before this one does to the cube's rate reaches the planet, from 0 to 1 |
 | `{"contours": false}` | hides the equipotential lines drawn on the ground |
 | `{"events": false}`, `{"hopEvents": true}` | stops the events below, or adds one per hop |
+| `{"recall": true}` | drops every kangaroo lost in space back onto the planet, if a face can hold them |
 | `{"restore": true}`, `{"toggle": true}` | as for the other scene snippets |
 
 The events are `kangaroo.flung`, `kangaroo.returned`, `kangaroo.alarm`,
@@ -1455,6 +1478,7 @@ snippets/kangaroo_rig.h         a kangaroo as rounded cones, from a pose
 snippets/kangaroo_sim.h         the mob, the billabongs and the planet's answer to the mob;
                                 standard library only
 snippets/kangaroo_planet.cpp    draws the planet and the mob and binds the step function
+snippets/kangaroo_panel.h       the planet's control panel, docked beside the cube
 snippets/audio_analysis.h       capture, FFT and onset detection; depends on PulseAudio
                                 and the standard library only, so unlike cube_mesh.h and
                                 scene_toggle.h beside it, it knows nothing of Qt, the
