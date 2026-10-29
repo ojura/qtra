@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 import sys
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -226,8 +226,74 @@ class AgentClientTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["sequence"], "99")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class WaitingForTheAgentTests(unittest.TestCase):
+    """The command line waits for an application that is still starting.
+
+    Running agentctl straight after starting the application is the ordinary
+    way to use the two, and before this the first command failed with a bare
+    "[Errno 2] No such file or directory" because the socket was not bound
+    yet.
+    """
+
+    def test_waits_for_an_agent_that_starts_listening_late(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+
+            def handler(agent: FakeAgent, connection: socket.socket) -> None:
+                request = agent.receive(connection)
+                agent.send(connection, {"id": request["id"], "ok": True, "result": {"name": "late"}})
+
+            agent = FakeAgent(path, handler)
+            starter = threading.Timer(0.5, agent.thread.start)
+            starter.start()
+            output = StringIO()
+            with redirect_stdout(output):
+                status = main(["--socket", os.fspath(path), "--wait", "5", "call", "hello"])
+            starter.join()
+            agent.thread.join(2)
+            if agent.error is not None:
+                raise agent.error
+            self.assertEqual(status, 0)
+            self.assertEqual(json.loads(output.getvalue()), {"name": "late"})
+
+    def test_gives_up_naming_the_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+            errors = StringIO()
+            started = time.monotonic()
+            with redirect_stderr(errors):
+                status = main(["--socket", os.fspath(path), "--wait", "0.3", "call", "hello"])
+            elapsed = time.monotonic() - started
+            self.assertEqual(status, 2)
+            self.assertIn(f"no agent is listening at {path}", errors.getvalue())
+            self.assertGreaterEqual(elapsed, 0.3)
+            self.assertLess(elapsed, 3.0)
+
+    def test_a_stale_socket_file_is_waited_on_too(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+            # Bound and never listened on: the file exists and connecting to
+            # it is refused, as with one left by a process that was killed.
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(os.fspath(path))
+            try:
+                errors = StringIO()
+                with redirect_stderr(errors):
+                    status = main(["--socket", os.fspath(path), "--wait", "0.3", "call", "hello"])
+            finally:
+                stale.close()
+            self.assertEqual(status, 2)
+            self.assertIn("no agent is listening", errors.getvalue())
+
+    def test_no_wait_fails_at_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "agent.sock"
+            started = time.monotonic()
+            with redirect_stderr(StringIO()):
+                status = main(["--socket", os.fspath(path), "--wait", "0", "call", "hello"])
+            self.assertEqual(status, 2)
+            self.assertLess(time.monotonic() - started, 0.5)
+
 
 
 class DeferredEventTests(unittest.TestCase):
@@ -438,3 +504,7 @@ class HandoverTests(unittest.TestCase):
         result = hand_over(Client(), {"id": "1"}, None, None, '{"restore": true}', 1.0)
         self.assertEqual(result["outcome"], "never-ran")
         self.assertEqual(sent, [("snippet.release", None)])
+
+
+if __name__ == "__main__":
+    unittest.main()

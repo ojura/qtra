@@ -449,10 +449,53 @@ def is_finished_operation(message: Mapping[str, Any], operation_id: str | int) -
     return isinstance(data, Mapping) and str(data.get("operationId")) == str(operation_id)
 
 
+def connect_when_listening(socket_path: str, timeout: float, wait: float) -> AgentClient:
+    """A connected client, waiting up to `wait` seconds for the agent to listen.
+
+    Starting the application and running agentctl straight after it is the
+    ordinary way to use the two, and the application takes a moment to bind
+    its socket. Until it does, connecting fails because the socket is not
+    there, or is refused when a socket file left by a process that was killed
+    is still in place. Both are retried until the wait runs out; any other
+    failure is reported at once, because waiting would not change it.
+
+    The retrying is here and not in AgentClient, which connects once: a caller
+    that launched the application itself also knows when it has died, and
+    waits on that instead.
+    """
+    started = time.monotonic()
+    deadline = started + max(wait, 0.0)
+    announced = False
+    while True:
+        client = AgentClient(socket_path, timeout)
+        try:
+            client.connect()
+            return client
+        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            client.close()
+            now = time.monotonic()
+            if now >= deadline:
+                waited = f" after waiting {wait:g} s" if wait > 0 else ""
+                raise ConnectionError(
+                    f"no agent is listening at {socket_path}{waited}; start the application, "
+                    "or give the path it prints with --socket"
+                ) from exc
+            if not announced and now - started >= 1.0:
+                print(f"agentctl: waiting for the agent to listen at {socket_path}", file=sys.stderr)
+                announced = True
+            time.sleep(min(0.1, deadline - now))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default=default_socket_path(), help="agent Unix socket path")
     parser.add_argument("--timeout", type=float, default=10.0, help="timeout in seconds")
+    parser.add_argument(
+        "--wait",
+        type=float,
+        default=10.0,
+        help="seconds to wait for an application that is still starting to listen; 0 fails at once",
+    )
     parser.add_argument("--compact", action="store_true", help="emit compact JSON")
     parser.add_argument(
         "--show-events", action="store_true", help="print events seen while awaiting responses"
@@ -547,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
             print_json(message, args.compact, stream=sys.stderr)
 
     try:
-        with AgentClient(args.socket, args.timeout) as client:
+        with connect_when_listening(args.socket, args.timeout, args.wait) as client:
             if args.subcommand == "call":
                 params = parse_json(args.params, args.params_file)
                 if not isinstance(params, dict):

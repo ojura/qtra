@@ -172,7 +172,7 @@ clean exit. A process killed with `SIGKILL` leaves a stale
 | a rebuilt snippet runs its old code | `dlopen()` keys objects by pathname and returned the resident handle. Use `agentctl.py reload`. |
 | queued `render` work never runs | the window is hidden and the compositor has stopped sending frame callbacks. A 100 ms watchdog drains the queue through `grabFramebuffer()`, so this resolves itself. |
 | `unknown_parameter` | the command does not read that parameter, and the error names what it does read. |
-| `agentctl.py` cannot connect | the application prints the path it is listening on. Both sides default to `/tmp/qt-runtime-cube-<uid>.sock`; a custom one has to be given to both with `--agent-socket`. |
+| `agentctl.py` cannot connect | it waits up to 10 seconds (`--wait`) for an application that is still starting, so running it straight after starting the application is fine; after that it names the path it tried. The application prints the path it is listening on. Both sides default to `/tmp/qt-runtime-cube-<uid>.sock`; a custom one has to be given to both with `--agent-socket`. |
 | cmake cannot find Qt | install the distribution's Qt 6 development packages, or point `CMAKE_PREFIX_PATH` at another installation. |
 | no display, or no OpenGL context | `./scripts/run_xvfb.sh` starts one with software rendering. `scripts/install_deps_debian.sh` installs Xvfb and Mesa. |
 | the build oracle calls a context ambiguous | the application and the self-test both compile `src/cube_step.cpp`, so name the object the error lists, such as `qt_runtime_cube.dir/src/cube_step.cpp.o`. |
