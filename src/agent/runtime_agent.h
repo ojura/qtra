@@ -383,6 +383,14 @@ private:
     std::unique_ptr<QSocketNotifier> m_listenNotifier;
     std::optional<BoundSocketIdentity> m_boundSocket;
     QHash<QLocalSocket*, ClientState> m_clients;
+    // How many requests are being handled right now, counting ones nested
+    // inside another's event loop, and the sockets whose clients went away
+    // meanwhile. A handler holds its client's socket by plain pointer, and a
+    // handler can run a nested event loop: action.trigger on an action that
+    // opens a modal dialog does. A client that disconnects inside that loop
+    // must not have its socket deleted until every handler has returned.
+    int m_dispatchDepth = 0;
+    QList<QPointer<QLocalSocket>> m_closedWhileDispatching;
     std::vector<CommandEntry> m_commands;
     QMap<QString, SnippetExecutor> m_executors;
     QMap<QString, std::function<QJsonValue()>> m_helloFields;

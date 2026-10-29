@@ -529,28 +529,48 @@ void RuntimeAgent::acceptConnections()
 
 void RuntimeAgent::readClient(QLocalSocket* socket)
 {
-    auto iterator = m_clients.find(socket);
-    if (iterator == m_clients.end()) {
-        return;
+    {
+        auto iterator = m_clients.find(socket);
+        if (iterator == m_clients.end()) {
+            return;
+        }
+        iterator->input += socket->readAll();
+        if (iterator->input.size() > maximumRequestBytes) {
+            sendError(socket, QJsonValue(), QStringLiteral("request_too_large"),
+                      QStringLiteral("request buffer exceeded 1 MiB"));
+            socket->disconnectFromServer();
+            return;
+        }
     }
 
-    iterator->input += socket->readAll();
-    if (iterator->input.size() > maximumRequestBytes) {
-        sendError(socket, QJsonValue(), QStringLiteral("request_too_large"),
-                  QStringLiteral("request buffer exceeded 1 MiB"));
-        socket->disconnectFromServer();
-        return;
-    }
-
+    // A handler can run a nested event loop, and anything can happen inside it:
+    // this client can disconnect, others can connect, and this one can send
+    // more lines, which reach this function again. So the client is looked up
+    // afresh for every line, never through an iterator held across a handler,
+    // which an insert into m_clients would invalidate; and removeClient leaves
+    // the socket itself alive until the outermost handler has returned.
+    ++m_dispatchDepth;
     while (true) {
+        auto iterator = m_clients.find(socket);
+        if (iterator == m_clients.end()) {
+            break;
+        }
         const qsizetype newline = iterator->input.indexOf('\n');
         if (newline < 0) {
             break;
         }
-        QByteArray line = iterator->input.left(newline).trimmed();
+        const QByteArray line = iterator->input.left(newline).trimmed();
         iterator->input.remove(0, newline + 1);
         if (!line.isEmpty()) {
             handleLine(socket, line);
+        }
+    }
+    if (--m_dispatchDepth == 0) {
+        const QList<QPointer<QLocalSocket>> closed = std::exchange(m_closedWhileDispatching, {});
+        for (const QPointer<QLocalSocket>& gone : closed) {
+            if (gone != nullptr) {
+                gone->deleteLater();
+            }
         }
     }
 }
@@ -558,6 +578,17 @@ void RuntimeAgent::readClient(QLocalSocket* socket)
 void RuntimeAgent::removeClient(QLocalSocket* socket)
 {
     m_clients.remove(socket);
+    // A handler further up the stack may still hold this socket, waiting in a
+    // nested event loop to send its reply. deleteLater() does not protect it:
+    // Qt runs a deferred delete in the event loop that asked for it, and a
+    // modal dialog's loop is one. Deleting it then is what crashed the
+    // application when the About box was opened over the socket, its client
+    // gave up waiting, and the dialog was closed. It is no longer a client, so
+    // a reply sent to it is dropped; it is deleted once the handlers are done.
+    if (m_dispatchDepth > 0) {
+        m_closedWhileDispatching.append(socket);
+        return;
+    }
     socket->deleteLater();
 }
 

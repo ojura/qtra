@@ -243,6 +243,48 @@ class PatchActivation(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")
+class ModalDialogOverTheSocket(unittest.TestCase):
+    """A request that opens a modal dialog, with its client gone by the time the dialog closes.
+
+    action.trigger on the About action opens a QMessageBox, which runs a
+    nested event loop inside the request handler, so the reply waits for the
+    dialog. A client that gave up meanwhile disconnected inside that loop,
+    Qt ran the socket's deferred delete in it, and the reply sent once the
+    dialog closed went through the freed pointer: the application crashed,
+    in the middle of a demo. Other clients connecting while the dialog is open
+    also inserted into the table the outer handler held an iterator into.
+    """
+
+    def setUp(self) -> None:
+        requireArtifacts()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.socket_path = Path(directory.name) / "agent.sock"
+        self.agent = Agent(self.socket_path)
+        self.addCleanup(self.agent.close)
+
+    def test_a_client_that_gives_up_on_a_modal_dialog_does_not_crash_the_application(self) -> None:
+        impatient = AgentClient(str(self.socket_path), timeout=1.5)
+        impatient.connect()
+        with self.assertRaises(TimeoutError):
+            impatient.request("action.trigger", {"objectName": "actionAbout"})
+        impatient.close()
+
+        # Other clients come and go while the dialog's loop runs.
+        boxes = []
+        for _ in range(12):
+            with AgentClient(str(self.socket_path), timeout=10) as other:
+                listing = other.request("object.list", {})
+                boxes = [entry for entry in listing if entry.get("class") == "QMessageBox"]
+        self.assertEqual(len(boxes), 1, "the About box should be open")
+
+        self.agent.ok("object.invoke", id=boxes[0]["id"], method="accept")
+        time.sleep(0.5)
+        self.assertIsNone(self.agent.process.poll(), "the application exited when the dialog closed")
+        self.assertIn("pid", self.agent.ok("hello"))
+
+
+@unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")
 class MixedGenerations(unittest.TestCase):
     """What the entry reaches, said twice, through a stack bound both ways.
 
