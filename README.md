@@ -834,9 +834,24 @@ that shows and hides it. The panel goes when the planet does.
 | part | what it does |
 | --- | --- |
 | Planet | what the planet is turning at and where that comes from (the cube's setting, the share of the visualizer's change, the mob's push), a button that calms the spin to 75 deg/s, and sliders for `spinShare` and the planet's weight |
+| Camera | Ride with the planet, which turns the camera with the planet so it holds still on screen, and Reset the camera. Dragging the cube orbits the camera, the wheel zooms, and a double click resets it |
 | Mob | thump an alarm, start a bout, bring back the lost, and throw any kangaroo at a chosen speed; a throw at a kangaroo in mid-hop waits for it to land. A table lists every kangaroo with what it is doing, which face it is on, and its hops, flings and wins, and a line below counts flings, returns, bouts, alarms and how much of the water is on the ground |
 | Scene | the number of kangaroos, gravity, water and seed, applied together by Rebuild the scene; and the equipotential lines and both kinds of events |
 | Take the planet off | puts the cube back, the same as unchecking its menu entry |
+
+The widget has no camera of its own: `paintGL()` and every overlay build their
+view from the same fixed distance. What they all share is the widget's
+projection matrix, so the camera is folded into that: the snippet writes
+projection × camera × the widget's own translation undone. The widget's draw
+and every overlay then see the scene from wherever the camera is, without any
+of them knowing. Riding with the planet adds the inverse of the planet's
+rotation to the camera, so the picture holds still while the planet still
+spins under the physics; the sun stays fixed in space, so day and night still
+sweep across the faces. The step function writes the camera for the angle it
+is about to hand the widget, so a riding camera stays exactly with the planet,
+and the frame hook writes it again in case the window was resized, since
+`resizeGL()` rewrites the projection. Taking the planet off puts the widget's
+own projection back.
 
 Every control has an object name beginning with `kangaroo`, so the semantic API
 can work the panel too: `object.invoke` with `click` presses a button, and
@@ -864,6 +879,8 @@ Requests:
 | `{"contours": false}` | hides the equipotential lines drawn on the ground |
 | `{"events": false}`, `{"hopEvents": true}` | stops the events below, or adds one per hop |
 | `{"recall": true}` | drops every kangaroo lost in space back onto the planet, if a face can hold them |
+| `{"syncCamera": true}` | the camera rides with the planet; `false` frees it again without the picture jumping |
+| `{"orbit": [30, -10]}`, `{"distance": 8}`, `{"resetCamera": true}` | turns the camera by degrees across and up, sets its distance from the planet's centre, or puts it back |
 | `{"restore": true}`, `{"toggle": true}` | as for the other scene snippets |
 
 The events are `kangaroo.flung`, `kangaroo.returned`, `kangaroo.alarm`,

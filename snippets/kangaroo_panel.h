@@ -69,6 +69,7 @@ struct Snapshot {
     bool contours = true;
     bool events = true;
     bool hopEvents = false;
+    bool cameraRides = false;
 };
 
 struct Controls {
@@ -85,6 +86,8 @@ struct Controls {
     std::function<void(bool)> setContours;
     std::function<void(bool)> setEvents;
     std::function<void(bool)> setHopEvents;
+    std::function<void(bool)> setCameraRides;
+    std::function<void()> resetCamera;
     std::function<void(int mob, float gravity, float water, int seed)> rebuild;
 };
 
@@ -183,6 +186,22 @@ inline QDockWidget* create(QMainWindow* window, Controls controls)
     weight->setToolTip(QStringLiteral("How heavy the planet is against the mob's pushes; light is lively"));
     planetForm->addRow(QStringLiteral("Planet weight"), weightRow);
     layout->addWidget(planetBox);
+
+    // ---- the camera -------------------------------------------------------
+    auto* cameraBox = new QGroupBox(QStringLiteral("Camera"));
+    auto* cameraLayout = new QGridLayout(cameraBox);
+    auto* rides = new QCheckBox(QStringLiteral("Ride with the planet"));
+    rides->setObjectName(QStringLiteral("kangarooCameraRidesCheck"));
+    rides->setToolTip(QStringLiteral("The camera turns with the planet, so it holds still on screen; it still "
+                                     "spins, and the mob still feels it"));
+    auto* resetView = button(QStringLiteral("Reset the camera"), QStringLiteral("kangarooCameraResetButton"),
+                             QStringLiteral("Back to the window's own view"));
+    auto* hint = new QLabel(QStringLiteral("Drag the cube to orbit, scroll to zoom, double-click to reset."));
+    hint->setWordWrap(true);
+    cameraLayout->addWidget(rides, 0, 0);
+    cameraLayout->addWidget(resetView, 0, 1);
+    cameraLayout->addWidget(hint, 1, 0, 1, 2);
+    layout->addWidget(cameraBox);
 
     // ---- the mob ----------------------------------------------------------
     auto* mobBox = new QGroupBox(QStringLiteral("Mob"));
@@ -289,6 +308,8 @@ inline QDockWidget* create(QMainWindow* window, Controls controls)
     QObject::connect(bout, &QPushButton::clicked, dock, [controls] { controls.bout(); });
     QObject::connect(recall, &QPushButton::clicked, dock, [controls] { controls.recall(); });
     QObject::connect(calm, &QPushButton::clicked, dock, [controls] { controls.calm(); });
+    QObject::connect(rides, &QCheckBox::toggled, dock, [controls](const bool on) { controls.setCameraRides(on); });
+    QObject::connect(resetView, &QPushButton::clicked, dock, [controls] { controls.resetCamera(); });
     QObject::connect(remove, &QPushButton::clicked, dock, [controls] { controls.remove(); });
     QObject::connect(toss, &QPushButton::clicked, dock, [controls, who, speed] {
         controls.throwKangaroo(who->currentText(), static_cast<float>(speed->value()));
@@ -351,6 +372,7 @@ inline QDockWidget* create(QMainWindow* window, Controls controls)
             weightValue->setText(QString::number(now.inertia, 'f', 0));
         }
         sync(contours, now.contours);
+        sync(rides, now.cameraRides);
         sync(events, now.events);
         sync(hopEvents, now.hopEvents);
 
