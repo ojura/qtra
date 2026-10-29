@@ -202,7 +202,7 @@ clean exit. A process killed with `SIGKILL` leaves a stale
 ./scripts/validate.sh
 ```
 
-Three Release configurations, eleven tests each: ordinary `-O3` with branch
+Three Release configurations, twelve tests each: ordinary `-O3` with branch
 protection off, `-O3` with GCC LTO, and `-O3` with Intel CET/IBT. Against its
 own binary, each configuration runs the two raw hotpatch tests, the
 admission-order checks, thread accounting, what a second adapter finds after the
@@ -210,7 +210,7 @@ first one is gone, a redirect through the GOT of a function the loader already
 resolved, what an entry holds when its page cannot be made executable again,
 what destroying the agent does to module code still running, what a module
 carrying a build id means to a host reporting none, the kangaroo planet's
-physics, and the Python tests, which
+physics, the tesseract's maths, and the Python tests, which
 cover
 compilation-command transformation, retained-event replay, quiet event streams,
 socket protocol behavior, and activation over the socket. For
@@ -427,12 +427,12 @@ python3 tools/agentctl.py snippet SOME_SNIPPET.so \
 
 ### Ready-made scene modifications
 
-Seven prebuilt snippets change what the widget draws. Each installs a direct
+Eight prebuilt snippets change what the widget draws. Each installs a direct
 connection to `CubeWidget::frameRendered`, which is emitted at the end of
 `paintGL()` while the context is still current and the depth buffer still holds
 the cube, so a hook there gets correct occlusion without touching `paintGL()`.
-All seven read private `CubeWidget` state for the frame's angle, scale, tint,
-elapsed time, and projection, and all seven are compiled with
+All eight read private `CubeWidget` state for the frame's angle, scale, tint,
+elapsed time, and projection, and all eight are compiled with
 `-fno-access-control`.
 
 ```bash
@@ -450,6 +450,8 @@ python3 tools/agentctl.py snippet \
   build/release/agent_snippet_audio_pulse.so --executor render --request '{}'
 python3 tools/agentctl.py snippet \
   build/release/agent_snippet_kangaroo_planet.so --executor render --request '{}'
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_tesseract.so --executor render --request '{}'
 ```
 
 | module | what it does | parameters |
@@ -461,10 +463,11 @@ python3 tools/agentctl.py snippet \
 | `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front` |
 | `agent_snippet_audio_pulse` | drives the cube and a rig around it from the system audio mix | `device`, `sensitivity`, `dynamicRangeDb`, `events` |
 | `agent_snippet_kangaroo_planet` | turns the cube into a planet with a mob of kangaroos on it, under the cube's real gravity | `mob`, `gravity`, `water`, `seed`, `inertia`, `spinShare`, `contours`, `events`, `hopEvents`; see [A planet with kangaroos on it](#a-planet-with-kangaroos-on-it) |
+| `agent_snippet_tesseract` | turns the cube into a tesseract turning through the fourth dimension, in perspective, stereographically or sliced | `view`, `direction`, `sweep`, `position`, `rates`, `faces`, `corners`, `events`; see [A tesseract](#a-tesseract) |
 
 ### Switching them on and off
 
-All seven add a checkable entry to the application's Cube menu when the snippet
+All eight add a checkable entry to the application's Cube menu when the snippet
 is loaded, under a separator that marks off everything added at runtime:
 
 | entry | shortcut | object name |
@@ -476,6 +479,7 @@ is loaded, under a separator that marks off everything added at runtime:
 | Jack in the box | `Ctrl+Shift+J` | `actionJackInTheBox` |
 | Beat visualizer | `Ctrl+Shift+B` | `actionBeatVisualizer` |
 | Kangaroo planet | `Ctrl+Shift+K` | `actionKangarooPlanet` |
+| Tesseract | `Ctrl+Shift+T` | `actionTesseract` |
 
 The application has no knowledge of these snippets and must not acquire any:
 they are separate shared objects that may never be loaded at all. Each entry is
@@ -511,9 +515,9 @@ second entry. It would carry the same name while driving different state, so the
 module that got there first keeps the menu, and the later one is reachable only
 through its own `moduleId`.
 
-**They exclude each other through the claims they leave in the stash.** Four of
+**They exclude each other through the claims they leave in the stash.** Five of
 them replace part of the mesh: `catmull_clark`, `pillow_cube`,
-`jack_in_the_box` and `kangaroo_planet` displace some region of the widget's vertex buffer by
+`jack_in_the_box`, `kangaroo_planet` and `tesseract` displace some region of the widget's vertex buffer by
 overwriting it with zeros, and record that in the host's byte stash: the
 displaced originals under `cube.vertexBuffer/<offset>+<length>`, and a claim
 alongside it saying a displacement is in effect. Installing asks whether any
@@ -851,7 +855,8 @@ sweep across the faces. The step function writes the camera for the angle it
 is about to hand the widget, so a riding camera stays exactly with the planet,
 and the frame hook writes it again in case the window was resized, since
 `resizeGL()` rewrites the projection. Taking the planet off puts the widget's
-own projection back.
+own projection back. The camera is in `snippets/projection_camera.h`, which the
+tesseract uses too.
 
 Every control has an object name beginning with `kangaroo`, so the semantic API
 can work the panel too: `object.invoke` with `click` presses a button, and
@@ -907,6 +912,96 @@ and with the point-mass limit; checks that flight conserves the Jacobi
 integral and that the water keeps its volume under spin; and runs the mob for
 simulated minutes, including with the planet's answer fed back into it under
 spin-ups and beat-like kicks, which is the loop that once ran away.
+
+### A tesseract
+
+`agent_snippet_tesseract` turns the cube into a tesseract, the
+four-dimensional cube, and turns it through the fourth dimension:
+
+```bash
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_tesseract.so --executor render --request '{}'
+```
+
+A tesseract is the set of points whose four coordinates all lie in [-1, 1]. It
+has 16 corners, 32 edges, 24 square faces and 8 cubic cells, each cell the part
+where one coordinate is pinned at +1 or -1. Each cell has its own colour in
+every view. The six that pin x, y or z keep the hue of the cube's face in that
+direction, and the two that pin w, which the cube has no face for, are warm
+white and orange.
+
+The cube's own spin drives the turning. A rotation in four dimensions turns a
+plane, not an axis, and there are six coordinate planes; each turns at some
+multiple of the cube's angle, so `Ctrl++` and `Ctrl+-` speed the tesseract up
+and slow it down, and pausing the cube holds it still. By default xw and yz
+turn together at the same rate, a double rotation under which every point
+moves and the cells turn inside out in a steady cycle: the small inner cube
+grows into the big outer one while the outer one shrinks through the middle.
+
+It can be shown three ways:
+
+| view | what it shows |
+| --- | --- |
+| perspective | divided by distance along w, the way a photograph divides by depth: the cell nearest the eye in w is the big outer cube, the furthest is the small inner one, and the six between them are the frustums joining them. Edges are thicker and brighter nearer the eye in w |
+| stereographic | the corners pushed onto the three-sphere and projected from its pole, which keeps angles: the edges are arcs of great circles and come out as circular arcs, and the cells are curved |
+| slice | the exact cross-section by a hyperplane sweeping through the tesseract, which is what a being in three dimensions would see as it passed through their space. Each face of the solid is cut from one cell and has that cell's colour |
+
+The slice is computed exactly. The cross-section of a convex polytope is
+convex, each of its faces is the cut through one cell, and a cell's cut is the
+polygon where the hyperplane crosses that cube's edges, so the solid is built
+cell by cell in `snippets/tesseract_math.h`. Which solid it is depends on how
+the hyperplane meets the tesseract:
+
+| cut | what the sweep shows |
+| --- | --- |
+| cell first | a cube, the same all the way through |
+| face first | a square prism, longest at the middle |
+| edge first | a triangular prism near the ends, a hexagonal prism in the middle |
+| corner first | a tetrahedron growing from a point; the tetrahedron through four of the tesseract's corners a quarter of the way in from each end; truncated tetrahedra beyond that; and at the middle an octahedron whose six corners are six of the tesseract's own |
+| turning | a fixed hyperplane through the turning tesseract, so the solid changes shape continuously |
+
+The corner-first sweep pauses at the middle and a quarter of the way in from
+each end. The octahedron and the tetrahedron through four corners exist only
+at exactly those cuts, and a sweep that passed straight through would show
+each for less than a frame. Each time the slice becomes a different solid it
+publishes a `tesseract.slice` event with the solid's name and its corner, edge
+and face counts:
+
+```bash
+python3 tools/agentctl.py --timeout 30 events --prefix tesseract.
+```
+
+Installing it docks a panel beside the cube, with a Tesseract panel entry in
+the Cube menu (`Ctrl+Shift+H`, `actionTesseractPanel`) that shows and hides it.
+The panel has the view, the cut and where it is, the turning rate of each
+plane with three presets (the double rotation, xw alone, and holding still),
+and Take the tesseract off; its controls' object names begin with
+`tesseract`. Dragging the cube orbits the camera, the wheel zooms, and a double
+click resets it, through the same camera as the kangaroo planet. Like the
+planet, it displaces the widget's mesh and claims it, so it and the other mesh
+replacements refuse each other. A record of the cube's originals that another
+of them left behind is not its to overwrite, so after taking one of them off,
+`stash.drop` the key the refusal names before installing the tesseract.
+
+Requests:
+
+| request | effect |
+| --- | --- |
+| `{}` | install, or report what it is showing |
+| `{"view": "slice"}` | `perspective`, `stereographic` or `slice` |
+| `{"direction": "corner"}` | `cell`, `face`, `edge`, `corner` (or `vertex`), or `turning` |
+| `{"sweep": false, "position": 0}` | stops sweeping and holds the cut at a position from -1 to 1; 0 is the middle |
+| `{"rates": {"xw": 1, "yz": 1}}` | the turning rate of each plane named, in units of the cube's own spin, from -2 to 2 |
+| `{"faces": false}`, `{"corners": false}`, `{"events": false}` | hides the cells' glass or the corners, or stops the events |
+| `{"orbit": [30, -10]}`, `{"distance": 8}`, `{"resetCamera": true}` | moves the camera |
+| `{"status": true}`, `{"restore": true}`, `{"toggle": true}` | as for the other scene snippets |
+
+`tesseract_selftest` checks that the rotations stay rotations and the
+projections land where they should; that each cut above is the solid named,
+with the octahedron and both tetrahedra regular and the truncated tetrahedron
+halfway from the middle to the four-corner cut the Archimedean one, every edge
+the same length; and that two thousand random cuts are each a closed, convex,
+outward-facing solid with one face per cell.
 
 ### Project-aware on-demand compilation
 
@@ -1496,13 +1591,19 @@ snippets/kangaroo_sim.h         the mob, the billabongs and the planet's answer 
                                 standard library only
 snippets/kangaroo_planet.cpp    draws the planet and the mob and binds the step function
 snippets/kangaroo_panel.h       the planet's control panel, docked beside the cube
+snippets/projection_camera.h    a camera for the cube's widget, folded into its projection
+snippets/tesseract.cpp          the cube as a tesseract, in perspective, stereographically or sliced
+snippets/tesseract_math.h       the tesseract, its rotations, projections and exact slices;
+                                standard library only
+snippets/tesseract_panel.h      the tesseract's control panel
 snippets/audio_analysis.h       capture, FFT and onset detection; depends on PulseAudio
                                 and the standard library only, so unlike cube_mesh.h and
                                 scene_toggle.h beside it, it knows nothing of Qt, the
                                 agent ABI, or this demo
 patches/                        function replacement examples
 tests/                          hotpatch_selftest.cpp, kangaroo_physics_selftest.cpp,
-                                and the Python protocol, agentctl and compile-oracle tests
+                                tesseract_selftest.cpp, and the Python protocol, agentctl
+                                and compile-oracle tests
 tools/agentctl.py               protocol client, including snippet reload
 tools/compile_snippet.py        compile-database build oracle
 tools/read_build_id.py          reads the GNU build id modules are stamped with

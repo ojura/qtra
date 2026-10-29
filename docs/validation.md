@@ -20,6 +20,7 @@ agent-lifetime
 unstamped-host
 got-reach
 kangaroo-physics
+tesseract-maths
 coverage-admission-order
 python-tool-tests
 ```

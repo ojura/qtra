@@ -57,6 +57,7 @@
 #include "cube_widget.h"
 #include "kangaroo_panel.h"
 #include "kangaroo_sim.h"
+#include "projection_camera.h"
 #include "scene_toggle.h"
 
 #include <QElapsedTimer>
@@ -952,40 +953,15 @@ struct GlScene {
     std::vector<QVector2D> signRadius;
 };
 
-// The camera, which the widget does not have: its view is a fixed translation
-// in paintGL(), and every overlay builds its own from the same constant. What
-// they all share is the widget's projection matrix, so the camera is folded
-// into that. Drawing with projection x camera x (the widget's translation
-// undone) puts the camera wherever this says, for the widget's own draw and
-// for every overlay, without any of them knowing.
-//
-// resizeGL() rewrites the projection, so before each use the projection is
-// compared with what was last written into it: if it is something else, it is
-// the new base.
-struct Camera {
-    // The view's rotation of the world, applied before the translation back
-    // from the eye.
-    QQuaternion orbit;
-    float distance = cubeViewDistance;
-    // Whether the camera turns with the planet. It is a matter of the view
-    // only: the planet still spins, and the mob still feels it.
-    bool ridesPlanet = false;
-
-    QMatrix4x4 base;
-    QMatrix4x4 written;
-    bool haveWritten = false;
-    // The full view of this frame, translation and rotation, for the scene's
-    // own use: where the eye is in the planet's frame.
-    QMatrix4x4 view;
-
-    bool dragging = false;
-    QPointF lastPointer;
-};
-
 struct Planet {
     std::unique_ptr<GlScene> gl;
     kangaroo::Mob mob;
-    Camera camera;
+    // The camera, folded into the widget's projection; see
+    // projection_camera.h. Riding with the planet adds the planet's own turn,
+    // undone, so the picture holds still while the planet still spins and the
+    // mob still feels it.
+    projection_camera::Camera camera;
+    bool ridesPlanet = false;
 
     // The widget's own vertices, displaced while the planet is drawn.
     std::vector<float> savedCubeVertices;
@@ -1056,30 +1032,15 @@ void applyCamera(CubeWidget* cube, const float angleDegrees)
     if (planet == nullptr) {
         return;
     }
-    Camera& camera = planet->camera;
-    if (!camera.haveWritten || cube->m_projection != camera.written) {
-        camera.base = cube->m_projection;
-    }
-    QQuaternion rotation = camera.orbit;
-    if (camera.ridesPlanet) {
-        rotation = rotation * QQuaternion::fromAxisAndAngle(spinAxisQ(), -angleDegrees);
-    }
-    QMatrix4x4 view;
-    view.translate(0.0F, 0.0F, -camera.distance);
-    view.rotate(rotation);
-    camera.view = view;
-    QMatrix4x4 undo;
-    undo.translate(0.0F, 0.0F, cubeViewDistance);
-    cube->m_projection = camera.base * view * undo;
-    camera.written = cube->m_projection;
-    camera.haveWritten = true;
+    projection_camera::apply(planet->camera, cube,
+                             planet->ridesPlanet ? QQuaternion::fromAxisAndAngle(spinAxisQ(), -angleDegrees)
+                                                 : QQuaternion());
 }
 
-// Puts back the projection the widget made, if what is there is still ours.
 void releaseCamera(CubeWidget* cube)
 {
-    if (planet != nullptr && planet->camera.haveWritten && cube->m_projection == planet->camera.written) {
-        cube->m_projection = planet->camera.base;
+    if (planet != nullptr) {
+        projection_camera::release(planet->camera, cube);
     }
 }
 
@@ -1087,29 +1048,22 @@ void releaseCamera(CubeWidget* cube)
 // current rotation moves into the orbit, or out of it.
 void setRidesPlanet(CubeWidget* cube, const bool rides)
 {
-    if (planet == nullptr || planet->camera.ridesPlanet == rides) {
+    if (planet == nullptr || planet->ridesPlanet == rides) {
         return;
     }
-    Camera& camera = planet->camera;
     const QQuaternion turn = QQuaternion::fromAxisAndAngle(spinAxisQ(), cube->m_angleDegrees);
-    camera.orbit = rides ? camera.orbit * turn : camera.orbit * turn.inverted();
-    camera.ridesPlanet = rides;
+    planet->camera.orbit = rides ? planet->camera.orbit * turn : planet->camera.orbit * turn.inverted();
+    planet->ridesPlanet = rides;
     applyCamera(cube, cube->m_angleDegrees);
     cube->update();
 }
 
-// Turns the view by degrees across and up, as dragging does: about the
-// view's own vertical and horizontal, so the world follows the pointer
-// however it is already turned.
 void orbitCamera(CubeWidget* cube, const float across, const float up)
 {
     if (planet == nullptr) {
         return;
     }
-    Camera& camera = planet->camera;
-    camera.orbit = QQuaternion::fromAxisAndAngle(1.0F, 0.0F, 0.0F, up)
-        * QQuaternion::fromAxisAndAngle(0.0F, 1.0F, 0.0F, across) * camera.orbit;
-    camera.orbit.normalize();
+    projection_camera::orbit(planet->camera, across, up);
     applyCamera(cube, cube->m_angleDegrees);
     cube->update();
 }
@@ -1119,7 +1073,7 @@ void setCameraDistance(CubeWidget* cube, const float distance)
     if (planet == nullptr) {
         return;
     }
-    planet->camera.distance = std::clamp(distance, 2.4F, 30.0F);
+    projection_camera::setDistance(planet->camera, distance);
     applyCamera(cube, cube->m_angleDegrees);
     cube->update();
 }
@@ -1129,78 +1083,16 @@ void resetCamera(CubeWidget* cube)
     if (planet == nullptr) {
         return;
     }
-    Camera& camera = planet->camera;
-    camera.orbit = QQuaternion();
-    camera.distance = cubeViewDistance;
-    if (camera.ridesPlanet) {
+    projection_camera::reset(planet->camera);
+    if (planet->ridesPlanet) {
         // Riding, the view still starts where the widget's own would be.
-        camera.orbit = QQuaternion::fromAxisAndAngle(spinAxisQ(), cube->m_angleDegrees);
+        planet->camera.orbit = QQuaternion::fromAxisAndAngle(spinAxisQ(), cube->m_angleDegrees);
     }
     applyCamera(cube, cube->m_angleDegrees);
     cube->update();
 }
 
-// Dragging with the left button orbits, the wheel zooms, a double click
-// resets. Installed on the cube's widget, which handles no pointer input of
-// its own.
-class CameraPointer final : public QObject {
-public:
-    explicit CameraPointer(CubeWidget* cube) : QObject(cube), m_cube(cube) {}
-
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override
-    {
-        if (watched != m_cube || planet == nullptr) {
-            return false;
-        }
-        Camera& camera = planet->camera;
-        switch (event->type()) {
-        case QEvent::MouseButtonPress: {
-            auto* mouse = static_cast<QMouseEvent*>(event);
-            if (mouse->button() != Qt::LeftButton) {
-                return false;
-            }
-            camera.dragging = true;
-            camera.lastPointer = mouse->position();
-            return true;
-        }
-        case QEvent::MouseMove: {
-            auto* mouse = static_cast<QMouseEvent*>(event);
-            if (!camera.dragging || (mouse->buttons() & Qt::LeftButton) == 0) {
-                return false;
-            }
-            const QPointF delta = mouse->position() - camera.lastPointer;
-            camera.lastPointer = mouse->position();
-            orbitCamera(m_cube, static_cast<float>(delta.x()) * 0.4F, static_cast<float>(delta.y()) * 0.4F);
-            return true;
-        }
-        case QEvent::MouseButtonRelease:
-            if (static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton && camera.dragging) {
-                camera.dragging = false;
-                return true;
-            }
-            return false;
-        case QEvent::MouseButtonDblClick:
-            if (static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {
-                resetCamera(m_cube);
-                return true;
-            }
-            return false;
-        case QEvent::Wheel: {
-            const float steps = static_cast<float>(static_cast<QWheelEvent*>(event)->angleDelta().y()) / 120.0F;
-            setCameraDistance(m_cube, camera.distance * std::pow(0.9F, steps));
-            return true;
-        }
-        default:
-            return false;
-        }
-    }
-
-private:
-    CubeWidget* m_cube;
-};
-
-QPointer<CameraPointer> cameraPointer;
+QPointer<projection_camera::Pointer> cameraPointer;
 
 // ---------------------------------------------------------------------------
 // The planet's spin, as the replacement step function
@@ -2070,7 +1962,7 @@ kangaroo_panel::Snapshot snapshot(const CubeWidget* cube)
     if (planet == nullptr) {
         return now;
     }
-    now.cameraRides = planet->camera.ridesPlanet;
+    now.cameraRides = planet->ridesPlanet;
     const kangaroo::Mob& mob = planet->mob;
     now.installed = true;
     now.setRate = cube->m_angularVelocity;
@@ -2298,7 +2190,17 @@ bool install(CubeWidget* cube, QString& error)
     planetCube = cube;
     applyCamera(cube, cube->m_angleDegrees);
     if (cameraPointer == nullptr) {
-        cameraPointer = new CameraPointer(cube);
+        cameraPointer = new projection_camera::Pointer(
+            cube, projection_camera::Pointer::Actions{
+                      [] { return planet != nullptr ? &planet->camera : nullptr; },
+                      [cube](const float across, const float up) { orbitCamera(cube, across, up); },
+                      [cube](const float factor) {
+                          if (planet != nullptr) {
+                              setCameraDistance(cube, planet->camera.distance * factor);
+                          }
+                      },
+                      [cube] { resetCamera(cube); },
+                  });
         cube->installEventFilter(cameraPointer);
     }
     QMetaObject::invokeMethod(cube, [cube] { createPanel(cube); }, Qt::QueuedConnection);
@@ -2439,7 +2341,7 @@ QJsonObject summary(const bool detailed)
     result.insert(QStringLiteral("simulateMs"), planet->simulateMs);
     result.insert(QStringLiteral("submitMs"), planet->drawMs);
     result.insert(QStringLiteral("contours"), options.contours);
-    result.insert(QStringLiteral("cameraRidesPlanet"), planet->camera.ridesPlanet);
+    result.insert(QStringLiteral("cameraRidesPlanet"), planet->ridesPlanet);
     result.insert(QStringLiteral("cameraDistance"), planet->camera.distance);
     result.insert(QStringLiteral("spinShare"), options.spinShare);
     result.insert(QStringLiteral("inheritedDegreesPerSecond"), planet->inherited.extra);

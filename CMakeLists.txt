@@ -466,6 +466,19 @@ set_target_properties(agent_snippet_kangaroo_planet PROPERTIES
     PREFIX "" OUTPUT_NAME "agent_snippet_kangaroo_planet")
 stamp_with_host_build_id(agent_snippet_kangaroo_planet)
 
+# The cube as a tesseract turning through the fourth dimension, shown in
+# perspective, stereographically or sliced. It displaces the widget's mesh like
+# the planet, and its maths is in a header the selftest below checks without
+# Qt.
+add_library(agent_snippet_tesseract MODULE snippets/tesseract.cpp)
+target_include_directories(agent_snippet_tesseract PRIVATE include src)
+target_link_libraries(agent_snippet_tesseract PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+target_compile_options(agent_snippet_tesseract PRIVATE -fno-access-control)
+set_target_properties(agent_snippet_tesseract PROPERTIES
+    PREFIX "" OUTPUT_NAME "agent_snippet_tesseract")
+stamp_with_host_build_id(agent_snippet_tesseract)
+
 if(BUILD_TESTING)
     # The admission rule reads a manifest and answers a question about it, so it
     # needs Qt's JSON and nothing else: no window, no display, no build artifact.
@@ -625,6 +638,13 @@ if(BUILD_TESTING)
     target_include_directories(kangaroo_physics_selftest PRIVATE snippets)
     target_compile_options(kangaroo_physics_selftest PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME kangaroo-physics COMMAND kangaroo_physics_selftest)
+
+    # The tesseract's rotations, projections and slices: every slice checked
+    # to be a closed convex solid with one face per cell it cuts.
+    add_executable(tesseract_selftest tests/tesseract_selftest.cpp)
+    target_include_directories(tesseract_selftest PRIVATE snippets)
+    target_compile_options(tesseract_selftest PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME tesseract-maths COMMAND tesseract_selftest)
 
     add_executable(coverage_admission_selftest
         tests/coverage_admission_selftest.cpp
