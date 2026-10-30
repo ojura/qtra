@@ -221,13 +221,14 @@ class PatchActivation(unittest.TestCase):
         Reporting once read the adapter's own record of the protocol binding,
         which the host ABI path never wrote, so a snippet could replace the step
         function and leave status saying the built-in one was running.
-        """
-        snippet = BUILD / "agent_snippet_audio_pulse.so"
-        if not snippet.exists():
-            self.skipTest("built without PulseAudio, so no snippet binds through the host")
 
-        module = self.agent.ok("snippet.load", path=str(snippet))["moduleId"]
-        self.agent.ok("snippet.run", moduleId=module, executor="render", request={})
+        The bind probe binds through the host and needs nothing else. The beat
+        visualizer, used here before, also needs an audio server to bind, so on
+        a machine with the PulseAudio headers but no server running, such as a
+        container, it never bound and this failed.
+        """
+        module = self.agent.ok("snippet.load", path=str(BINDER))["moduleId"]
+        self.agent.ok("snippet.run", moduleId=module, executor="gui", request={})
 
         # snippet.run returns an operation id and finishes later.
         for _ in range(100):
@@ -282,6 +283,77 @@ class ModalDialogOverTheSocket(unittest.TestCase):
         time.sleep(0.5)
         self.assertIsNone(self.agent.process.poll(), "the application exited when the dialog closed")
         self.assertIn("pid", self.agent.ok("hello"))
+
+
+@unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")
+class SoliloquyIntermission(unittest.TestCase):
+    """Captions over the cube, the menu entries they drive, and putting it all back."""
+
+    def setUp(self) -> None:
+        requireArtifacts()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.agent = Agent(Path(directory.name) / "agent.sock")
+        self.addCleanup(self.agent.close)
+        self.stage = self.agent.ok("snippet.load", path=str(BUILD / "agent_snippet_soliloquy_intermission.so"))[
+            "moduleId"]
+        self.title = self.agent.ok("object.get", objectName="mainWindow", property="windowTitle")
+
+    def cue(self, executor: str = "gui", **request: object) -> None:
+        self.agent.ok("snippet.run", moduleId=self.stage, executor=executor, request=request)
+
+    def get(self, name: str, prop: str) -> object:
+        return self.agent.ok("object.get", objectName=name, property=prop)
+
+    def eventually(self, check, what: str, seconds: float = 6.0) -> None:
+        # A widget that is not there yet is asked about again, not reported:
+        # the curtain's words, for one, appear only once it has closed.
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            try:
+                if check():
+                    return
+            except AssertionError:
+                pass
+            time.sleep(0.1)
+        self.fail(what)
+
+    def test_cards_switch_a_scene_snippet_on_for_their_act_and_off_after(self) -> None:
+        sphere = self.agent.ok("snippet.load", path=str(BUILD / "agent_snippet_orbit_sphere.so"))["moduleId"]
+        # Running it with restore creates its menu entry without drawing anything.
+        self.agent.ok("snippet.run", moduleId=sphere, executor="render", request={"restore": True})
+        self.eventually(lambda: self.get("actionOrbitSphere", "checked") is False, "the sphere has a menu entry")
+
+        self.cue(title="A test of the stage",
+                 cards=[{"text": "first", "ms": 1500, "effect": "actionOrbitSphere"},
+                        {"text": "second", "ms": 1500}])
+        self.eventually(lambda: self.get("soliloquyCaption", "text") == "first", "the first card shows")
+        self.assertEqual(self.get("mainWindow", "windowTitle"), "A test of the stage")
+        self.eventually(lambda: self.get("actionOrbitSphere", "checked") is True, "its act switches the sphere on")
+        self.eventually(lambda: self.get("soliloquyCaption", "text") == "second", "the second card shows")
+        self.eventually(lambda: self.get("actionOrbitSphere", "checked") is False, "the next card switches it off")
+        self.eventually(lambda: self.get("mainWindow", "windowTitle") == self.title,
+                        "the title comes back when the script ends")
+
+    def test_the_soliloquy_slows_the_cube_and_stop_puts_it_back(self) -> None:
+        speed = self.get("cubeView", "angularVelocity")
+        self.cue(play="soliloquy", guest="Tester", host="Host")
+        self.assertEqual(self.get("mainWindow", "windowTitle"), "An apology to Tester, in one act")
+        self.eventually(lambda: abs(self.get("cubeView", "angularVelocity") - 18.0) < 0.5, "the cube slows to 18")
+        self.cue(stop=True)
+        self.assertEqual(self.get("mainWindow", "windowTitle"), self.title)
+        self.eventually(lambda: abs(self.get("cubeView", "angularVelocity") - speed) < 0.5,
+                        "the speed eases back to where it was")
+
+    def test_the_curtain_closes_and_release_opens_it(self) -> None:
+        self.cue(guest="Tester", curtain="close")
+        self.eventually(lambda: self.get("curtainWords", "text") == "Thank you, Tester",
+                        "the curtain closes and thanks the guest")
+        self.agent.ok("snippet.release", moduleId=self.stage)
+        names = lambda: {entry.get("objectName") for entry in self.agent.ok("object.list")}
+        self.eventually(lambda: not ({"curtainLeft", "curtainRight", "curtainWords", "soliloquyCaption"} & names()),
+                        "releasing takes the curtain and the caption away")
+        self.assertEqual(self.get("mainWindow", "windowTitle"), self.title)
 
 
 @unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")

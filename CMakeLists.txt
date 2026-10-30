@@ -444,6 +444,18 @@ set_target_properties(agent_snippet_about_signature PROPERTIES
     PREFIX "" OUTPUT_NAME "agent_snippet_about_signature")
 stamp_with_host_build_id(agent_snippet_about_signature)
 
+# Captions over the cube: soliloquies, intermissions and an epilogue with a
+# curtain. Widgets only; it reads the cube's private frame count and clock for
+# the numbers it shows, hence -fno-access-control.
+add_library(agent_snippet_soliloquy_intermission MODULE snippets/soliloquy_intermission.cpp)
+target_include_directories(agent_snippet_soliloquy_intermission PRIVATE include src)
+target_link_libraries(agent_snippet_soliloquy_intermission PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL Qt6::OpenGLWidgets)
+target_compile_options(agent_snippet_soliloquy_intermission PRIVATE -fno-access-control)
+set_target_properties(agent_snippet_soliloquy_intermission PROPERTIES
+    PREFIX "" OUTPUT_NAME "agent_snippet_soliloquy_intermission")
+stamp_with_host_build_id(agent_snippet_soliloquy_intermission)
+
 add_library(agent_snippet_jack_in_the_box MODULE snippets/jack_in_the_box.cpp)
 target_include_directories(agent_snippet_jack_in_the_box PRIVATE include src)
 target_link_libraries(agent_snippet_jack_in_the_box PRIVATE

@@ -1003,6 +1003,50 @@ halfway from the middle to the four-corner cut the Archimedean one, every edge
 the same length; and that two thousand random cuts are each a closed, convex,
 outward-facing solid with one face per cell.
 
+### Soliloquies and intermissions
+
+`agent_snippet_soliloquy_intermission` performs in captions over the cube: cards
+of text that fade in and out across the bottom of the view, the window's title,
+the cube's speed eased up or down, and a red curtain that closes across the
+view. It carried a demo of this tooling for a guest: an intermission while the
+tesseract was being built, an apology after the crash fixed in `ebf88cf`, and an
+epilogue.
+
+```bash
+python3 tools/agentctl.py snippet \
+  build/release/agent_snippet_soliloquy_intermission.so --executor gui \
+  --request '{"play": "intermission", "guest": "Stribor"}'
+```
+
+| request | effect |
+| --- | --- |
+| `{"play": "soliloquy"}` | the apology for the About box crash, in verse; the cube slows to 18 deg/s while it is spoken |
+| `{"play": "intermission"}` | warm-ups about four dimensions and a quiz, looping until stopped |
+| `{"play": "epilogue"}` | a closing speech that brings the cube to rest and ends with the curtain closed |
+| `{"guest": "...", "host": "..."}` | the names the scripts address |
+| `{"cards": [{"text": "...", "ms": 6000, "effect": "actionMobiusRing"}], "loop": false}` | a script of your own; text is rich text, and `{frames}` and `{turns}` are filled in from the running cube |
+| `{"title": "..."}`, `{"restoreTitle": true}` | the window's title |
+| `{"ramp": {"to": 0, "seconds": 4, "easing": "out"}}` | eases the cube's speed; easing is `in`, `out` or `inout` |
+| `{"curtain": "close"}`, `{"curtain": "open"}` | the curtain, which thanks the guest once it has closed |
+| `{"stop": true}` | ends the current script and puts back the title and the speed |
+
+A card can name a menu entry in `effect`, and that entry is switched on while
+the card shows and off when a card without it comes up. The intermission uses
+the entries of the Möbius ring, pillow mode, the orbiting sphere and the jack
+in the box, through their own handlers, so it shows whichever of those snippets
+are loaded and skips the rest. Pillow mode and the jack replace the mesh, and
+each refuses while the other holds its claim; their records are kept under
+different keys, so they can take turns.
+
+An Intermission entry in the Cube menu (`Ctrl+Shift+I`, `actionIntermission`)
+starts and stops the intermission. Releasing the module ends whatever is
+playing, takes the caption and the curtain away, and puts the title and the
+speed back:
+
+```bash
+python3 tools/agentctl.py call snippet.release --params '{"moduleId":1}'
+```
+
 ### Project-aware on-demand compilation
 
 Compile only:
@@ -1591,6 +1635,9 @@ snippets/kangaroo_sim.h         the mob, the billabongs and the planet's answer 
                                 standard library only
 snippets/kangaroo_planet.cpp    draws the planet and the mob and binds the step function
 snippets/kangaroo_panel.h       the planet's control panel, docked beside the cube
+snippets/soliloquy_intermission.cpp
+                                captions over the cube: soliloquies, intermissions,
+                                an epilogue and a curtain
 snippets/projection_camera.h    a camera for the cube's widget, folded into its projection
 snippets/tesseract.cpp          the cube as a tesseract, in perspective, stereographically or sliced
 snippets/tesseract_math.h       the tesseract, its rotations, projections and exact slices;
