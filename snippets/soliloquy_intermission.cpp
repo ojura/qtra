@@ -61,6 +61,7 @@
 #include <QParallelAnimationGroup>
 #include <QPointer>
 #include <QPropertyAnimation>
+#include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVariantAnimation>
@@ -328,14 +329,50 @@ void fadeTo(const qreal to, const int ms)
     animation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
-void place()
+// The narrowest width at which the caption is no taller than at `widest`, so
+// its lines come out as even as the wrap allows.
+int balancedWidth(QLabel* label, const int widest)
+{
+    const int height = label->heightForWidth(widest);
+    int narrow = widest / 5;
+    int wide = widest;
+    while (wide - narrow > 2) {
+        const int middle = (narrow + wide) / 2;
+        if (label->heightForWidth(middle) <= height) {
+            wide = middle;
+        } else {
+            narrow = middle;
+        }
+    }
+    return wide;
+}
+
+// Shows the text in the caption and lays it out across the bottom of the view.
+//
+// A card marks its line breaks with <br>. Those are kept when every line they
+// make fits the width the caption may use. When one does not, the wrap would
+// break that line short and leave its last word or two alone on a line before
+// the forced break, so the breaks become spaces and the whole text is wrapped
+// at the width that evens its lines out.
+void place(const QString& text)
 {
     CubeWidget* cube = stage->cube;
     QLabel* label = stage->label;
     if (cube == nullptr || label == nullptr) {
         return;
     }
-    const int width = static_cast<int>(cube->width() * 0.86);
+    const int widest = static_cast<int>(cube->width() * 0.86);
+    label->ensurePolished();
+    label->setText(text);
+    // At a width nothing has to wrap in, each line the card marks is one line,
+    // so the same height at `widest` means every one of them fits.
+    constexpr int unlimited = 1 << 20;
+    if (label->heightForWidth(widest) > label->heightForWidth(unlimited)) {
+        static const QRegularExpression lineBreak(QStringLiteral("\\s*<br\\s*/?>\\s*"),
+                                                  QRegularExpression::CaseInsensitiveOption);
+        label->setText(QString(text).replace(lineBreak, QStringLiteral(" ")));
+    }
+    const int width = balancedWidth(label, widest);
     label->setFixedWidth(width);
     label->adjustSize();
     label->move((cube->width() - width) / 2, cube->height() - label->height() - cube->height() / 14);
@@ -387,8 +424,7 @@ void showCard()
     }
     const Card card = stage->script.cards.at(stage->index++);
     switchEffectTo(card.effect);
-    stage->label->setText(fillIn(card.text));
-    place();
+    place(fillIn(card.text));
     fadeTo(1.0, 600);
     stage->fadeOut->start(std::max(card.ms - 600, 300));
     stage->advance->start(card.ms);

@@ -443,6 +443,24 @@ class SoliloquyIntermission(unittest.TestCase):
         self.eventually(lambda: abs(self.get("cubeView", "angularVelocity") - speed) < 0.5,
                         "the speed eases back to where it was")
 
+    def test_marked_lines_that_fit_are_kept(self) -> None:
+        self.cue(cards=[{"text": "One short line<br>and another", "ms": 4000}])
+        self.eventually(lambda: self.get("soliloquyCaption", "text") == "One short line<br>and another",
+                        "the card shows with its break")
+        widest = self.get("cubeView", "width") * 0.86
+        self.assertLess(self.get("soliloquyCaption", "width"), widest * 0.6,
+                        "the caption is only as wide as its longer line")
+
+    def test_a_marked_line_too_long_to_fit_is_wrapped_evenly_instead(self) -> None:
+        # Wrapped at the caption's full width, the first line would break short
+        # and leave its last words alone on a line before the forced break.
+        first = " ".join(["overlong"] * 30)
+        self.cue(cards=[{"text": f"{first}<br>and the end", "ms": 4000}])
+        self.eventually(lambda: self.get("soliloquyCaption", "text") == f"{first} and the end",
+                        "the break becomes a space")
+        widest = self.get("cubeView", "width") * 0.86
+        self.assertLessEqual(self.get("soliloquyCaption", "width"), widest + 1)
+
     def test_a_script_of_cards_can_end_with_the_curtain(self) -> None:
         self.cue(guest="Tester", cards=[{"text": "the last word", "ms": 1500}], curtainAtEnd=True)
         self.eventually(lambda: self.get("soliloquyCaption", "text") == "the last word", "the card shows")
