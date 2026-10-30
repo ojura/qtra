@@ -443,6 +443,13 @@ class SoliloquyIntermission(unittest.TestCase):
         self.eventually(lambda: abs(self.get("cubeView", "angularVelocity") - speed) < 0.5,
                         "the speed eases back to where it was")
 
+    def test_a_script_of_cards_can_end_with_the_curtain(self) -> None:
+        self.cue(guest="Tester", cards=[{"text": "the last word", "ms": 1500}], curtainAtEnd=True)
+        self.eventually(lambda: self.get("soliloquyCaption", "text") == "the last word", "the card shows")
+        self.eventually(lambda: self.get("curtainWords", "text") == "Thank you, Tester",
+                        "the curtain closes after the last card", seconds=10)
+        self.eventually(lambda: self.get("cubeView", "angularVelocity") < 0.5, "the cube comes to rest")
+
     def test_the_curtain_closes_and_release_opens_it(self) -> None:
         self.cue(guest="Tester", curtain="close")
         self.eventually(lambda: self.get("curtainWords", "text") == "Thank you, Tester",

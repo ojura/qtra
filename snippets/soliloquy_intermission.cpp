@@ -25,9 +25,13 @@
 // Requests, any combination:
 //   {"play": "soliloquy"}                    one of the scripts above
 //   {"cards": [{"text": "...", "ms": 6000, "effect": "actionMobiusRing"}],
-//    "loop": false}                          a script of your own; effect is
+//    "loop": false, "curtainAtEnd": false}   a script of your own; effect is
 //                                            the objectName of a menu entry to
-//                                            switch on while the card shows
+//                                            switch on while the card shows;
+//                                            curtainAtEnd ends it as the
+//                                            epilogue ends, with the cube
+//                                            brought to rest and the curtain
+//                                            closed
 //   {"title": "..."}, {"restoreTitle": true}
 //   {"ramp": {"to": 0, "seconds": 4, "easing": "out"}}
 //                                            ease the cube's speed; easing is
@@ -702,6 +706,7 @@ void run(const RuntimeAgentHost* host)
         Script script;
         script.name = QStringLiteral("cards");
         script.loop = request.value(QStringLiteral("loop")).toBool();
+        script.curtainAtEnd = request.value(QStringLiteral("curtainAtEnd")).toBool();
         for (const QJsonValue& value : request.value(QStringLiteral("cards")).toArray()) {
             const QJsonObject c = value.toObject();
             script.cards.append(card(c.value(QStringLiteral("text")).toString(),

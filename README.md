@@ -1081,7 +1081,7 @@ python3 tools/agentctl.py snippet \
 | `{"play": "intermission"}` | warm-ups about four dimensions and a quiz, looping until stopped |
 | `{"play": "epilogue"}` | a closing speech that brings the cube to rest and ends with the curtain closed |
 | `{"guest": "...", "host": "..."}` | the names the scripts address |
-| `{"cards": [{"text": "...", "ms": 6000, "effect": "actionMobiusRing"}], "loop": false}` | a script of your own; text is rich text, and `{frames}` and `{turns}` are filled in from the running cube |
+| `{"cards": [{"text": "...", "ms": 6000, "effect": "actionMobiusRing"}], "loop": false, "curtainAtEnd": false}` | a script of your own; text is rich text, and `{frames}` and `{turns}` are filled in from the running cube; with `curtainAtEnd` it ends as the epilogue does, with the cube brought to rest and the curtain closed |
 | `{"title": "..."}`, `{"restoreTitle": true}` | the window's title |
 | `{"ramp": {"to": 0, "seconds": 4, "easing": "out"}}` | eases the cube's speed; easing is `in`, `out` or `inout` |
 | `{"curtain": "close"}`, `{"curtain": "open"}` | the curtain, which thanks the guest once it has closed |
