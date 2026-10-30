@@ -28,6 +28,10 @@
 //   {"smoothing": 0.18}        the time constant, in seconds, of the filter that
 //                              eases the target in; 0 passes it straight through
 //   {"defaultTuning": true}    back to the values below
+//   {"chart": true}            charts of the head over the cube: its motion and
+//                              target as they happen, the poles in the
+//                              s-plane, and each tuning's response from rest
+//                              side by side; false takes them away
 // A request that does not take the jack off also installs it. Every reply
 // carries the tuning and what it makes of the head as a second-order system:
 // natural frequency, damping ratio, poles and the overshoot of a unit step.
@@ -37,6 +41,7 @@
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
 #include "cube_mesh.h"
+#include "response_chart.h"
 #include "scene_toggle.h"
 
 #include <QJsonArray>
@@ -49,6 +54,7 @@
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
+#include <QPointer>
 #include <QQuaternion>
 #include <QSignalBlocker>
 #include <QVector3D>
@@ -231,6 +237,20 @@ struct Tuning {
     float smoothingSeconds = defaultSmoothingSeconds;
 };
 Tuning tuning;
+
+// Shown while a request asks for them; fed from the draw hook.
+QPointer<response_chart::Charts> charts;
+
+void removeCharts()
+{
+    if (charts != nullptr) {
+        charts->hide();
+        // Released modules stay mapped, so the deferred delete still finds
+        // this module's code.
+        charts->deleteLater();
+        charts = nullptr;
+    }
+}
 QAction* toggleAction = nullptr;
 int rememberedFace = 0;
 
@@ -474,6 +494,10 @@ void drawJackInTheBox(CubeWidget* cube)
         jack->extension = maxOvershoot;
         jack->extensionVelocity = std::min(jack->extensionVelocity, 0.0F);
     }
+    if (charts != nullptr) {
+        charts->sample(cube->m_elapsedSeconds, pop, jack->smoothedTarget, jack->extension,
+                       response_chart::Tuning{tuning.stiffness, tuning.damping, tuning.smoothingSeconds});
+    }
 
     // The coil twists as it travels and holds still once it stops travelling.
     // Driving the phase from elapsed time instead would keep it turning on the
@@ -560,6 +584,10 @@ void drawJackInTheBox(CubeWidget* cube)
         jack->peak = std::max(jack->peak, jack->extension);
         if (jack->extensionVelocity <= 0.0F) {
             jack->measuringPeak = false;
+            const double overshoot = std::round((static_cast<double>(jack->peak) - 1.0) * 1000.0) / 10.0;
+            if (charts != nullptr) {
+                charts->peak(cube->m_elapsedSeconds, jack->peak, overshoot);
+            }
             if (jack->emitEvent != nullptr) {
                 const double zeta = static_cast<double>(tuning.damping)
                     / (2.0 * std::sqrt(static_cast<double>(tuning.stiffness)));
@@ -568,8 +596,7 @@ void drawJackInTheBox(CubeWidget* cube)
                      QString::fromLatin1(cubeFaces[static_cast<std::size_t>(jack->openFace)].name)},
                     {QStringLiteral("pass"), static_cast<int>(jack->passCount)},
                     {QStringLiteral("peak"), std::round(static_cast<double>(jack->peak) * 1000.0) / 1000.0},
-                    {QStringLiteral("overshootPercent"),
-                     std::round((static_cast<double>(jack->peak) - 1.0) * 1000.0) / 10.0},
+                    {QStringLiteral("overshootPercent"), overshoot},
                     {QStringLiteral("zeta"), std::round(zeta * 1000.0) / 1000.0},
                 };
                 jack->emitEvent(jack->agentContext, "jack.peaked",
@@ -932,6 +959,7 @@ void removeJack(CubeWidget* cube, const RuntimeAgentHost* host, QString& note)
     jack->sphereIndexBuffer.destroy();
     delete jack;
     jack = nullptr;
+    removeCharts();
     cube->update();
 }
 
@@ -1092,6 +1120,7 @@ void run(const RuntimeAgentHost* host)
     const auto complete = [host](QJsonObject result) {
         result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
         result.insert(QStringLiteral("tuning"), describeTuning());
+        result.insert(QStringLiteral("chart"), charts != nullptr);
         if (jack != nullptr) {
             result.insert(QStringLiteral("passes"), static_cast<int>(jack->passCount));
         }
@@ -1140,7 +1169,20 @@ void run(const RuntimeAgentHost* host)
     }
     rememberedFace = requestedFace;
 
+    // The charts belong to an installed jack, so this runs once it is in.
+    const auto applyChart = [&request, cube] {
+        if (!request.contains(QStringLiteral("chart"))) {
+            return;
+        }
+        if (!request.value(QStringLiteral("chart")).toBool()) {
+            removeCharts();
+        } else if (charts == nullptr) {
+            charts = new response_chart::Charts(cube);
+        }
+    };
+
     if (jack != nullptr) {
+        applyChart();
         complete(QJsonObject{
             {QStringLiteral("installed"), true},
             {QStringLiteral("side"),
@@ -1155,6 +1197,7 @@ void run(const RuntimeAgentHost* host)
         host->fail(host->invocation_context, error.toLocal8Bit().constData());
         return;
     }
+    applyChart();
 
     complete(QJsonObject{
         {QStringLiteral("installed"), true},

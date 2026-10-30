@@ -345,6 +345,27 @@ class JackTuning(unittest.TestCase):
         self.assertEqual(self.tune()["stiffness"], 200.0, "a refused request leaves the tuning as it was")
         self.assertEqual(self.tune(defaultTuning=True), default)
 
+    def test_the_charts_come_and_go_with_the_request_and_the_jack(self) -> None:
+        def charted() -> bool:
+            return "jackResponseCharts" in {entry.get("objectName") for entry in self.agent.ok("object.list")}
+
+        def eventually(check, what: str) -> None:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not check():
+                time.sleep(0.1)
+            self.assertTrue(check(), what)
+
+        shown = self.run_jack(chart=True)["result"]
+        self.assertTrue(shown["chart"])
+        self.assertTrue(charted(), "the charts are over the cube")
+        self.assertFalse(self.run_jack(chart=False)["result"]["chart"])
+        eventually(lambda: not charted(), "chart false takes them away")
+
+        self.run_jack(chart=True)
+        self.assertTrue(charted())
+        self.run_jack(restore=True)
+        eventually(lambda: not charted(), "taking the jack off takes its charts with it")
+
     def test_the_measured_first_swing_follows_the_damping(self) -> None:
         # Faster, so pops come every 2.4 seconds. A faster sweep is still a
         # monotone rise of the target, and the response of this linear system

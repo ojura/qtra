@@ -460,7 +460,7 @@ python3 tools/agentctl.py snippet \
 | `agent_snippet_catmull_clark` | replaces the cube with its Catmull-Clark subdivision surface, keeping the six face colors | `level` 0 to 5, default 2 |
 | `agent_snippet_pillow_cube` | turns each side into a stuffed pillow panel with sewn edges and stitching | `puff`, `roundness`, `tuck`, `resolution`, `seam`, `stitches`, `fabric` |
 | `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
-| `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front`; the spring's `zeta`, `stiffness`, `damping`, `smoothing`, `defaultTuning`; see [Tuning the jack's spring](#tuning-the-jacks-spring) |
+| `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front`; the spring's `zeta`, `stiffness`, `damping`, `smoothing`, `defaultTuning`, and `chart`; see [Tuning the jack's spring](#tuning-the-jacks-spring) |
 | `agent_snippet_audio_pulse` | drives the cube and a rig around it from the system audio mix | `device`, `sensitivity`, `dynamicRangeDb`, `events` |
 | `agent_snippet_kangaroo_planet` | turns the cube into a planet with a mob of kangaroos on it, under the cube's real gravity | `mob`, `gravity`, `water`, `seed`, `inertia`, `spinShare`, `contours`, `events`, `hopEvents`; see [A planet with kangaroos on it](#a-planet-with-kangaroos-on-it) |
 | `agent_snippet_tesseract` | turns the cube into a tesseract turning through the fourth dimension, in perspective, stereographically or sliced | `view`, `direction`, `sweep`, `position`, `rates`, `faces`, `corners`, `events`; see [A tesseract](#a-tesseract) |
@@ -654,6 +654,7 @@ the next frame:
 | `{"stiffness": 62}`, `{"damping": 2.2}` | `k` and `c` directly |
 | `{"smoothing": 0.18}` | the filter's time constant in seconds; 0 passes the target straight through |
 | `{"defaultTuning": true}` | back to the defaults |
+| `{"chart": true}` | charts over the cube: the head and its target as they move, the poles in the s-plane, and the response from rest on each pass, one curve per tuning with its measured first swing, so tunings tried one after another end up side by side; `false` takes them away, and so does taking the jack off |
 
 Every reply carries `tuning`: the values, `zeta`, `naturalHz`, the `poles` and
 `stepOvershootPercent`, the overshoot of a unit step. After each pass of the
@@ -1700,6 +1701,7 @@ snippets/tesseract.cpp          the cube as a tesseract, in perspective, stereog
 snippets/tesseract_math.h       the tesseract, its rotations, projections and exact slices;
                                 standard library only
 snippets/tesseract_panel.h      the tesseract's control panel
+snippets/response_chart.h       the jack's head charted as a second-order system, over the cube
 snippets/audio_analysis.h       capture, FFT and onset detection; depends on PulseAudio
                                 and the standard library only, so unlike cube_mesh.h and
                                 scene_toggle.h beside it, it knows nothing of Qt, the
