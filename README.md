@@ -460,7 +460,7 @@ python3 tools/agentctl.py snippet \
 | `agent_snippet_catmull_clark` | replaces the cube with its Catmull-Clark subdivision surface, keeping the six face colors | `level` 0 to 5, default 2 |
 | `agent_snippet_pillow_cube` | turns each side into a stuffed pillow panel with sewn edges and stitching | `puff`, `roundness`, `tuck`, `resolution`, `seam`, `stitches`, `fabric` |
 | `agent_snippet_mobius_ring` | rotating Mobius strip, translucent surface and opaque rim | `radius`, `width`, `tilt`, `spin`, `alpha`, `edgeInset` |
-| `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front` |
+| `agent_snippet_jack_in_the_box` | hollows one face and puts a sprung jack inside it | `side`, one of `front`, `back`, `left`, `right`, `top`, `bottom`, default `front`; the spring's `zeta`, `stiffness`, `damping`, `smoothing`, `defaultTuning`; see [Tuning the jack's spring](#tuning-the-jacks-spring) |
 | `agent_snippet_audio_pulse` | drives the cube and a rig around it from the system audio mix | `device`, `sensitivity`, `dynamicRangeDb`, `events` |
 | `agent_snippet_kangaroo_planet` | turns the cube into a planet with a mob of kangaroos on it, under the cube's real gravity | `mob`, `gravity`, `water`, `seed`, `inertia`, `spinShare`, `contours`, `events`, `hopEvents`; see [A planet with kangaroos on it](#a-planet-with-kangaroos-on-it) |
 | `agent_snippet_tesseract` | turns the cube into a tesseract turning through the fourth dimension, in perspective, stereographically or sliced | `view`, `direction`, `sweep`, `position`, `rates`, `faces`, `corners`, `events`; see [A tesseract](#a-tesseract) |
@@ -626,6 +626,63 @@ load, but `dlopen()` returns the same handle, so both ids address one copy of
 the module's static state and the second run reports that the modification is
 already installed instead of installing another one. Either id works as
 `moduleId`.
+
+### Tuning the jack's spring
+
+The jack's head is a mass on a spring, pulled toward a target that rises from 0
+to 1 as the open side turns toward the camera and falls back as it turns away:
+
+```text
+x'' = k (r - x) - c x'
+```
+
+`k` and `c` are per unit mass. The defaults, `k = 62` and `c = 2.2`, put the
+poles at -1.10 ± 7.80j: a natural frequency of 1.25 Hz and a damping ratio of
+0.14, about a seventh of critical. A unit step would overshoot by 64%, and each
+swing keeps 41% of the one before. One ratio sets both the overshoot and how
+long the ringing lasts, so damping cannot trade one for the other. The target
+passes through a first-order filter with a time constant of 0.18 s on its way
+in instead, which adds a pole at -5.6 on the input side without moving the
+oscillator's poles: it shrinks the first swing and leaves the decay alone.
+
+Requests change the tuning while the jack runs, and the change applies from
+the next frame:
+
+| request | effect |
+| --- | --- |
+| `{"zeta": 1}` | damping ratio; sets `c = 2 zeta sqrt(k)` |
+| `{"stiffness": 62}`, `{"damping": 2.2}` | `k` and `c` directly |
+| `{"smoothing": 0.18}` | the filter's time constant in seconds; 0 passes the target straight through |
+| `{"defaultTuning": true}` | back to the defaults |
+
+Every reply carries `tuning`: the values, `zeta`, `naturalHz`, the `poles` and
+`stepOvershootPercent`, the overshoot of a unit step. After each pass of the
+open side past the camera, a `jack.peaked` event reports how far the first
+swing went, as `peak` and as `overshootPercent` past fully out, and a pass that
+reaches fully out also emits one `jack.popped`. Measured on the cube at its
+default 75 deg/s:
+
+| tuning | unit step overshoot | first swing measured |
+| --- | --- | --- |
+| defaults, zeta 0.14 | 64.2% | 21.8% |
+| zeta 1 | 0% | -0.4% |
+| zeta 0.05 | 85.4% | 32.7% |
+| zeta 0.03 | 91.0% | 35.6% |
+| defaults, filter off | 64.2% | 49.1% |
+
+The measured swings sit below the unit-step figures because the side's own
+sweep is a gradual rise of the target. For this linear system a rise that never
+goes back down is a step blurred by a kernel that is never negative, and the
+response to it peaks no higher than the response to the step. Below the
+default damping the first swing hardly grows, but the ringing lasts much
+longer: the decay's time constant `1 / (zeta * omega_n)` is 0.9 s at the
+defaults and 4.2 s at zeta 0.03.
+
+The integrator is semi-implicit Euler, with steps capped at 50 ms. With step
+`h` it is stable while `k h^2 + 2 c h < 4` and `c h < 2`; requests are held to
+`k` between 1 and 200 and `c` up to 30, which keeps that true at the longest
+step. The end stop at 1.75 sits above any swing the default tuning produces,
+and catches a step violent enough to throw the head out of the scene.
 
 ### Changing the application's own dialogs
 

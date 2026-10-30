@@ -14,16 +14,32 @@
 // The head stays inside until the open side turns toward the camera. The dot
 // product of the open face's normal with the direction to the camera drives the
 // spring's extension, so it pops out as the side comes around and retracts as
-// it leaves. Each full pop emits a jack.popped event.
+// it leaves. Each pass that brings the head fully out emits one jack.popped
+// event.
 //
 // {"side": "front|back|left|right|top|bottom"} chooses the face, default front.
 // {"restore": true} puts the sixth face back.
+//
+// The head is a mass on a spring, and these retune it while it runs:
+//   {"zeta": 0.14}             the damping ratio; sets the damping from the
+//                              stiffness
+//   {"stiffness": 62}, {"damping": 2.2}
+//                              the spring and the damper, per unit mass
+//   {"smoothing": 0.18}        the time constant, in seconds, of the filter that
+//                              eases the target in; 0 passes it straight through
+//   {"defaultTuning": true}    back to the values below
+// A request that does not take the jack off also installs it. Every reply
+// carries the tuning and what it makes of the head as a second-order system:
+// natural frequency, damping ratio, poles and the overshoot of a unit step.
+// After each pass of the open side a jack.peaked event reports how far the
+// first swing went, as a peak and as overshoot past fully out.
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
 #include "cube_mesh.h"
 #include "scene_toggle.h"
 
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMatrix4x4>
@@ -61,16 +77,16 @@ constexpr float springTwistTurns = 0.85F;
 
 // The extension does not follow the open side directly. It is a mass on a
 // spring pulled toward that target, which is what makes the head overshoot and
-// rebound instead of arriving and stopping. Stiffness sets the bounce rate near
-// 1.25 Hz; damping is about a seventh of critical, so each swing keeps roughly
-// 40% of the last one and the head is still bouncing for about as long as the
-// open side stays pointed at the camera.
+// rebound instead of arriving and stopping. The default stiffness sets the
+// bounce rate near 1.25 Hz; the default damping is about a seventh of critical,
+// so each swing keeps roughly 40% of the last one and the head is still
+// bouncing for about as long as the open side stays pointed at the camera.
 //
 // The overshoot limit only exists to stop a step change in the target throwing
 // the head clear of the scene. Clamping kills the swing, so it sits above any
-// overshoot this damping actually produces.
-constexpr float springStiffness = 62.0F;
-constexpr float springDamping = 2.2F;
+// overshoot the default damping produces.
+constexpr float defaultStiffness = 62.0F;
+constexpr float defaultDamping = 2.2F;
 constexpr float maxOvershoot = 1.75F;
 constexpr float maxFrameSeconds = 0.05F;
 
@@ -78,7 +94,16 @@ constexpr float maxFrameSeconds = 0.05F;
 // duration are both set by the damping ratio, so trading one against the other
 // there is not possible; easing the target in instead reduces the size of the
 // first swing and leaves the decay alone.
-constexpr float targetSmoothingSeconds = 0.18F;
+constexpr float defaultSmoothingSeconds = 0.18F;
+
+// The integrator is semi-implicit Euler with a step of at most maxFrameSeconds.
+// With stiffness k, damping c and step h it is stable while k*h^2 + 2*c*h < 4
+// and c*h < 2. A requested tuning is held inside these limits, which keep that
+// true at the longest step: 200 * 0.05^2 + 2 * 30 * 0.05 = 3.5.
+constexpr float minStiffness = 1.0F;
+constexpr float maxStiffness = 200.0F;
+constexpr float maxDamping = 30.0F;
+constexpr float maxSmoothingSeconds = 2.0F;
 
 constexpr float headRadius = 0.30F;
 constexpr float eyeRadius = 0.075F;
@@ -173,7 +198,13 @@ struct JackState {
     // lifetime of the process. The draw hook outlives the invocation.
     void* agentContext = nullptr;
     void (*emitEvent)(void*, const char*, const char*) = nullptr;
-    bool wasFullyOut = false;
+    // Each pass of the open side past the camera is one swing out of the box.
+    // A pass starts when the head rises past halfway after being back in the
+    // box. Ringing carries it up and down several times while it settles, and
+    // all of that belongs to the same pass and counts as at most one pop.
+    bool backInTheBox = true;
+    bool poppedThisPass = false;
+    unsigned int passCount = 0;
     unsigned int popCount = 0;
 
     // Where the head actually is, as opposed to where the open side says it
@@ -182,10 +213,24 @@ struct JackState {
     float extensionVelocity = 0.0F;
     float smoothedTarget = 0.0F;
     float lastElapsedSeconds = 0.0F;
+
+    // The first swing of the current pass: the highest the head gets before it
+    // first turns back.
+    bool measuringPeak = false;
+    float peak = 0.0F;
 };
 
 JackState* jack = nullptr;
 QMetaObject::Connection drawConnection;
+
+// Per unit mass. Kept outside JackState so a retuning made while the jack is
+// off applies when it goes back on.
+struct Tuning {
+    float stiffness = defaultStiffness;
+    float damping = defaultDamping;
+    float smoothingSeconds = defaultSmoothingSeconds;
+};
+Tuning tuning;
 QAction* toggleAction = nullptr;
 int rememberedFace = 0;
 
@@ -411,10 +456,14 @@ void drawJackInTheBox(CubeWidget* cube)
     const float frameSeconds =
         std::clamp(cube->m_elapsedSeconds - jack->lastElapsedSeconds, 0.0F, maxFrameSeconds);
     jack->lastElapsedSeconds = cube->m_elapsedSeconds;
-    jack->smoothedTarget +=
-        (pop - jack->smoothedTarget) * (1.0F - std::exp(-frameSeconds / targetSmoothingSeconds));
-    const float acceleration = (jack->smoothedTarget - jack->extension) * springStiffness
-        - jack->extensionVelocity * springDamping;
+    if (tuning.smoothingSeconds > 0.0F) {
+        jack->smoothedTarget +=
+            (pop - jack->smoothedTarget) * (1.0F - std::exp(-frameSeconds / tuning.smoothingSeconds));
+    } else {
+        jack->smoothedTarget = pop;
+    }
+    const float acceleration = (jack->smoothedTarget - jack->extension) * tuning.stiffness
+        - jack->extensionVelocity * tuning.damping;
     jack->extensionVelocity += acceleration * frameSeconds;
     jack->extension += jack->extensionVelocity * frameSeconds;
     // Hitting the bottom of the box ends the motion instead of reflecting it.
@@ -479,23 +528,129 @@ void drawJackInTheBox(CubeWidget* cube)
 
     jack->program.release();
 
-    // Report only the transition, so this stays a rare event and not a
-    // per-frame stream.
-    // Reported off the head's own position, so the event marks it arriving
-    // and not the side merely coming around.
-    const bool fullyOut = jack->extension > 0.97F;
-    if (fullyOut && !jack->wasFullyOut && jack->emitEvent != nullptr) {
-        ++jack->popCount;
-        const QJsonObject data{
-            {QStringLiteral("side"),
-             QString::fromLatin1(cubeFaces[static_cast<std::size_t>(jack->openFace)].name)},
-            {QStringLiteral("frameIndex"), static_cast<qint64>(cube->m_frameIndex)},
-            {QStringLiteral("pops"), static_cast<int>(jack->popCount)},
-        };
-        jack->emitEvent(jack->agentContext, "jack.popped",
-                        QJsonDocument(data).toJson(QJsonDocument::Compact).constData());
+    if (jack->extension < 0.05F) {
+        jack->backInTheBox = true;
     }
-    jack->wasFullyOut = fullyOut;
+    if (jack->extension > 0.5F && jack->backInTheBox) {
+        jack->backInTheBox = false;
+        jack->poppedThisPass = false;
+        ++jack->passCount;
+        jack->measuringPeak = true;
+        jack->peak = jack->extension;
+    }
+    // Report only the arrival, so this stays a rare event and not a per-frame
+    // stream. Reported off the head's own position, so the event marks it
+    // arriving and not the side merely coming around. A heavily damped head
+    // on a fast cube can turn back short of fully out, and that pass has no pop.
+    if (jack->extension > 0.97F && !jack->backInTheBox && !jack->poppedThisPass) {
+        jack->poppedThisPass = true;
+        ++jack->popCount;
+        if (jack->emitEvent != nullptr) {
+            const QJsonObject data{
+                {QStringLiteral("side"),
+                 QString::fromLatin1(cubeFaces[static_cast<std::size_t>(jack->openFace)].name)},
+                {QStringLiteral("frameIndex"), static_cast<qint64>(cube->m_frameIndex)},
+                {QStringLiteral("pops"), static_cast<int>(jack->popCount)},
+            };
+            jack->emitEvent(jack->agentContext, "jack.popped",
+                            QJsonDocument(data).toJson(QJsonDocument::Compact).constData());
+        }
+    }
+    if (jack->measuringPeak) {
+        jack->peak = std::max(jack->peak, jack->extension);
+        if (jack->extensionVelocity <= 0.0F) {
+            jack->measuringPeak = false;
+            if (jack->emitEvent != nullptr) {
+                const double zeta = static_cast<double>(tuning.damping)
+                    / (2.0 * std::sqrt(static_cast<double>(tuning.stiffness)));
+                const QJsonObject data{
+                    {QStringLiteral("side"),
+                     QString::fromLatin1(cubeFaces[static_cast<std::size_t>(jack->openFace)].name)},
+                    {QStringLiteral("pass"), static_cast<int>(jack->passCount)},
+                    {QStringLiteral("peak"), std::round(static_cast<double>(jack->peak) * 1000.0) / 1000.0},
+                    {QStringLiteral("overshootPercent"),
+                     std::round((static_cast<double>(jack->peak) - 1.0) * 1000.0) / 10.0},
+                    {QStringLiteral("zeta"), std::round(zeta * 1000.0) / 1000.0},
+                };
+                jack->emitEvent(jack->agentContext, "jack.peaked",
+                                QJsonDocument(data).toJson(QJsonDocument::Compact).constData());
+            }
+        }
+    }
+}
+
+double rounded(const double value, const double scale = 1000.0)
+{
+    return std::round(value * scale) / scale;
+}
+
+// The tuning, and what it makes of the head as a second-order system with the
+// target as its input: x'' = k (r - x) - c x'.
+QJsonObject describeTuning()
+{
+    const double k = tuning.stiffness;
+    const double c = tuning.damping;
+    const double naturalRate = std::sqrt(k);
+    double zeta = c / (2.0 * naturalRate);
+    // The damping is a float, so a ratio of 1 asked for comes back a hair
+    // either side of it, which would split the double pole.
+    if (std::abs(zeta - 1.0) < 1e-5) {
+        zeta = 1.0;
+    }
+    QJsonArray poles;
+    double overshoot = 0.0;
+    if (zeta < 1.0) {
+        const double damped = naturalRate * std::sqrt(1.0 - zeta * zeta);
+        poles.append(QJsonArray{rounded(-zeta * naturalRate), rounded(damped)});
+        poles.append(QJsonArray{rounded(-zeta * naturalRate), rounded(-damped)});
+        overshoot = 100.0 * std::exp(-zeta * pi / std::sqrt(1.0 - zeta * zeta));
+    } else {
+        const double spread = naturalRate * std::sqrt(zeta * zeta - 1.0);
+        poles.append(QJsonArray{rounded(-zeta * naturalRate + spread), 0.0});
+        poles.append(QJsonArray{rounded(-zeta * naturalRate - spread), 0.0});
+    }
+    return QJsonObject{
+        {QStringLiteral("stiffness"), rounded(k)},
+        {QStringLiteral("damping"), rounded(c)},
+        {QStringLiteral("smoothingSeconds"), rounded(tuning.smoothingSeconds)},
+        {QStringLiteral("zeta"), rounded(zeta)},
+        {QStringLiteral("naturalHz"), rounded(naturalRate / (2.0 * pi))},
+        {QStringLiteral("poles"), poles},
+        {QStringLiteral("stepOvershootPercent"), rounded(overshoot, 10.0)},
+    };
+}
+
+// Applies the tuning fields of a request. False, with a reason, when one of
+// them is not a number; nothing is changed then.
+bool retune(const QJsonObject& request, QString& error)
+{
+    Tuning next = request.value(QStringLiteral("defaultTuning")).toBool() ? Tuning{} : tuning;
+    for (const char* name : {"stiffness", "damping", "zeta", "smoothing"}) {
+        const QJsonValue value = request.value(QLatin1String(name));
+        if (!value.isUndefined() && !value.isDouble()) {
+            error = QStringLiteral("%1 must be a number").arg(QLatin1String(name));
+            return false;
+        }
+    }
+    if (request.contains(QStringLiteral("stiffness"))) {
+        next.stiffness = std::clamp(static_cast<float>(request.value(QStringLiteral("stiffness")).toDouble()),
+                                    minStiffness, maxStiffness);
+    }
+    if (request.contains(QStringLiteral("damping"))) {
+        next.damping = std::clamp(static_cast<float>(request.value(QStringLiteral("damping")).toDouble()),
+                                  0.0F, maxDamping);
+    }
+    if (request.contains(QStringLiteral("zeta"))) {
+        const double zeta = std::max(request.value(QStringLiteral("zeta")).toDouble(), 0.0);
+        next.damping = std::clamp(static_cast<float>(2.0 * zeta * std::sqrt(static_cast<double>(next.stiffness))),
+                                  0.0F, maxDamping);
+    }
+    if (request.contains(QStringLiteral("smoothing"))) {
+        next.smoothingSeconds = std::clamp(
+            static_cast<float>(request.value(QStringLiteral("smoothing")).toDouble()), 0.0F, maxSmoothingSeconds);
+    }
+    tuning = next;
+    return true;
 }
 
 // Needs the widget's OpenGL context to be current.
@@ -928,8 +1083,18 @@ void run(const RuntimeAgentHost* host)
         QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
     ensureToggleAction(cube, host);
 
+    QString tuningError;
+    if (!retune(request, tuningError)) {
+        host->fail(host->invocation_context, tuningError.toLocal8Bit().constData());
+        return;
+    }
+
     const auto complete = [host](QJsonObject result) {
         result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
+        result.insert(QStringLiteral("tuning"), describeTuning());
+        if (jack != nullptr) {
+            result.insert(QStringLiteral("passes"), static_cast<int>(jack->passCount));
+        }
         host->complete_json(host->invocation_context,
                             QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
     };

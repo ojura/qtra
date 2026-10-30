@@ -286,6 +286,104 @@ class ModalDialogOverTheSocket(unittest.TestCase):
 
 
 @unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")
+class JackTuning(unittest.TestCase):
+    """Retuning the jack's spring while it runs, and the overshoot it then measures."""
+
+    def setUp(self) -> None:
+        requireArtifacts()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.agent = Agent(Path(directory.name) / "agent.sock")
+        self.addCleanup(self.agent.close)
+        self.jack = self.agent.ok("snippet.load", path=str(BUILD / "agent_snippet_jack_in_the_box.so"))["moduleId"]
+
+    def run_jack(self, **request: object) -> dict:
+        started = self.agent.ok("snippet.run", moduleId=self.jack, executor="render", request=request)
+        return self.agent.connection.wait_for_operation(started["operationId"], timeout=20)["data"]
+
+    def tune(self, **request: object) -> dict:
+        finished = self.run_jack(**request)
+        self.assertEqual(finished["outcome"], "completed", finished)
+        self.passes = finished["result"].get("passes", 0)
+        return finished["result"]["tuning"]
+
+    def next_peak(self) -> dict:
+        """The first swing of the first pass that started after the last tune()."""
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            for event in self.agent.ok("event.history", afterSequence="0", prefixes=["jack.peaked"]):
+                if event["data"]["pass"] > self.passes:
+                    return event["data"]
+            time.sleep(0.2)
+        self.fail(f"the jack did not report a swing after pass {self.passes} within 20 seconds")
+
+    def pops_reported(self) -> list[int]:
+        return [event["data"]["pops"]
+                for event in self.agent.ok("event.history", afterSequence="0", prefixes=["jack.popped"])]
+
+    def test_the_reply_describes_the_tuning_as_a_second_order_system(self) -> None:
+        default = self.tune()
+        self.assertEqual(default["stiffness"], 62.0)
+        self.assertEqual(default["damping"], 2.2)
+        self.assertAlmostEqual(default["zeta"], 0.14, places=2)
+        self.assertAlmostEqual(default["naturalHz"], 1.253, places=3)
+        self.assertEqual(default["poles"], [[-1.1, 7.797], [-1.1, -7.797]])
+        self.assertAlmostEqual(default["stepOvershootPercent"], 64.2, places=1)
+
+        critical = self.tune(zeta=1.0)
+        self.assertEqual(critical["zeta"], 1.0)
+        self.assertEqual(critical["stepOvershootPercent"], 0.0)
+        self.assertEqual(critical["poles"], [[-7.874, 0.0], [-7.874, 0.0]])
+
+        # Held inside the limits that keep the integrator stable at its
+        # longest step.
+        limited = self.tune(stiffness=1000, damping=99, smoothing=9)
+        self.assertEqual((limited["stiffness"], limited["damping"], limited["smoothingSeconds"]), (200.0, 30.0, 2.0))
+
+        refused = self.run_jack(zeta="lots")
+        self.assertEqual(refused["outcome"], "failed")
+        self.assertEqual(self.tune()["stiffness"], 200.0, "a refused request leaves the tuning as it was")
+        self.assertEqual(self.tune(defaultTuning=True), default)
+
+    def test_the_measured_first_swing_follows_the_damping(self) -> None:
+        # Faster, so pops come every 2.4 seconds. A faster sweep is still a
+        # monotone rise of the target, and the response of this linear system
+        # to any monotone rise peaks no higher than its response to a step, so
+        # the bounds below hold at any speed.
+        self.agent.ok("object.set", objectName="cubeView", property="angularVelocity", value=150)
+        started = time.monotonic()
+        self.tune(side="front")
+        # The side can already be turning away when the jack goes in, which
+        # cuts the first pass short. Every pass that starts later is whole,
+        # because a pass starts as the side comes into view.
+        self.next_peak()
+        self.tune()
+        default = self.next_peak()
+        # A step through the 0.18 s filter peaks at 1.30; see the README.
+        self.assertGreater(default["overshootPercent"], 1.0)
+        self.assertLess(default["overshootPercent"], 31.0)
+
+        self.tune(zeta=1.0)
+        critical = self.next_peak()
+        # On a cube this fast the side turns away before a critically damped
+        # head is fully out, so this pass may also have no pop.
+        self.assertLess(critical["overshootPercent"], 0.5, "critical damping does not overshoot")
+
+        self.tune(zeta=0.05)
+        light = self.next_peak()
+        self.assertGreater(light["overshootPercent"], default["overshootPercent"])
+        self.assertAlmostEqual(light["zeta"], 0.05, places=3)
+
+        # Ringing carries the head back below fully out and up again several
+        # times at this damping; each pass is still at most one pop.
+        pops = self.pops_reported()
+        self.assertEqual(pops, list(range(1, len(pops) + 1)))
+        turns = (time.monotonic() - started) * 150.0 / 360.0
+        self.assertGreater(len(pops), 0)
+        self.assertLessEqual(len(pops), int(turns) + 1, f"{len(pops)} pops in {turns:.1f} turns")
+
+
+@unittest.skipUnless(CAN_DRAW, "no display can be had on this machine")
 class SoliloquyIntermission(unittest.TestCase):
     """Captions over the cube, the menu entries they drive, and putting it all back."""
 
