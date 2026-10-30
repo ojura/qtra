@@ -363,6 +363,10 @@ void place(const QString& text)
     }
     const int widest = static_cast<int>(cube->width() * 0.86);
     label->ensurePolished();
+    // heightForWidth() measures no narrower than the label's minimum width,
+    // and the last card's fixed width is still set as that minimum.
+    label->setMinimumWidth(0);
+    label->setMaximumWidth(QWIDGETSIZE_MAX);
     label->setText(text);
     // At a width nothing has to wrap in, each line the card marks is one line,
     // so the same height at `widest` means every one of them fits.

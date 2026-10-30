@@ -482,6 +482,16 @@ class SoliloquyIntermission(unittest.TestCase):
         widest = self.get("cubeView", "width") * 0.86
         self.assertLessEqual(self.get("soliloquyCaption", "width"), widest + 1)
 
+    def test_a_long_card_after_another_is_not_squeezed(self) -> None:
+        # The first card leaves its width set on the caption, which the
+        # second must not take as the narrowest it can measure.
+        first = " ".join(["overlong"] * 30)
+        second = " ".join(["different"] * 28)
+        self.cue(cards=[{"text": first, "ms": 1500}, {"text": second, "ms": 4000}])
+        self.eventually(lambda: self.get("soliloquyCaption", "text") == second, "the second card shows")
+        widest = self.get("cubeView", "width") * 0.86
+        self.assertGreater(self.get("soliloquyCaption", "width"), widest * 0.6)
+
     def test_a_script_of_cards_can_end_with_the_curtain(self) -> None:
         self.cue(guest="Tester", cards=[{"text": "the last word", "ms": 1500}], curtainAtEnd=True)
         self.eventually(lambda: self.get("soliloquyCaption", "text") == "the last word", "the card shows")
