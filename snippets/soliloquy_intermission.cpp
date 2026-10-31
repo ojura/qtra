@@ -393,8 +393,12 @@ QString fillIn(QString text)
     const qulonglong frames = cube->m_frameIndex;
     const double seconds = static_cast<double>(cube->m_elapsedSeconds);
     const auto turns = static_cast<qlonglong>(seconds * static_cast<double>(cube->angularVelocity()) / 360.0);
-    return text.replace(QStringLiteral("{frames}"), QLocale().toString(frames))
-        .replace(QStringLiteral("{turns}"), QLocale().toString(turns));
+    // The cards are in English, so their numbers are too: under a locale such
+    // as hr_HR the default would group thousands with dots, and "24.007"
+    // reads as a decimal in an English sentence.
+    const QLocale english(QLocale::English, QLocale::UnitedStates);
+    return text.replace(QStringLiteral("{frames}"), english.toString(frames))
+        .replace(QStringLiteral("{turns}"), english.toString(turns));
 }
 
 void closeCurtain();
@@ -459,10 +463,14 @@ void ensureStage(CubeWidget* cube)
     label->show();
     stage->label = label;
     stage->fade = fade;
+    // Precise, because a coarse timer may fire up to 5% late, and over a long
+    // script those delays add up and cut later cards short.
     stage->advance = new QTimer(label);
+    stage->advance->setTimerType(Qt::PreciseTimer);
     stage->advance->setSingleShot(true);
     QObject::connect(stage->advance, &QTimer::timeout, label, [] { showCard(); });
     stage->fadeOut = new QTimer(label);
+    stage->fadeOut->setTimerType(Qt::PreciseTimer);
     stage->fadeOut->setSingleShot(true);
     QObject::connect(stage->fadeOut, &QTimer::timeout, label, [] { fadeTo(0.0, 550); });
 }

@@ -492,6 +492,17 @@ class SoliloquyIntermission(unittest.TestCase):
         widest = self.get("cubeView", "width") * 0.86
         self.assertGreater(self.get("soliloquyCaption", "width"), widest * 0.6)
 
+    def test_cards_change_on_time(self) -> None:
+        # A coarse timer fires a 6.5 s card about a third of a second late,
+        # and over a long script that cuts later cards short.
+        self.cue(cards=[{"text": "first", "ms": 6500}, {"text": "second", "ms": 3000}])
+        started = time.monotonic()
+        self.eventually(lambda: self.get("soliloquyCaption", "text") == "first", "the first card shows")
+        while self.get("soliloquyCaption", "text") != "second":
+            self.assertLess(time.monotonic() - started, 9.0, "the second card never came")
+            time.sleep(0.02)
+        self.assertAlmostEqual(time.monotonic() - started, 6.5, delta=0.15)
+
     def test_a_script_of_cards_can_end_with_the_curtain(self) -> None:
         self.cue(guest="Tester", cards=[{"text": "the last word", "ms": 1500}], curtainAtEnd=True)
         self.eventually(lambda: self.get("soliloquyCaption", "text") == "the last word", "the card shows")
