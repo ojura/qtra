@@ -23,7 +23,19 @@ cmake --build build/release --target runtime_agent_coverage \
 The coverage target matters after the host is relinked. The audio step binding
 uses the generated report for that exact executable.
 
-Start qtra with a dedicated socket:
+Start or reuse qtra, register its scene modules, and show the stage:
+
+```sh
+python3 tools/launch_party_stage.py --fullscreen
+```
+
+The launcher reuses the exact existing socket and recorded module IDs. It checks
+for a same-user process with the requested binary and socket before starting a
+new host. It writes `qtra.pid`, `qtra-modules.json`, and `qtra.log` beside the state
+file. `--panel` opens the native request desk. `--state-file`, `--base-url`,
+`--socket`, `--runtime-dir`, and `--build-dir` select an alternative local setup.
+
+For manual runtime control, start qtra with a dedicated socket:
 
 ```sh
 build/release/qt_runtime_cube --agent-socket /run/user/1000/larics-dj-qtra.sock
@@ -44,7 +56,8 @@ once and remain resident. Releasing the party module removes its widgets and
 shortcuts, restores the prior menu/status-bar visibility and title, and restores
 the effect actions to the states they had when the stage took control.
 
-Party-stage requests also accept `panel:true|false`, `fullscreen:true|false`, an
+Party-stage requests also accept `panel:true|false`, `fullscreen:true|false`, a
+`requestBaseUrl` override for the local API, an
 inline `state` object, and `capture:"/absolute/path.png"`. Captures include the
 native overlay and request panel. `restore:true` releases the stage. Every run
 returns its current revision, scene, effect, cue, pending cue count, loaded image

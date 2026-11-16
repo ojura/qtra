@@ -547,7 +547,14 @@ public:
     }
     QString requestUrl() const
     {
+        const QString override = property("requestBaseUrl").toString();
+        if (!override.isEmpty()) return override;
         return text(state_, "requestLocalUrl", QStringLiteral("http://127.0.0.1:8787"));
+    }
+    void setRequestBaseUrl(const QString& url)
+    {
+        setProperty("requestBaseUrl", url);
+        if (desk_) desk_->setBase(requestUrl());
     }
     void showRequests(bool visible)
     {
@@ -651,12 +658,12 @@ protected:
         }
 
         const double qrSide = 102 * u;
-        requestRect_ = QRectF(w - margin - 240 * u, 24 * u, 240 * u, 167 * u);
+        requestRect_ = QRectF(w - margin - 240 * u, 24 * u, 240 * u, 190 * u);
         panel(p, requestRect_, cyan);
         p.setFont(stageFont(16 * u, true)); p.setPen(white);
         p.drawText(requestRect_.adjusted(16 * u, 12 * u, -8 * u, 0), Qt::AlignTop, QStringLiteral("Daj pjesmu."));
         p.setFont(stageFont(11 * u)); p.setPen(QColor("#b9c7db"));
-        p.drawText(QRectF(requestRect_.x() + 16 * u, 60 * u, 112 * u, 52 * u),
+        p.drawText(QRectF(requestRect_.x() + 16 * u, 60 * u, 94 * u, 80 * u),
                    Qt::AlignLeft | Qt::TextWordWrap, QStringLiteral("Skeniraj, pronađi,\npošalji DJ-u."));
         if (!qr_.isNull()) {
             const QRectF qrRect(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide);
@@ -670,11 +677,11 @@ protected:
             p.drawText(QRectF(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide), Qt::AlignCenter, QStringLiteral("♪"));
         }
         p.setFont(stageFont(11 * u, true)); p.setPen(cyan);
-        p.drawText(requestRect_.adjusted(16 * u, 127 * u, -4 * u, -4 * u), Qt::AlignTop, QStringLiteral("Zatraži pjesmu · R"));
+        p.drawText(requestRect_.adjusted(16 * u, 148 * u, -4 * u, -4 * u), Qt::AlignTop, QStringLiteral("Zatraži pjesmu · R"));
         const QString guestUrl = text(state_, "requestUrl");
         if (!guestUrl.isEmpty()) {
             p.setFont(stageFont(10 * u)); p.setPen(QColor("#95a5bf"));
-            p.drawText(requestRect_.adjusted(16 * u, 146 * u, -10 * u, 0), Qt::AlignTop,
+            p.drawText(requestRect_.adjusted(16 * u, 170 * u, -10 * u, 0), Qt::AlignTop,
                        QFontMetrics(p.font()).elidedText(guestUrl, Qt::ElideMiddle, qRound(210 * u)));
         }
 
@@ -893,6 +900,7 @@ void run(const RuntimeAgentHost* host)
     if (!stage) stage = new PartyStage(cube, text(request, "stateFile", QDir::homePath() + QStringLiteral("/.local/state/larics-dj/state.json")));
     else if (request.contains(QStringLiteral("stateFile"))) stage->setStateFile(text(request, "stateFile"));
     if (request.contains(QStringLiteral("state"))) stage->applyState(request.value(QStringLiteral("state")).toObject());
+    if (request.contains(QStringLiteral("requestBaseUrl"))) stage->setRequestBaseUrl(text(request, "requestBaseUrl"));
     if (request.contains(QStringLiteral("panel"))) stage->showRequests(request.value(QStringLiteral("panel")).toBool());
     if (request.contains(QStringLiteral("fullscreen"))) {
         request.value(QStringLiteral("fullscreen")).toBool() ? cube->window()->showFullScreen() : cube->window()->showNormal();
