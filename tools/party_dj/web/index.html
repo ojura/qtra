@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14151e">
+  <meta name="description" content="The LARICS party request desk. Find a song, send it to the DJ, and tell us how the room feels.">
+  <title>LARICS after hours</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#search">Find a song</a>
+  <div class="app-shell">
+    <header class="masthead">
+      <a class="brand" href="/" aria-label="LARICS after hours home">
+        <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true">
+          <rect x="5" y="23" width="28" height="13" rx="4" fill="currentColor"/>
+          <rect x="11" y="13" width="17" height="14" rx="3" fill="currentColor"/>
+          <rect x="15" y="17" width="9" height="5" rx="2" fill="#14151e"/>
+          <circle cx="12" cy="37" r="5" fill="#f7f3ea"/>
+          <circle cx="29" cy="37" r="5" fill="#f7f3ea"/>
+          <path d="M35 9v26h9M39 9v22h5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M4 9l4-3m23-2 2-4" fill="none" stroke="#8de0df" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span>LARICS <span class="brand-after">after hours</span></span>
+      </a>
+      <div class="connection" id="connection" data-state="connecting">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="connection-text">Joining the room</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="welcome">
+        <div>
+          <p class="eyebrow">Tonight, the robots are off duty.</p>
+          <h1 id="welcome">Did you mean<br><span class="lyrics">LYRICS<span class="question-mark">?</span></span></h1>
+          <p class="intro-copy">Find your song. Read the room.<br>Leave the questionable transitions to us.</p>
+        </div>
+        <div class="record-scene" aria-hidden="true">
+          <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+          <div class="record"><span class="record-label">30<span>years of<br>good noise</span></span></div>
+          <span class="scene-note">Petlja zatvorena.<br>Runda otvorena.</span>
+          <span class="spark spark-one">✳</span><span class="spark spark-two">+</span>
+        </div>
+      </section>
+
+      <nav class="desk-nav" aria-label="Party desk"><a href="#request-heading">Find music <span aria-hidden="true">↗</span></a><a href="#chat-heading">Talk to the DJ <span class="chat-unread" id="chat-unread" hidden>New</span></a><a href="#mood-heading">Set the mood</a></nav>
+      <div class="room-notice" id="room-notice" hidden role="status"></div>
+
+      <div class="desk-layout">
+        <div class="request-column">
+          <section class="request-panel panel" aria-labelledby="request-heading">
+            <div class="section-heading">
+              <div><p class="section-number">01 / Your contribution</p><h2 id="request-heading">What should we play?</h2></div>
+              <span class="little-arrow" aria-hidden="true">↗</span>
+            </div>
+            <form id="search-form" role="search">
+              <label class="sr-only" for="search">Search Spotify for a song or artist</label>
+              <div class="search-box">
+                <svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>
+                <input id="search" name="q" type="search" placeholder="Song or artist" autocomplete="off" enterkeyhint="search" maxlength="160">
+                <button class="search-button" type="submit">Find</button>
+              </div>
+            </form>
+            <div class="search-starters" id="search-starters" aria-label="Try a search">
+              <span>A place to start</span>
+              <button type="button" data-search="Daft Punk">Daft Punk</button>
+              <button type="button" data-search="Dino Dvornik">Dino Dvornik</button>
+              <button type="button" data-search="ABBA">ABBA</button>
+            </div>
+            <details class="request-details">
+              <summary>Add your name or a dedication <span>optional</span></summary>
+              <div class="details-fields">
+                <div><label for="request-name">Your name</label><input id="request-name" autocomplete="nickname" maxlength="60" placeholder="The person with excellent taste"></div>
+                <div><label for="dedication">Dedication</label><input id="dedication" maxlength="240" placeholder="This one goes out to…"></div>
+              </div>
+            </details>
+            <div class="results-heading"><p id="search-status" role="status" aria-live="polite">Search the Spotify catalogue, then tap Request.</p><span id="search-spinner" class="spinner" hidden aria-hidden="true"></span></div>
+            <ul id="results" class="track-list results" aria-label="Search results"></ul>
+            <div id="search-empty" class="search-empty">
+              <div class="empty-note" aria-hidden="true">♫</div>
+              <p>The next good idea<br>could be yours.</p>
+            </div>
+          </section>
+
+          <section class="chat-panel panel" aria-labelledby="chat-heading">
+            <div class="section-heading"><div><p class="section-number">02 / An open conversation</p><h2 id="chat-heading">Talk to your DJ</h2></div><span class="dj-presence" id="dj-presence" data-state="connecting"><i aria-hidden="true"></i><span id="dj-presence-text">Connecting</span></span></div>
+            <p class="chat-intro">Requests, reactions, and the occasional terrible joke. The DJ replies here.</p>
+            <div class="chat-log" id="chat-log" role="log" aria-label="Conversation with the DJ" aria-live="polite" aria-relevant="additions text">
+              <p class="chat-empty" id="chat-empty">You have the microphone.<br>Tell us what the room needs.</p>
+            </div>
+            <button type="button" class="chat-new" id="chat-new" hidden>New messages ↓</button>
+            <form id="message-form" class="chat-form">
+              <label class="chat-name-label" for="chat-name">Your name <span>optional</span><input id="chat-name" autocomplete="nickname" maxlength="60" placeholder="Guest"></label>
+              <label class="sr-only" for="message">Message to the DJ</label>
+              <textarea id="message" rows="2" maxlength="600" placeholder="More dancing? A dedication? An important opinion about this song?"></textarea>
+              <div class="message-bottom"><p id="message-status" role="status">Enter to send. Shift + Enter for a new line.</p><button class="send-button" type="submit">Send <span aria-hidden="true">↗</span></button></div>
+            </form>
+          </section>
+
+          <section class="mood-panel panel" aria-labelledby="mood-heading">
+            <div class="section-heading"><div><p class="section-number">03 / Read the room</p><h2 id="mood-heading">How are we feeling?</h2></div><span class="mood-value" id="room-mood">Finding the groove</span></div>
+            <div class="mood-options" role="group" aria-label="Tell the DJ your preferred mood">
+              <button type="button" data-mood="chill" aria-pressed="false"><span aria-hidden="true">☾</span>Chill</button>
+              <button type="button" data-mood="groove" aria-pressed="false"><span aria-hidden="true">≈</span>Groove</button>
+              <button type="button" data-mood="dance" aria-pressed="false"><span aria-hidden="true">✳</span>Dance</button>
+              <button type="button" data-mood="singalong" aria-pressed="false"><span aria-hidden="true">♫</span>Sing along</button>
+              <button type="button" data-mood="chaos" aria-pressed="false"><span aria-hidden="true">↯</span>Chaos</button>
+            </div>
+            <p class="mood-feedback" id="mood-feedback" aria-live="polite">A hint for the DJ. You can change your mind.</p>
+          </section>
+        </div>
+
+        <aside class="room-column" aria-label="Music in the room">
+          <section class="now-panel panel" aria-labelledby="now-heading">
+            <div class="section-heading"><p class="section-number" id="now-heading">In the speakers</p><span class="equalizer" id="equalizer" aria-hidden="true"><i></i><i></i><i></i><i></i></span></div>
+            <div class="now-art" id="now-art"><span class="art-placeholder" aria-hidden="true">♫</span></div>
+            <div class="now-copy"><h2 id="now-title">The night is warming up</h2><p id="now-artist">Waiting for Spotify</p></div>
+            <div class="track-progress" id="track-progress" role="progressbar" aria-label="Track progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progress-fill"></span></div>
+            <div class="track-times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div>
+            <a class="spotify-link" id="now-spotify" hidden target="_blank" rel="noopener noreferrer">Open in Spotify <span aria-hidden="true">↗</span></a>
+          </section>
+
+          <section class="queue-panel panel" aria-labelledby="queue-heading">
+            <div class="section-heading"><div><p class="section-number">From the room</p><h2 id="queue-heading">The request list</h2></div><span class="count-badge" id="queue-count">0</span></div>
+            <ul id="queue" class="track-list queue" aria-label="Requested songs"></ul>
+            <p class="queue-empty" id="queue-empty">Plenty of room for your first request.</p>
+            <p class="queue-note">The DJ fits requests into the set.</p>
+          </section>
+
+          <section class="book-panel" id="book-panel" hidden aria-labelledby="book-title">
+            <img id="book-image" alt="" loading="lazy">
+            <div><p class="section-number">From the spomenar</p><h2 id="book-title"></h2><p id="book-caption"></p><span id="book-page"></span><a id="book-source" hidden target="_blank" rel="noopener noreferrer">Open this page in the spomenar ↗</a></div>
+          </section>
+        </aside>
+      </div>
+
+      <footer class="footer"><span>Made for this room.</span><span>Thirty years of robotics. One very human playlist.</span><span class="footer-flower" aria-hidden="true">✳</span></footer>
+    </main>
+  </div>
+  <div class="toast-stack" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>
