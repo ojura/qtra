@@ -20,7 +20,7 @@ This edition contains 460 physical PDF pages. For the numbered body, **physical 
 
 The complete 1.61 GB original was unnecessary for this task. The publisher's 2.9 MB structural layout PDF supplied all text, its page previews supplied the complete printed appearance, and `reading.json` supplied the original image resources. The structural PDF is `reading/layout-7c91cdb902fcc9c56efbd012ecb73d05947784d84c754636819a5d7c0edbc2a9.pdf` under the preview root. The two publisher indexes retain the page placement and resource mapping needed to select more images later.
 
-The initial party selection has **77 images: 33 original photos and 44 complete page previews**, totaling 40,762,397 bytes. Prefer `kind: "photo"` for the small native stage card. Full page previews work better when a guest opens the source, or when a page's typography is itself the subject, such as LARICS/LYRICS.
+The party selection has **78 images: 34 original photos and 44 complete page previews**, totaling 46,064,255 bytes. Prefer `kind: "photo"` for the small native stage card. Full page previews work better when a guest opens the source, or when a page's typography is itself the subject, such as LARICS/LYRICS.
 
 Each catalog entry contains `filename`, `imagePath`, `path`, `kind`, `title`, `caption`, printed `page`, `pdfPage`, `sourceUrl`, exact publisher asset `origin`, `attribution`, `width`, `height` and `bytes`. Photo entries also carry the publisher's `resourceId`. The native stage uses `imagePath`, `title` and `page`; the guest service can expose its served image URL and `sourceUrl`. The service reads the catalog again during rotation, so replace `cards.json` atomically after adding reviewed entries.
 
@@ -73,6 +73,7 @@ Additional bibliography connections: the book lists *Autonomous Robots as Actors
 | [224 to 225](https://cloud.larics.fer.hr/spomenar/#page=235) | Pepper's speech recognition worked in the lab but struggled amid the noise at Weekend Media Festival. | A short joke about a robot needing the request typed during a loud party. |
 | [329 to 330](https://cloud.larics.fer.hr/spomenar/#page=340) | LARICS Gripsters took third place in the ICRA 2026 human-to-robot object-handover competition using Kinova Gen3 and the lab's SofIA gripper. | “Gripsters: primopredaja refrena” is a new caption for the track-delivery robot. |
 | [430](https://cloud.larics.fer.hr/spomenar/#page=441) | A Singapore travel photo plays on the transit name SMRT and its Croatian reading. | An occasional travel-sign callback. |
+| [431](https://cloud.larics.fer.hr/spomenar/#page=442) | Alan Mutka and Damjan Miklić visit Ravna Gora on 7 October 2007 in a photo story about seeking the meaning of life. They find a tiny hut with a large Ožujsko sign. | For Hajdemo u planine: “Pošli tražiti smisao života. Našli Ožujsko na fasadi.” The actual hut photograph is in the catalog. |
 | [433](https://cloud.larics.fer.hr/spomenar/#page=444) | Matko, Ivica and Alan attempt “trio biciklistikus” at Matko's 2011 Fulbright farewell. | Three characters trying to share one vehicle. |
 | [435](https://cloud.larics.fer.hr/spomenar/#page=446) | Breaking the Surface 2018 includes a masked ball and a guessing game about the costumes. | Let guests guess from the actual collage. |
 | [437](https://cloud.larics.fer.hr/spomenar/#page=448) | The album calls a sunglasses portrait LARICS's Blues Brothers. | A blues or soul transition. |
@@ -114,6 +115,7 @@ All filenames below are inside `/home/juraj/.local/state/larics-dj/book/`. `card
 | `p0322-juraj-game-photo.jpg` | 311 | Juraj playing in a Santa hat |
 | `p0326-plava-kada-photo.jpg` | 315 | Gathering at the 2022 Advent gig |
 | `p0327-pepper-theatre-photo.jpg` | 316 | Pepper in Ćelava pjevačica |
+| `p0442-ravna-gora-photo.jpg` | 431 | Alan and Damjan at the Ravna Gora hut |
 | `p0444-bicycle-trio-photo.jpg` | 433 | Three people on one bicycle |
 | `p0446-masked-ball-photo.jpg` | 435 | Breaking the Surface costumes |
 | `p0447-safu-mug-photo.jpg` | 436 | I love SAFU mug |
