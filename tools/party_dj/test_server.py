@@ -16,6 +16,7 @@ from spotify_native import SpotifyError
 
 TRACK_A = 'spotify:track:' + 'a' * 22
 TRACK_B = 'spotify:track:' + 'b' * 22
+TRACK_RELINKED = 'spotify:track:' + 'c' * 22
 
 
 def track(uri):
@@ -47,8 +48,9 @@ class FakeSpotify:
         self.enqueue_calls.append((uri, request_id))
         if self.enqueue_error is not None:
             raise self.enqueue_error
-        self.queue.append(track(uri))
-        return {'queued': True, 'uri': uri, 'requestId': request_id}
+        queued = {**track(uri), 'uid': f'fixture-queue-{len(self.enqueue_calls)}'}
+        self.queue.append(queued)
+        return {'queued': True, 'uri': uri, 'requestId': request_id, 'uid': queued['uid']}
 
 
 class PartyTests(unittest.TestCase):
@@ -138,6 +140,22 @@ class PartyTests(unittest.TestCase):
         self.party._refresh()
         self.assertEqual(self.row()['status'], 'queued')
 
+    def test_known_request_uid_falls_back_when_queue_entry_has_no_uid(self):
+        self.queued_request()
+        self.client.queue = [track(TRACK_A)]
+        for _ in range(2):
+            self.stamp += 60000
+            self.party._refresh()
+        self.assertEqual(self.row()['status'], 'queued')
+
+    def test_different_queue_uid_does_not_claim_the_original_request(self):
+        self.queued_request()
+        self.client.queue = [{**track(TRACK_A), 'uid': 'another-occurrence'}]
+        for _ in range(2):
+            self.stamp += 60000
+            self.party._refresh()
+        self.assertEqual(self.row()['status'], 'removed')
+
     def test_confirmed_pre_dispatch_failure_retries_after_recovery(self):
         self.request()
         self.party._refresh()
@@ -174,6 +192,46 @@ class PartyTests(unittest.TestCase):
         self.party._refresh()
         self.party._dispatch()
         self.assertEqual(self.row()['status'], 'queued')
+        self.assertEqual(len(self.client.enqueue_calls), 1)
+
+    def finish_relinked_request(self, uid):
+        self.client.queue = []
+        self.client.current = {**track(TRACK_RELINKED), 'uid': uid, 'playing': True}
+        self.party._refresh()
+        self.assertEqual(self.row()['status'], 'playing')
+        state = self.party.snapshot()
+        self.assertFalse(any(item.get('id') == 'request-a' for item in state['queue']))
+        self.assertEqual(state['nowPlaying']['uri'], TRACK_RELINKED)
+        self.assertEqual(state['nowPlaying']['requestedUri'], TRACK_A)
+        self.assertEqual(state['nowPlaying']['requestId'], 'request-a')
+        self.assertEqual(state['nowPlaying']['requestedBy'], 'Test guest')
+        self.stamp += 60000
+        self.party._refresh()
+        self.assertEqual(self.row()['status'], 'playing')
+        self.client.current = {**track(TRACK_B), 'uid': 'next-track', 'playing': True}
+        self.party._refresh()
+        self.assertEqual(self.row()['status'], 'played')
+        self.assertNotIn('requestedUri', self.party.snapshot()['nowPlaying'])
+
+    def test_enqueue_uid_tracks_relinked_playback_through_completion(self):
+        self.queued_request()
+        uid = self.client.queue[0]['uid']
+        self.assertEqual(json.loads(self.row()['track']).get('uid'), uid)
+        self.finish_relinked_request(uid)
+        self.assertEqual(len(self.client.enqueue_calls), 1)
+
+    def test_ambiguous_reconciliation_keeps_uid_for_later_relinked_playback(self):
+        self.request()
+        self.party._refresh()
+        self.client.enqueue_error = SpotifyError('Reply lost after dispatch', dispatched=True)
+        self.party._dispatch()
+        self.assertEqual(self.row()['status'], 'uncertain')
+        self.client.enqueue_error = None
+        self.client.queue = [{**track(TRACK_A), 'uid': 'observed-ambiguous-queue-item'}]
+        self.party._refresh()
+        self.assertEqual(self.row()['status'], 'queued')
+        self.assertEqual(json.loads(self.row()['track']).get('uid'), 'observed-ambiguous-queue-item')
+        self.finish_relinked_request('observed-ambiguous-queue-item')
         self.assertEqual(len(self.client.enqueue_calls), 1)
 
     def test_concurrent_message_retries_create_one_message_and_one_event(self):

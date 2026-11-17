@@ -195,16 +195,26 @@ class Party:
         with self.lock:
             rows = self.db.execute("SELECT * FROM requests WHERE status NOT IN ('played','removed') ORDER BY created_at LIMIT 100").fetchall()
             own = {r['uri']: self._request_dict(r) for r in rows}
+            own_by_uid = {item['uid']: item for item in own.values() if item.get('uid')}
             queue = []
             seen = set()
             for item in self.playback.get('queue', []):
                 merged = {**item, 'status': 'queued'}
-                if item.get('uri') in own:
-                    merged.update({k: v for k, v in own[item['uri']].items() if k in ('id', 'requestedBy', 'dedication', 'status')})
+                request = own_by_uid.get(item.get('uid')) or own.get(item.get('uri'))
+                if request and request.get('uid') and item.get('uid') and request['uid'] != item['uid']:
+                    request = None
+                if request:
+                    merged.update({k: v for k, v in request.items() if k in ('id', 'requestedBy', 'dedication', 'status')})
+                    seen.add(request['id'])
                 queue.append(merged)
-                seen.add(item.get('uri'))
-            queue.extend(self._request_dict(r) for r in rows if r['uri'] not in seen and r['status'] != 'playing')
-            result = {'revision': self.revision, 'nowPlaying': self.playback.get('nowPlaying'),
+            queue.extend(self._request_dict(r) for r in rows if r['id'] not in seen and r['status'] != 'playing')
+            now_playing = self.playback.get('nowPlaying')
+            playing = next((r for r in rows if r['status'] == 'playing'), None)
+            if now_playing and playing:
+                now_playing = {**now_playing, 'requestedUri': playing['uri'],
+                    'requestId': playing['id'], 'requestedBy': playing['requested_by'],
+                    'dedication': playing['dedication']}
+            result = {'revision': self.revision, 'nowPlaying': now_playing,
                 'queue': queue, 'scene': self.scene.copy(), 'caption': self.caption,
                 'mood': self._mood(), 'guestCount': sum(now_ms() - t < 90000 for t in self.guests.values()),
                 'requestUrl': self.request_url, 'qrPath': str(self.data / 'request-qr.png'),
@@ -454,23 +464,42 @@ class Party:
                 self.spotify = {'connected': True, 'error': None, 'mode': self.client.mode}
                 current = status.get('nowPlaying') or {}
                 uri = current.get('uri', '')
-                queue_uris = {t.get('uri') for t in status.get('queue', [])}
-                if uri and uri != self.last_track:
-                    if self.last_track:
-                        self.db.execute("UPDATE requests SET status='played',updated_at=? WHERE uri=? AND status='playing'", (now_ms(), self.last_track))
-                    self.db.execute("UPDATE requests SET status='playing',updated_at=? WHERE uri=? AND status IN ('queued','uncertain','pending')", (now_ms(), uri))
-                    self.last_track = uri
+                queue = status.get('queue', [])
+                by_uri = {t.get('uri'): t for t in queue}
+                by_uid = {t['uid']: t for t in queue if t.get('uid')}
+                current_key = current.get('uid') or uri
+                if uri and current_key != self.last_track:
+                    self.last_track = current_key
                     self._event('track', current)
-                for pending in self.db.execute("SELECT id,uri FROM requests WHERE status='uncertain'").fetchall():
-                    if pending['uri'] in queue_uris or pending['uri'] == uri:
-                        self.db.execute("UPDATE requests SET status=?,error=NULL,updated_at=? WHERE id=?",
-                            ('playing' if pending['uri'] == uri else 'queued', now_ms(), pending['id']))
-                if status.get('explicitQueueComplete'):
-                    for pending in self.db.execute("SELECT id,uri,updated_at FROM requests WHERE status='queued'").fetchall():
-                        rid = pending['id']
-                        if pending['uri'] in queue_uris or pending['uri'] == uri:
-                            self.missing_requests.pop(rid, None)
-                            continue
+                for pending in self.db.execute("SELECT * FROM requests WHERE status IN ('queued','uncertain','playing')").fetchall():
+                    rid = pending['id']
+                    track = json.loads(pending['track'])
+                    uid = track.get('uid')
+                    # Spotify may relink a catalogue URI when a track starts.
+                    # Its queue UID identifies the same requested occurrence.
+                    observed = by_uid.get(uid) if uid else by_uri.get(pending['uri'])
+                    if observed is None and uid:
+                        same_uri = by_uri.get(pending['uri'])
+                        if same_uri and not same_uri.get('uid'):
+                            observed = same_uri
+                    if not uid and observed and observed.get('uid'):
+                        uid = track['uid'] = observed['uid']
+                        self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), rid))
+                    is_current = bool(uri) and (uid == current.get('uid') if uid and current.get('uid') else pending['uri'] == uri)
+                    if is_current:
+                        if not uid and current.get('uid'):
+                            track['uid'] = current['uid']
+                            self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), rid))
+                        if pending['status'] != 'playing':
+                            self.db.execute("UPDATE requests SET status='playing',error=NULL,updated_at=? WHERE id=?", (now_ms(), rid))
+                        self.missing_requests.pop(rid, None)
+                    elif pending['status'] == 'playing' and uri:
+                        self.db.execute("UPDATE requests SET status='played',updated_at=? WHERE id=?", (now_ms(), rid))
+                    elif observed:
+                        if pending['status'] == 'uncertain':
+                            self.db.execute("UPDATE requests SET status='queued',error=NULL,updated_at=? WHERE id=?", (now_ms(), rid))
+                        self.missing_requests.pop(rid, None)
+                    elif pending['status'] == 'queued' and status.get('explicitQueueComplete'):
                         first, count = self.missing_requests.get(rid, (now_ms(), 0))
                         self.missing_requests[rid] = (first, count + 1)
                         if count >= 1 and now_ms() - max(first, pending['updated_at']) >= 10000:
@@ -498,7 +527,7 @@ class Party:
             self.db.execute("UPDATE requests SET status='sending',updated_at=? WHERE id=?", (now_ms(), row['id']))
             self.db.commit()
         try:
-            self.client.enqueue(row['uri'], row['id'])
+            result = self.client.enqueue(row['uri'], row['id'])
         except Exception as error:
             with self.lock:
                 known_not_sent = isinstance(error, SpotifyError) and not error.dispatched
@@ -510,6 +539,10 @@ class Party:
                     {'id': row['id'], 'uri': row['uri'], 'error': str(error)[:300]})
         else:
             with self.lock:
+                if isinstance(result, dict) and result.get('uid'):
+                    track = json.loads(row['track'])
+                    track['uid'] = result['uid']
+                    self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), row['id']))
                 self.db.execute("UPDATE requests SET status='queued',error=NULL,updated_at=? WHERE id=?", (now_ms(), row['id']))
                 item = self._request_dict(self.db.execute('SELECT * FROM requests WHERE id=?', (row['id'],)).fetchone())
                 self._event('queued', item)

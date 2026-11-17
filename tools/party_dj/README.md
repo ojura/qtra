@@ -138,7 +138,9 @@ Runtime data lives in `~/.local/state/larics-dj/`:
 | `book/cards.json` | Source-linked photographs and page previews |
 
 Requests move from `pending` to `sending` to `queued`, then `playing` and
-`played`. A failure known to occur before dispatch returns the request to
+`played`. The stored Spotify queue UID follows that same occurrence if Spotify
+substitutes another catalogue URI during playback; the guest page also receives
+the original requested URI. A failure known to occur before dispatch returns the request to
 `pending`. A connection loss during a write produces `uncertain`; the service
 reconciles it against the actual Spotify queue instead of dispatching it twice.
 An item removed in Spotify is released after repeated complete queue observations

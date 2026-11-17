@@ -133,6 +133,7 @@
     return api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   }
   function queued(uri) {
+    if (latestState?.nowPlaying?.requestedUri === uri) return true;
     return Array.isArray(latestState?.queue) && latestState.queue.some((item) =>
       item.uri === uri && !['played', 'failed', 'rejected', 'cancelled', 'canceled', 'removed'].includes(item.status));
   }
