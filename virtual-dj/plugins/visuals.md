@@ -9,7 +9,7 @@ or require every show to use robots, photographs or cocktail glasses.
 
 | Piece | Responsibility | Reuse seam |
 |---|---|---|
-| `snippets/party_dance.cpp` | Disco, streamers, conga and stadium wave; large held props | GUI module requests, state file and `audio.beat` events |
+| `snippets/party_dance.cpp` | Disco, streamers, conga, stadium wave, circular kolo and blue tram; large figures and props | GUI module requests, state file and `audio.beat` events |
 | `snippets/party_stage.cpp` | Track display, captions, robot fleet, optional photos, karaoke and guest desk | Existing state contracts and named controls |
 | `snippets/audio_pulse.cpp` | Audio analysis and ring/city/waterfall renderer | Already-running `audio.beat` event stream |
 | `tools/launch_party_stage.py` | Explicit session startup and module registration | Recorded host/socket/module identities |
@@ -65,7 +65,7 @@ clock updates do not alter the current song's identity.
 
 Native status exposes `theme`, `automaticTheme`, `themeSource` (`automatic` or
 `cue`), `songKey` and `songRevision`. Changing a cue on the same song leaves the
-revision and ten-minute choreography anchor alone. The last accepted themes
+revision and independent form interval alone. The last accepted themes
 survive unreadable state and module reload. A valid state with no current track
 uses the remembered automatic theme; the cue becomes eligible again only when
 its exact occurrence returns.
@@ -87,7 +87,7 @@ The test owns an Xvfb display, qtra host, HTTP fixture, temporary state file and
 synthetic beat socket. It never loads the live audio analyzer or contacts a
 Spotify account. Its captures are actual private native renders, including the
 guest panel. The prefix produces `.disco.png`, `.bottles.png`, `.dandelion.png`,
-`.streamers.png`, `.conga.png` and `.stadium.png`. Inspect the native render and
+`.streamers.png`, `.conga.png`, `.stadium.png`, `.kolo.png` and `.tram.png`. Inspect the native render and
 the exact smaller resample, then delete the generated preview files.
 
 `RUNTIME_AGENT_TEST_BUILD_DIR` selects another built tree. The required host and
@@ -104,10 +104,19 @@ transition and inspect its private render. The gesture is anchored to the
 robot's transformed hand, so it moves with the arm instead of floating nearby.
 
 For a new act, preserve the event connection and release path. Extend the
-bounded drawing function, act validation and cycle consistently. The existing
-cycle is disco → streamers → conga → stadium; `act:"auto"` advances when
-`scene.audioActStartedAt` changes. Explicit `act` requests select a choreography
-without changing music. Per-song props remain independent of that schedule.
+bounded drawing function and shared `danceActs()` list. The existing cycle is
+disco → streamers → conga → stadium → kolo → tram. `act:"auto"` advances every
+60 seconds, independently of state-file updates and the background scene anchor.
+Explicit `act` requests hold a form; `{"act":"auto","startAct":"kolo"}` begins
+automatic rotation at the circle. `formSeconds` accepts whole seconds from 1 to
+600 for deliberate cadence changes. The form, interval and next-change deadline
+survive reload. Status exposes `availableActs`, `formation`, `formIntervalMs` and
+`nextActAt`. Per-song props remain independent of that schedule.
+
+Kolo uses shared hand positions, eight stepping robots and depth-sorted bodies
+to make a closed circle. The tram uses six passengers, a moving skyline and a
+large blue vehicle with a readable destination. Its full composition differs
+from the open-floor robot formations.
 
 At the current 2560×1600 layout, the fixed 600-pixel guest panel leaves about
 1954 pixels for art. Judge the free pane rather than the full screen width.

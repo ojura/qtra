@@ -147,6 +147,9 @@ class PartyDance(unittest.TestCase):
             else: self.assertNotEqual(current["theme"], first_default, "default musical motif did not change")
         self.stage.state["scene"]["audioActStartedAt"] += 600000
         self.stage.write_state()
+        time.sleep(.55)
+        self.assertEqual(self.run_dance()["act"], "disco", "a background anchor still controls the independent form cycle")
+        self.run_dance(act="streamers")
         self.stage.eventually(lambda: self.run_dance()["act"] == "streamers", "scheduled act did not change")
         self.beats.disconnect()
         self.assertTrue(self.beats.subscribed.wait(3), "beat stream did not reconnect")
@@ -154,13 +157,11 @@ class PartyDance(unittest.TestCase):
         self.stage.eventually(lambda: self.run_dance()["beats"] == 8, "beat stream did not recover")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".streamers.png")))
-        self.stage.state["scene"]["audioActStartedAt"] += 600000
-        self.stage.write_state()
+        self.run_dance(act="conga")
         self.stage.eventually(lambda: self.run_dance()["act"] == "conga", "third act did not start")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".conga.png")))
-        self.stage.state["scene"]["audioActStartedAt"] += 600000
-        self.stage.write_state()
+        self.run_dance(act="stadium")
         self.stage.eventually(lambda: self.run_dance()["act"] == "stadium", "fourth act did not start")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".stadium.png")))
@@ -176,9 +177,53 @@ class PartyDance(unittest.TestCase):
         self.assertEqual(reloaded["act"], "stadium")
         self.assertEqual(reloaded["songRevision"], current["songRevision"])
         self.assertEqual(reloaded["theme"], current["theme"])
-        self.stage.state["scene"]["audioActStartedAt"] += 600000
+        resumed = self.run_dance(act="auto", startAct="disco")
+        self.assertEqual(resumed["act"], "disco")
+        self.assertTrue(resumed["autoActs"])
+        self.run_dance(restore=True)
+
+    def test_kolo_and_tram_rotate_independently_and_preserve_desk(self):
+        self.stage.set_text("partyMessage", "Kolo i tramvaj, molim.")
+        self.client.request("object.invoke", {"objectName": "partyMessage", "method": "setFocus"})
+        draft = self.stage.run_stage(getComposerDraft=True)["composerDraft"]
+        bounds = self.stage.magic_bounds()
+        first = self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path, act="kolo")
+        self.assertEqual(first["formIntervalMs"], 60000)
+        self.assertEqual(first["formation"], "closed-ring")
+        self.assertEqual(first["availableActs"], ["disco", "streamers", "conga", "stadium", "kolo", "tram"])
+        self.stage.eventually(lambda: self.run_dance()["frames"] > 3, "the new circle did not render")
+        capture = os.environ.get("PARTY_DANCE_CAPTURE")
+        if capture:
+            self.stage.run_stage(capture=str(Path(capture).with_suffix(".kolo.png")))
+        before = self.run_dance()["frames"]
+        tram = self.run_dance(act="tram")
+        self.assertEqual(tram["formation"], "tram-passengers")
+        self.stage.eventually(lambda: self.run_dance()["frames"] > before + 3, "the tram did not render")
+        if capture:
+            self.stage.run_stage(capture=str(Path(capture).with_suffix(".tram.png")))
+        self.run_dance(act="auto", startAct="kolo", formSeconds=1)
+        self.stage.state_file.write_text("{broken")
+        self.stage.eventually(lambda: self.run_dance()["act"] == "tram", "form rotation depended on state-file updates")
+        self.assertTrue(self.run_dance()["stateError"])
+        scheduled = self.run_dance(formSeconds=2)
+        self.run_dance(restore=True)
+        reloaded = self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path)
+        self.assertEqual(reloaded["act"], "tram")
+        self.assertEqual(reloaded["nextActAt"], scheduled["nextActAt"], "reload restarted the remaining form interval")
+        self.assertEqual(reloaded["formIntervalMs"], 2000)
         self.stage.write_state()
-        self.stage.eventually(lambda: self.run_dance()["act"] == "disco", "four-act cycle did not wrap")
+        self.stage.eventually(lambda: self.run_dance()["act"] == "disco", "the six-form cycle did not wrap")
+        self.run_dance(act="kolo", formSeconds=1)
+        time.sleep(1.15)
+        held = self.run_dance()
+        self.assertEqual(held["act"], "kolo", "automatic rotation overrode a manual form choice")
+        self.assertFalse(held["autoActs"])
+        self.assertEqual(held["nextActAt"], 0)
+        self.assertEqual(self.stage.run_stage(getComposerDraft=True)["composerDraft"], draft)
+        self.assertEqual(self.stage.magic_bounds(), bounds)
+        self.assertTrue(self.client.request("object.get", {"objectName": "partyMessage", "property": "focus"}))
+        self.assertFalse(self.stage.server.playback_requests or self.stage.server.skip_requests or self.stage.server.requests
+                         or self.stage.server.message_attempts, "a visual form issued a playback or guest action")
         self.run_dance(restore=True)
 
     def test_song_visual_cue_tracks_occurrence_and_recovers_without_reset(self):

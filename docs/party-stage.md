@@ -419,6 +419,12 @@ The fourth is a stadium wave with eight large speaker-robots and occasional
 four-second OPA/BIS scorecards with soft fades. Fewer floor tiles and mirror-ball
 facets keep the large silhouettes readable on a 15-inch laptop.
 
+The fifth is a circular **kolo**: eight large robots share hand positions around
+a closed ring, step together and rotate with depth ordering. The sixth is a blue
+tram with six dancing robot passengers, a moving city backdrop, turning wheels
+and the destination display **SLJEDEĆA: REFREN**. Both are procedural drawings in
+the same bounded layer; they require no image downloads or extra audio source.
+
 Actual `nowPlaying` occurrence, URI, title and artist select the song artwork.
 Robots hold large bottles for titles mentioning drinking, cocktail glasses for
 Koktel ljubavi, compasses for Gdje sam bio, dandelions for Maslačak, and flames
@@ -450,21 +456,29 @@ brightness, with a 0.55-second decay. Painting is limited to 30 frames per secon
 and stops while the window is hidden. No full-screen flashes or blur passes are
 used. Status reports frames, received beats, connection state and paint time.
 
-Each act pairs the current song's large held motif with a second robot holding
-a large cocktail glass, so the party toast remains visible on every song.
+Disco, streamers, conga and stadium retain the current song's large held motif
+and the party toast. Kolo keeps both hands linked; the tram shows passengers
+dancing inside its windows.
 
-`act:"auto"` advances the choreography when the service's ten-minute
-`scene.audioActStartedAt` anchor changes, cycling through disco, streamers,
-conga and stadium. `act:"disco"`, `act:"streamers"`, `act:"conga"` and
-`act:"stadium"` select an act explicitly.
+`act:"auto"` advances the six forms every **60 seconds**, independently of the
+service's slower background scene changes. The order is `disco`, `streamers`,
+`conga`, `stadium`, `kolo`, `tram`. `act` with any of those names holds that form
+until automatic mode is selected again. `startAct` selects the first form while
+keeping automatic mode, for example `{"act":"auto","startAct":"kolo"}`.
+Optional `formSeconds` accepts a whole number from 1 to 600 for deliberate cadence
+changes. Rotation continues with an unchanged or temporarily unreadable state
+file. Status exposes `availableActs`, `formation`, `formIntervalMs` and `nextActAt`.
 Releasing or hot-reloading this module affects only
 its layer, timers and event connection; the audio and request-panel modules stay
 running. Use the GUI executor. The current choice survives a module reload in
-the host window's properties.
+the host window's properties, together with the remaining form interval.
 
 Run `python3 -m unittest discover -s tests -p test_party_dance.py -v` for the
-private-display lifecycle, synthetic audio-event and occurrence-cue regressions.
+private-display lifecycle, synthetic audio-event and occurrence-cue regressions,
+plus the new kolo/tram rendering, independent clock, manual hold and reload cases.
 These tests own their display, host, HTTP fixture and synthetic beat socket.
+`PARTY_DANCE_CAPTURE=/tmp/dance.png` writes private scene captures, including
+`dance.kolo.png` and `dance.tram.png`, for a visual check at the target size.
 
 ## Source context
 

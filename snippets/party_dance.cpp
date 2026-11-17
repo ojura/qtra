@@ -9,6 +9,7 @@
 #include <QEvent>
 #include <QFile>
 #include <QFont>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLocalSocket>
@@ -21,12 +22,19 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace {
 constexpr double pi = 3.14159265358979323846;
 double fraction(double value) { return value - std::floor(value); }
 QColor opacity(QColor color, double value) { color.setAlphaF(std::clamp(value, 0.0, 1.0)); return color; }
+const QStringList& danceActs()
+{
+    static const QStringList acts{QStringLiteral("disco"), QStringLiteral("streamers"), QStringLiteral("conga"),
+        QStringLiteral("stadium"), QStringLiteral("kolo"), QStringLiteral("tram")};
+    return acts;
+}
 bool supportedTheme(const QString& theme)
 {
     static const QStringList themes{QStringLiteral("record"), QStringLiteral("speaker"), QStringLiteral("headphones"),
@@ -42,7 +50,12 @@ public:
         setObjectName(QStringLiteral("partyDance")); setFocusPolicy(Qt::NoFocus);
         setAttribute(Qt::WA_TransparentForMouseEvents); setAttribute(Qt::WA_NoSystemBackground);
         setAutoFillBackground(false); setGeometry(cube->rect()); cube->installEventFilter(this);
-        cycle_ = cube->window()->property("partyDanceCycle").toInt() % 4;
+        cycle_ = std::max(0, cube->window()->property("partyDanceCycle").toInt()) % danceActs().size();
+        const qint64 storedInterval = cube->window()->property("partyDanceFormIntervalMs").toLongLong();
+        if (storedInterval >= 1000 && storedInterval <= 600000) formIntervalMs_ = storedInterval;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        formStartedAt_ = cube->window()->property("partyDanceFormStartedAt").toLongLong();
+        if (formStartedAt_ <= 0 || formStartedAt_ > now) formStartedAt_ = now;
         songKey_ = cube->window()->property("partyDanceSongKey").toString();
         songRevision_ = cube->window()->property("partyDanceSongRevision").toInt();
         const QString automatic = cube->window()->property("partyDanceAutomaticTheme").toString();
@@ -54,7 +67,8 @@ public:
             if (cube->window()->property("partyDanceThemeSource").toString() == QStringLiteral("cue")) themeSource_ = QStringLiteral("cue");
         }
         act_ = cube->window()->property("partyDanceAct").toString();
-        if (act_.isEmpty()) act_ = QStringLiteral("auto");
+        if (act_ != QStringLiteral("auto") && !danceActs().contains(act_)) act_ = QStringLiteral("auto");
+        saveFormCycle();
         clock_.start(); frameClock_.start(); frame_.setInterval(34); frame_.setTimerType(Qt::PreciseTimer);
         connect(&frame_, &QTimer::timeout, this, [this] {
             const double dt = std::clamp(frameClock_.restart() / 1000.0, 0.0, .1);
@@ -69,7 +83,7 @@ public:
             audioError_ = socket_.errorString();
         });
         poll_.setInterval(500);
-        connect(&poll_, &QTimer::timeout, this, [this] { readState(); connectAudio(); });
+        connect(&poll_, &QTimer::timeout, this, [this] { rotateForms(); readState(); connectAudio(); });
         poll_.start(); show(); stackBelowStage();
     }
     ~PartyDance() override { if (cube_) cube_->removeEventFilter(this); socket_.abort(); }
@@ -85,7 +99,13 @@ public:
         }
         if (request.contains(QStringLiteral("act"))) {
             act_ = request.value(QStringLiteral("act")).toString();
+            if (act_ != QStringLiteral("auto")) cycle_ = danceActs().indexOf(act_);
             cube_->window()->setProperty("partyDanceAct", act_);
+        }
+        if (request.contains(QStringLiteral("startAct"))) cycle_ = danceActs().indexOf(request.value(QStringLiteral("startAct")).toString());
+        if (request.contains(QStringLiteral("formSeconds"))) formIntervalMs_ = qRound64(request.value(QStringLiteral("formSeconds")).toDouble() * 1000);
+        if (request.contains(QStringLiteral("act")) || request.contains(QStringLiteral("startAct")) || request.contains(QStringLiteral("formSeconds"))) {
+            formStartedAt_ = QDateTime::currentMSecsSinceEpoch(); saveFormCycle();
         }
         readState(); connectAudio(); stackBelowStage(); update();
     }
@@ -93,6 +113,11 @@ public:
     {
         return {{QStringLiteral("active"), true}, {QStringLiteral("act"), currentAct()},
                 {QStringLiteral("autoActs"), act_ == QStringLiteral("auto")},
+                {QStringLiteral("availableActs"), QJsonArray::fromStringList(danceActs())},
+                {QStringLiteral("formIntervalMs"), formIntervalMs_},
+                {QStringLiteral("nextActAt"), act_ == QStringLiteral("auto") ? formStartedAt_ + formIntervalMs_ : 0},
+                {QStringLiteral("formation"), currentAct() == QStringLiteral("kolo") ? QStringLiteral("closed-ring")
+                    : currentAct() == QStringLiteral("tram") ? QStringLiteral("tram-passengers") : currentAct()},
                 {QStringLiteral("frames"), static_cast<qint64>(frames_)},
                 {QStringLiteral("beats"), static_cast<qint64>(beats_)}, {QStringLiteral("pulse"), pulse_},
                 {QStringLiteral("bpm"), bpm_}, {QStringLiteral("drawMs"), drawMs_},
@@ -122,7 +147,9 @@ protected:
         const double w = width(), h = height(), u = std::min(w / 1440.0, h / 1000.0);
         const double t = clock_.elapsed() / 1000.0;
         if (w < 2 || h < 2) return;
-        if (currentAct() == QStringLiteral("stadium")) drawStadium(p, w, h, u, t);
+        if (currentAct() == QStringLiteral("kolo")) drawKolo(p, w, h, u, t);
+        else if (currentAct() == QStringLiteral("tram")) drawTram(p, w, h, u, t);
+        else if (currentAct() == QStringLiteral("stadium")) drawStadium(p, w, h, u, t);
         else if (currentAct() == QStringLiteral("conga")) drawConga(p, w, h, u, t);
         else if (currentAct() == QStringLiteral("streamers")) drawStreamers(p, w, h, u, t);
         else drawDisco(p, w, h, u, t);
@@ -136,8 +163,24 @@ protected:
 private:
     QString currentAct() const
     {
-        const QString acts[] = {QStringLiteral("disco"), QStringLiteral("streamers"), QStringLiteral("conga"), QStringLiteral("stadium")};
-        return act_ == QStringLiteral("auto") ? acts[cycle_] : act_;
+        return act_ == QStringLiteral("auto") ? danceActs().at(cycle_) : act_;
+    }
+    void saveFormCycle()
+    {
+        cube_->window()->setProperty("partyDanceCycle", cycle_);
+        cube_->window()->setProperty("partyDanceFormStartedAt", formStartedAt_);
+        cube_->window()->setProperty("partyDanceFormIntervalMs", formIntervalMs_);
+    }
+    void rotateForms()
+    {
+        if (act_ != QStringLiteral("auto")) return;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now < formStartedAt_) { formStartedAt_ = now; saveFormCycle(); return; }
+        const qint64 elapsed = (now - formStartedAt_) / formIntervalMs_;
+        if (!elapsed) return;
+        cycle_ = (cycle_ + elapsed % danceActs().size()) % danceActs().size();
+        formStartedAt_ += elapsed * formIntervalMs_;
+        saveFormCycle(); update();
     }
     void stackBelowStage()
     {
@@ -179,11 +222,6 @@ private:
         const auto scene = document.object().value(QStringLiteral("scene")).toObject();
         energy_ = std::clamp(scene.value(QStringLiteral("energy")).toDouble(.7), 0.0, 1.0);
         cool_ = scene.value(QStringLiteral("palette")).toString() == QStringLiteral("ice");
-        const auto anchor = static_cast<qint64>(scene.value(QStringLiteral("audioActStartedAt")).toDouble());
-        if (anchor > 0 && lastAct_ > 0 && anchor != lastAct_) {
-            cycle_ = (cycle_ + 1) % 4; cube_->window()->setProperty("partyDanceCycle", cycle_);
-        }
-        if (anchor > 0) lastAct_ = anchor;
         const auto track = document.object().value(QStringLiteral("nowPlaying")).toObject();
         const QString title = track.value(QStringLiteral("title")).toString();
         if (!title.isEmpty()) {
@@ -445,6 +483,117 @@ private:
             p.restore();
         }
     }
+    void drawKolo(QPainter& p, double w, double h, double u, double t)
+    {
+        struct Dancer { QPointF foot, shoulder; double scale, step, bounce; int id; };
+        std::array<Dancer, 8> dancers;
+        std::array<QPointF, 8> hands;
+        const QPointF center(w * .5, h * .65);
+        const double rx = w * .32, ry = h * .13;
+        p.setBrush(QColor(8, 20, 34, 70)); p.setPen(QPen(opacity(color(0), .26), 3 * u));
+        p.drawEllipse(center + QPointF(0, 9 * u), rx + 35 * u, ry + 20 * u);
+        for (int i = 0; i < 8; ++i) {
+            const double angle = t * .15 + i * 2 * pi / 8, depth = std::sin(angle);
+            const double step = std::sin(t * 3.6 + i * .12), scale = u * (1.40 + .20 * depth);
+            const QPointF foot = center + QPointF(rx * std::cos(angle), ry * depth);
+            const double bounce = (5 * std::abs(step) + 2 * pulse_) * scale;
+            dancers[i] = {foot, foot - QPointF(0, 73 * scale + bounce), scale, step, bounce, i};
+        }
+        for (int i = 0; i < 8; ++i)
+            hands[i] = (dancers[i].shoulder + dancers[(i + 1) % 8].shoulder) * .5 + QPointF(0, -12 * u * std::sin(t * 1.8));
+        // Both neighbouring arms share the same hand point, closing the circle.
+        for (int i = 0; i < 8; ++i) {
+            const auto& d = dancers[i];
+            p.setPen(QPen(opacity(color(i), .95), 6 * u, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            for (const auto& hand : {hands[(i + 7) % 8], hands[i]}) {
+                const double side = hand.x() < d.shoulder.x() ? -1 : 1;
+                const QPointF shoulder = d.shoulder + QPointF(side * 23 * d.scale, 0);
+                p.drawPolyline(QPolygonF{shoulder, (shoulder + hand) * .5 + QPointF(0, 8 * u), hand});
+            }
+            p.setBrush(QColor("#fff1b8")); p.drawEllipse(hands[i], 5 * u, 5 * u);
+        }
+        std::sort(dancers.begin(), dancers.end(), [](const Dancer& a, const Dancer& b) { return a.foot.y() < b.foot.y(); });
+        for (const auto& d : dancers) {
+            const QColor accent = color(d.id);
+            p.save(); p.translate(d.foot); p.scale(d.scale, d.scale);
+            const double bounce = d.bounce / d.scale;
+            p.setPen(Qt::NoPen); p.setBrush(QColor(0, 0, 0, 65)); p.drawEllipse(QRectF(-36, -2, 72, 12));
+            p.setPen(QPen(accent, 5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            for (int side : {-1, 1}) {
+                const double step = side * d.step;
+                const QPointF foot(side * 27 + d.step * 7, -std::max(0.0, step) * 10);
+                p.drawPolyline(QPolygonF{QPointF(side * 13, -34 - bounce), QPointF(side * 21, -17 - step * 5), foot});
+                p.drawLine(foot - QPointF(9, 0), foot + QPointF(9, 0));
+            }
+            p.translate(0, -bounce); p.setBrush(QColor("#0b2033")); p.setPen(QPen(accent, 3.5));
+            p.drawRoundedRect(QRectF(-27, -83, 54, 49), 8, 8);
+            p.drawRoundedRect(QRectF(-34, -128, 68, 37), 10, 10);
+            p.drawLine(QPointF(0, -128), QPointF(0, -143));
+            p.setBrush(accent); p.drawEllipse(QPointF(0, -146), 5, 5);
+            p.setBrush(opacity(accent, .45)); p.drawEllipse(QPointF(0, -59), 15 + pulse_, 15 + pulse_);
+            p.setPen(Qt::NoPen); p.setBrush(QColor("#edffff"));
+            p.drawEllipse(QPointF(-12, -112), 5, 6); p.drawEllipse(QPointF(12, -112), 5, 6);
+            p.setPen(QPen(QColor("#edffff"), 3, Qt::SolidLine, Qt::RoundCap));
+            p.drawArc(QRectF(-10, -111, 20, 16), 205 * 16, 130 * 16);
+            p.restore();
+        }
+    }
+    void drawTram(QPainter& p, double w, double h, double u, double t)
+    {
+        // A travelling city backdrop and one large blue tram, with dancing passengers.
+        for (int building = 0; building < 9; ++building) {
+            const double x = w * (fraction(building / 9.0 - t * .011) * 1.2 - .1);
+            const double height = (125 + (building * 53) % 110) * u, bottom = h * .69;
+            p.setPen(QPen(opacity(color(building), .35), 2 * u));
+            p.setBrush(QColor(15, 34 + building % 3 * 7, 56, 210));
+            p.drawRoundedRect(QRectF(x, bottom - height, w * .12, height), 5 * u, 5 * u);
+            for (int row = 0; row < 4; ++row) for (int col = 0; col < 3; ++col) {
+                p.setPen(Qt::NoPen); p.setBrush(opacity(color(building + row), .28 + .15 * pulse_));
+                p.drawRect(QRectF(x + (15 + col * 27) * u, bottom - height + (20 + row * 35) * u, 13 * u, 20 * u));
+            }
+        }
+        const double rail = h * .79;
+        p.setPen(QPen(QColor("#92b9ca"), 3 * u)); p.drawLine(QPointF(0, rail), QPointF(w, rail));
+        p.drawLine(QPointF(0, rail + 17 * u), QPointF(w, rail + 17 * u));
+        for (int tie = 0; tie < 28; ++tie) {
+            const double x = w * fraction(tie / 28.0 - t * .04);
+            p.setPen(QPen(QColor(72, 93, 108, 150), 4 * u)); p.drawLine(QPointF(x, rail), QPointF(x - 8 * u, rail + 17 * u));
+        }
+        const double tw = w * .79, th = 245 * u;
+        const double x = w * .5 - tw * .5 + w * .065 * std::sin(t * .17);
+        const double y = rail - th - 24 * u + 2 * u * std::sin(t * 4);
+        p.setPen(QPen(QColor("#c5e0ea"), 3 * u));
+        p.drawLine(QPointF(0, y - 65 * u), QPointF(w, y - 65 * u));
+        const double pole = x + tw * .55;
+        p.drawPolyline(QPolygonF{QPointF(pole - 35 * u, y), QPointF(pole + 15 * u, y - 34 * u),
+            QPointF(pole - 20 * u, y - 65 * u), QPointF(pole + 35 * u, y - 65 * u)});
+        for (double fraction : {.16, .25, .72, .81}) {
+            const QPointF axle(x + tw * fraction, y + th + 10 * u);
+            p.setPen(QPen(QColor("#c8e6f3"), 3 * u)); p.setBrush(QColor("#081320")); p.drawEllipse(axle, 25 * u, 25 * u);
+            p.drawLine(axle - QPointF(std::cos(t * 4) * 18 * u, std::sin(t * 4) * 18 * u),
+                       axle + QPointF(std::cos(t * 4) * 18 * u, std::sin(t * 4) * 18 * u));
+        }
+        QLinearGradient body(0, y, 0, y + th); body.setColorAt(0, QColor("#55bfff")); body.setColorAt(1, QColor("#0752b6"));
+        p.setPen(QPen(QColor("#bceeff"), 3 * u)); p.setBrush(body); p.drawRoundedRect(QRectF(x, y, tw, th), 25 * u, 25 * u);
+        const double windowGap = 12 * u, windowWidth = (tw - 38 * u - 5 * windowGap) / 6;
+        for (int passenger = 0; passenger < 6; ++passenger) {
+            const QRectF window(x + 19 * u + passenger * (windowWidth + windowGap), y + 43 * u, windowWidth, 147 * u);
+            p.setPen(QPen(QColor("#c6edff"), 3 * u)); p.setBrush(QColor("#0b243d")); p.drawRoundedRect(window, 10 * u, 10 * u);
+            p.save(); p.setClipRect(window.adjusted(2 * u, 2 * u, -2 * u, -2 * u));
+            drawFan(p, window.center().x(), window.bottom() + 25 * u, u * 1.13,
+                    .6 + .35 * std::sin(t * 2.6 + passenger * .8), passenger, false, 1, t);
+            p.restore();
+        }
+        p.setPen(Qt::NoPen); p.setBrush(QColor("#07263e"));
+        p.drawRoundedRect(QRectF(x + 20 * u, y + 9 * u, tw - 40 * u, 26 * u), 5 * u, 5 * u);
+        QFont font(QStringLiteral("DejaVu Sans")); font.setPixelSize(qRound(18 * u)); font.setBold(true); p.setFont(font);
+        p.setPen(QColor("#ffe59b")); p.drawText(QRectF(x + 30 * u, y + 9 * u, tw - 60 * u, 26 * u),
+                                             Qt::AlignCenter, QStringLiteral("30  LARICS  ·  SLJEDEĆA: REFREN"));
+        p.setPen(QPen(QColor("#e1f7ff"), 3 * u)); p.drawLine(QPointF(x + 16 * u, y + 207 * u), QPointF(x + tw - 16 * u, y + 207 * u));
+        p.setPen(Qt::NoPen); p.setBrush(QColor("#ffe9aa"));
+        p.drawRoundedRect(QRectF(x + tw - 38 * u, y + 215 * u, 24 * u, 12 * u), 4 * u, 4 * u);
+        p.setBrush(QColor("#ff9275")); p.drawRoundedRect(QRectF(x + 14 * u, y + 215 * u, 15 * u, 12 * u), 4 * u, 4 * u);
+    }
     void drawConfetti(QPainter& p, double w, double h, double u, double t)
     {
         p.setPen(Qt::NoPen);
@@ -462,7 +611,7 @@ private:
     QTimer frame_, poll_; QElapsedTimer clock_, frameClock_; QLocalSocket socket_;
     QByteArray buffer_, bytes_; QString stateFile_, socketPath_, audioError_, stateError_, act_, songKey_;
     QString theme_ = QStringLiteral("record"), automaticTheme_ = QStringLiteral("record"), themeSource_ = QStringLiteral("automatic");
-    quint64 frames_ = 0, beats_ = 0; qint64 lastAct_ = 0;
+    quint64 frames_ = 0, beats_ = 0; qint64 formStartedAt_ = 0, formIntervalMs_ = 60000;
     int cycle_ = 0, songRevision_ = 0; double pulse_ = 0, bpm_ = 0, drawMs_ = 0, energy_ = .7; bool cool_ = true;
 };
 
@@ -481,8 +630,17 @@ void run(const RuntimeAgentHost* host)
     if (request.value(QStringLiteral("restore")).toBool()) { release(host); return; }
     if (request.contains(QStringLiteral("act"))) {
         const QString act = request.value(QStringLiteral("act")).toString();
-        if (act != QStringLiteral("auto") && act != QStringLiteral("disco") && act != QStringLiteral("streamers") && act != QStringLiteral("conga") && act != QStringLiteral("stadium")) {
-            host->fail(host->invocation_context, "act must be auto, disco, streamers, conga or stadium"); return;
+        if (act != QStringLiteral("auto") && !danceActs().contains(act)) {
+            host->fail(host->invocation_context, "act must be auto, disco, streamers, conga, stadium, kolo or tram"); return;
+        }
+    }
+    if (request.contains(QStringLiteral("startAct")) && !danceActs().contains(request.value(QStringLiteral("startAct")).toString())) {
+        host->fail(host->invocation_context, "startAct must name a supported dance act"); return;
+    }
+    if (request.contains(QStringLiteral("formSeconds"))) {
+        const auto value = request.value(QStringLiteral("formSeconds")); const double seconds = value.toDouble();
+        if (!value.isDouble() || !std::isfinite(seconds) || seconds < 1 || seconds > 600 || seconds != std::floor(seconds)) {
+            host->fail(host->invocation_context, "formSeconds must be a whole number from 1 to 600"); return;
         }
     }
     if (!dance) {
