@@ -3,8 +3,10 @@
 A local party desk for Spotify, with a native qtra show and a phone-friendly song
 request page. Guests can search the actual Spotify catalogue, request a track,
 add a dedication, vote on the mood, and talk to the live DJ. The native display
-reacts to system audio, changes its geometry, introduces robot deliveries, and
-shows photographs and stories from the LARICS Spomenar.
+reacts to system audio, changes its geometry and introduces robot deliveries.
+Photographs and stories from the LARICS Spomenar are an optional visual source.
+The reusable operator entry is [Virtual DJ](../../virtual-dj/README.md), with
+queue workflows, audience guidance and silent performance rehearsals.
 
 ## Start the party
 
@@ -23,17 +25,22 @@ Press **R** to focus the bottom Magic box, which accepts song searches or messag
 Suggestions float over the conversation without moving it or the composer.
 Selecting a song turns that same box into an optional dedication; Cancel restores
 the search. Enter sends, and Shift+Enter adds a line. The labelled button also
-sends. **Escape** leaves the panel and fullscreen unchanged; **F11** toggles
-fullscreen. A name and song dedication are optional. Read receipts use a grey
-check, and an orange dot identifies a message the DJ is actively handling.
+sends. **Escape** or the small × recalls the latest own message before acceptance;
+another draft is preserved. **F11** toggles fullscreen. A name and song dedication
+are optional. Read receipts and work outcomes are separate: active, waiting,
+blocked, completed and cancelled work have their own indicators.
 
-A nonempty dedication is also spoken briefly in Croatian as its requested song
-starts. The local robot voice is prepared in advance; Spotify keeps playing and
-its stream fades down by 10 dB over half a second, then returns smoothly after
-the line. Speech volume follows the original Spotify stream level and is capped
-below full volume. The mixer accounts for PulseAudio's cubic volume units.
-Speech lasts at most 12 seconds. Long messages remain complete on screen and are
-shortened at word boundaries for speech. Empty dedications stay silent.
+Speech is disabled on new installs until deliberately configured for a session.
+When enabled, a nonempty dedication must be prepared before its exact requested
+occurrence starts. Its lifecycle distinguishes prepared, queued, starting,
+speaking, completed, failed, cancelled and missed work. A missed opening remains
+missed; late synthesis does not revive the old dedication.
+
+The mixer follows the actual Spotify stream, ducks it by 10 dB, and restores its
+owned level after the phrase. Speech volume follows the original stream level
+and is capped below full volume. Speech lasts at most 12 seconds; long messages
+remain complete on screen and are shortened at word boundaries for speech.
+Empty dedications stay silent.
 
 Speech uses `espeak-ng`, `ffmpeg`, `pactl` and `paplay`. On this laptop, the
 matching eSpeak NG command is unpacked under `build/party-audio-deps/` and uses
@@ -45,10 +52,12 @@ The DJ can turn spoken dedications off or on with
 
 The mixer follows the actual native Spotify stream and uses the same audio
 output. A song skip, pause or output change cancels speech and returns the owned
-stream level. If the host changes Spotify's stream volume, that new value takes
-precedence. Speech failures leave the visual dedication in place. A persistent
-occurrence history prevents duplicate speech, including after service restarts;
-the song already playing when the service starts stays silent.
+stream level. A newer host volume change takes precedence. Persistent occurrence
+history prevents duplicate speech across restarts; the song already playing at
+startup stays silent. See [REHEARSAL.md](../../virtual-dj/REHEARSAL.md) for guarded
+logic tests and actual file-only synthesis/mix measurements. Successful process
+completion, waveform quality and an observed audible performance are separate
+results.
 
 ```sh
 python3 tools/party_dj/launch.py status
@@ -65,7 +74,8 @@ alternative state directory and HTTP port.
 
 ### Prerequisites
 
-Spotify should already be playing on the intended desktop device. The service
+Spotify should already be open on the intended desktop device; preserve its
+current play/pause state. The service
 prefers Spotify's own loopback debugging endpoint at port 9224. To enable it,
 quit Spotify normally and reopen it with:
 
@@ -83,7 +93,9 @@ reports `spotify.mode` as `native` or `native-via-web-controller`.
 The controller discovers the running Spotify application's React service
 registry and uses its PlayerAPI. These application internals can change with a
 Spotify update. A failed connection is shown in the guest interface; queued
-requests are retained while the service reconnects.
+requests are retained while the service reconnects. An ordinary observation
+does not create a controller tab. Use the explicit setup procedure in
+[Spotify transport](../../docs/spotify-transport.md) when recovery needs one.
 
 Install Python dependencies into the repository's ignored build directory:
 
@@ -98,7 +110,9 @@ system audio monitor and QtNetwork support.
 
 ## Working the desk
 
-`djctl.py` reads the local admin token and calls the running service. The guest
+`virtual-dj/dj.py` provides fresh status, full queue, guarded ordering, request
+and event-watching workflows. `djctl.py` remains the low-level API entry. Both
+read the local admin token and call the running service. The guest
 page receives the public state and chat only. Reading the event stream or
 sending an admin action records the DJ as present for 90 seconds; a live operator
 should poll regularly. If the operator stops, the interface invites guests to
@@ -121,27 +135,34 @@ changes. A reply can include `readThrough` with the guest chat message ID. Its
 `requestId` makes a repeated submission return the same message. `caption:true`
 also schedules the reply on the native screen.
 
-Mark a guest message while actively handling its request, and clear the marker
-when that work is complete:
+Record what is actually happening to a guest request:
 
 ```sh
-python3 tools/party_dj/djctl.py processing --json '{"messageIds":[93,107],"active":true}'
-python3 tools/party_dj/djctl.py processing --json '{"messageIds":[93],"active":false}'
+python3 virtual-dj/dj.py work active 93 --summary 'Checking the requested transition'
+python3 virtual-dj/dj.py work waiting 93 --summary 'Waiting for native review'
+python3 virtual-dj/dj.py work completed 93 --outcome 'The change is deployed' --evidence 'Actual commit and deployment observation'
 ```
 
-The authenticated `POST /api/admin/processing` accepts the same JSON. Each call
-contains 1–50 positive integer IDs of existing guest messages and an explicit
-boolean `active`. DJ replies and unknown IDs are rejected, and the entire batch
-is validated before any presence, read-receipt or settings change. Duplicate IDs
-are harmless. At most 50 messages can be active at once.
+The authenticated `POST /api/admin/work` accepts `messageIds`, `state`, `summary`,
+`outcome`, `evidence` and optional `leaseSeconds`. The batch is validated before
+any change. `completed` requires an outcome and evidence; `cancelled` requires a
+reason. Durable records survive restart and appear in each chat row's `work`
+and the `dj.messageWork` map, so old displayed messages can update without new
+chat text. Active lease expiry yields `effectiveState:unconfirmed`, retaining
+the stored work. Read receipts, acceptance and completion remain distinct.
 
-Both `/api/chat` and `/api/state` expose the currently active numeric IDs in
-`dj.processingMessageIds`, including chat polls with no new messages. Each active
-mark lasts 15 minutes; another `active:true` call renews only the selected leases.
-The lightweight `processingMessages` settings map survives service restarts.
-Expired marks disappear automatically and are pruned on the next valid update.
-Read receipts and replies leave these markers alone: explicitly clear the IDs
-when the corresponding work has finished.
+The legacy `processing` endpoint remains compatible for explicitly active IDs.
+Clearing its active marker means waiting for a recorded outcome, not completed.
+Legacy markers migrate to waiting; settled terminal work cannot be reactivated
+by a blanket lease renewal. Use the work API for an intentional reopen.
+
+New submissions retain caller-declared `source` (`native`, `web`, `api`, `test`),
+guest ID and actual HTTP peer privately. Public chat exposes safe source labels
+and separate `acceptedAt`/`readAt` timestamps. `virtual-dj/dj.py message-info ID`
+reads the authenticated detail. Explicit test submissions use `role:test` and
+`test_message` events. Legacy origin is unknown. Control-command events record
+dispatch and returned/error outcomes, including the operator label and observed
+occurrence/device; set `--operator` for the current operator.
 
 To request a track as DJ, first search for it, then use its exact returned URI:
 
@@ -149,7 +170,11 @@ To request a track as DJ, first search for it, then use its exact returned URI:
 python3 tools/party_dj/djctl.py request --json '{"requestId":"dj-dino-001","uri":"spotify:track:704GJCYwhZ8w3xsbXXqrMC","requestedBy":"DJ","dedication":"Za ekipu koja je došla samo na jednu."}'
 ```
 
-`next`, `pause` and `resume` control the current Spotify device. Request additions
+`next`, `pause` and `resume` remain low-level controls. The native play/pause
+button uses authenticated `playback` with an explicit desired `paused` boolean,
+`expectedCurrentUid` and `expectedDeviceId`; the bridge rechecks and verifies the
+actual state around one command. The UI never retries an uncertain control.
+Request additions
 append to its explicit queue. Existing Spotify queue entries appear alongside
 guest requests. A guest's repeated click retains the same request ID; active
 requests for the same URI share a queue entry.
@@ -177,7 +202,7 @@ field from the same state file without restarting capture. Start a new act with:
 python3 tools/party_dj/djctl.py scene --json '{"audioStyle":"city","mode":"laser","energy":0.8}'
 ```
 
-City and waterfall alternate every 45 minutes. Their start time persists across
+City and waterfall alternate every 10 minutes. Their start time persists across
 service restarts; palette and energy changes keep the existing schedule. An
 overdue act changes once on recovery. Selecting a different style starts a fresh
 period. Linear acts keep legacy sphere/ribbon geometry off (`effect:0`).
@@ -234,11 +259,13 @@ and `seek` commands; `seek` takes `positionMs`. It starts paused unless
 `autoplay:true` is supplied. Sheets and transport anchors persist in SQLite.
 An invalid replacement leaves the loaded sheet intact.
 
-The renderer receives `status`, `positionMs` and `sampledAt`. Position already
-includes the offset; interpolate from `sampledAt` only while status is `playing`.
+The renderer receives `status`, `positionMs`, `sampledAt`, `clockState` and
+`clockValidUntil`. Position already includes the offset; interpolate only while
+status is `playing`, capping elapsed time at the source observation's fixed
+ten-second deadline. Repeated snapshot reads never extend that deadline.
 The position anchor can be negative before a delayed lyric start; clamp to the
 display range only after interpolation, so the note holds until that start.
-`waiting`, `paused` and `finished` hold the note. Cue text and bounds stay fixed
+`waiting`, `paused`, `held` and `finished` hold the note. Cue text and bounds stay fixed
 while the note and highlight progress through each syllable.
 
 ## State and recovery

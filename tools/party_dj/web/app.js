@@ -130,7 +130,7 @@
     } finally { if (timeout) clearTimeout(timeout); }
   }
   function post(url, body) {
-    return api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    return api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, guestId, source: 'web' }) });
   }
   function queued(uri) {
     if (latestState?.nowPlaying?.requestedUri === uri) return true;
@@ -409,6 +409,17 @@
     elements['chat-new'].hidden = true;
     elements['chat-unread'].hidden = true;
   }
+  function paintDelivery(entry) {
+    const work = entry.message.work;
+    const labels = { active: 'DJ is working on this', waiting: 'Waiting', blocked: 'Blocked',
+      completed: 'Completed', cancelled: 'Cancelled', unconfirmed: 'Work status needs confirmation' };
+    const parts = [];
+    if (entry.status === 'read') parts.push('Read by DJ');
+    if (work && labels[work.effectiveState || work.state]) parts.push(labels[work.effectiveState || work.state]);
+    const node = entry.node.querySelector('.chat-delivery');
+    node.textContent = parts.join(' · ');
+    node.title = work ? [work.summary, work.outcome, ...(Array.isArray(work.evidence) ? work.evidence : [])].filter(Boolean).join('\n') : '';
+  }
   function appendMessages(messages, own = false) {
     const log = elements['chat-log'];
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 75;
@@ -418,16 +429,16 @@
       const key = String(message.id);
       if (chatMessages.has(key)) {
         const old = chatMessages.get(key);
-        if (message.status && old.status !== message.status) {
-          old.status = message.status;
-          old.node.querySelector('.chat-delivery').textContent = message.status === 'read' ? 'Read by DJ' : '';
-        }
+        old.message = { ...old.message, ...message };
+        old.status = old.message.status;
+        paintDelivery(old);
         continue;
       }
       const assistant = message.role === 'assistant';
+      const testing = message.isTest || message.role === 'test';
       const bubble = textNode('article', 'chat-bubble ' + (assistant ? 'chat-dj' : 'chat-guest'), '');
       const meta = textNode('div', 'chat-meta', '');
-      meta.append(textNode('strong', '', assistant ? (message.name || 'Your DJ') : (message.name || 'Guest')));
+      meta.append(textNode('strong', '', (testing ? 'Test · ' : '') + (assistant ? (message.name || 'Your DJ') : (message.name || 'Guest'))));
       meta.append(textNode('time', '', chatTime(message.createdAt)));
       bubble.append(meta, textNode('p', 'chat-text', message.text || ''));
       bubble.append(textNode('span', 'chat-delivery', message.status === 'read' ? 'Read by DJ' : ''));
@@ -440,7 +451,9 @@
         .sort((a, b) => a.stamp - b.stamp || a.order - b.order)[0];
       if (next) log.insertBefore(bubble, next.node);
       else log.append(bubble);
-      chatMessages.set(key, { node: bubble, status: message.status, stamp, order });
+      const entry = { node: bubble, message, status: message.status, stamp, order };
+      chatMessages.set(key, entry);
+      paintDelivery(entry);
       added = true;
     }
     elements['chat-empty'].hidden = chatMessages.size > 0;
@@ -450,6 +463,12 @@
     }
   }
   function paintPresence(dj) {
+    if (dj?.messageWork && typeof dj.messageWork === 'object') {
+      for (const [id, work] of Object.entries(dj.messageWork)) {
+        const entry = chatMessages.get(String(id));
+        if (entry) { entry.message.work = work; paintDelivery(entry); }
+      }
+    }
     let lastSeen = dj?.lastSeen;
     if (typeof lastSeen === 'number' && lastSeen < 1e12) lastSeen *= 1000;
     const stamp = typeof lastSeen === 'number' ? lastSeen : Date.parse(lastSeen || '');
@@ -465,6 +484,10 @@
     chatPending = true;
     try {
       const reply = await api('/api/chat' + (chatCursor ? '?after=' + encodeURIComponent(chatCursor) : ''));
+      for (const id of Array.isArray(reply.withdrawnMessageIds) ? reply.withdrawnMessageIds : []) {
+        const key = String(id), entry = chatMessages.get(key);
+        if (entry) { entry.node.remove(); chatMessages.delete(key); }
+      }
       const messages = Array.isArray(reply.messages) ? reply.messages : [];
       appendMessages(messages);
       const last = messages[messages.length - 1];

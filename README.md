@@ -6,6 +6,9 @@ with a rotating OpenGL cube; an in-process agent listens on a user-only Unix
 socket and lets you inspect the object tree, drive widgets, load compiled C++
 into the process, and replace a function in the running binary.
 
+The [Virtual DJ](virtual-dj/README.md) uses this runtime for a Spotify request
+desk, reactive stage, queue tools and silent karaoke/dedication rehearsals.
+
 This is not a production debugger or a security boundary. Its operating
 principle is: **correct native code can do almost anything; incorrect native
 code may corrupt or crash the process.**
