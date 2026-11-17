@@ -5,10 +5,14 @@ import concurrent.futures
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+import urllib.error
+import urllib.request
 
 import server
 from test_karaoke import sheet as karaoke_sheet
@@ -345,6 +349,146 @@ class PartyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.party.message({'requestId': 'too-long', 'text': words + 'x'})
         self.assertEqual(len(self.party.chat()['messages']), 1)
+
+    def guest_messages(self, count):
+        return [self.party.message({'requestId': f'guest-processing-{index}',
+                'text': f'Guest request {index}'})['message']['id'] for index in range(count)]
+
+    def test_processing_leases_renew_selected_ids_and_expire_independently(self):
+        first, second = self.guest_messages(2)
+        started = self.stamp
+        result = self.party.admin('processing', {'messageIds': [second, first, first], 'active': True})
+        self.assertEqual(result['dj']['processingMessageIds'], [first, second])
+        published = json.loads((self.party.data / 'state.json').read_text())
+        self.assertEqual(published['dj']['processingMessageIds'], [first, second])
+        self.assertTrue(all(m['status'] == 'delivered' for m in self.party.chat()['messages']))
+        self.stamp += server.PROCESSING_LEASE_MS // 2
+        self.party.admin('processing', {'messageIds': [first], 'active': True})
+        saved = self.party.setting('processingMessages')
+        self.assertEqual(saved[str(first)], self.stamp + server.PROCESSING_LEASE_MS)
+        self.assertEqual(saved[str(second)], started + server.PROCESSING_LEASE_MS)
+        self.stamp = started + server.PROCESSING_LEASE_MS
+        self.assertEqual(self.party.chat()['dj']['processingMessageIds'], [first])
+        self.party.admin('reply', {'text': 'The request is being handled.', 'readThrough': second})
+        self.assertEqual(self.party.chat()['dj']['processingMessageIds'], [first])
+        for unused in range(2):
+            result = self.party.admin('processing', {'messageIds': [first], 'active': False})
+            self.assertEqual(result['dj']['processingMessageIds'], [])
+        self.assertEqual(self.party.setting('processingMessages'), {})
+
+    def test_processing_leases_survive_restart_and_expire_without_an_admin_write(self):
+        message_id = self.guest_messages(1)[0]
+        self.party.admin('processing', {'messageIds': [message_id], 'active': True})
+        expires = self.stamp + server.PROCESSING_LEASE_MS
+        self.stamp += 1000
+        reopened = server.Party(self.party.data, client=self.client)
+        self.addCleanup(reopened.db.close)
+        self.assertEqual(reopened.chat()['dj']['processingMessageIds'], [message_id])
+        self.stamp = expires - 1
+        self.assertEqual(reopened.snapshot()['dj']['processingMessageIds'], [message_id])
+        self.stamp = expires
+        self.assertEqual(reopened.chat()['dj']['processingMessageIds'], [])
+        self.assertEqual(reopened.snapshot()['dj']['processingMessageIds'], [])
+
+    def test_invalid_processing_batch_changes_no_receipt_presence_or_settings(self):
+        first, second = self.guest_messages(2)
+        reply_id = self.party.message({'text': 'A DJ reply'}, role='assistant')['message']['id']
+        self.party.admin('processing', {'messageIds': [first], 'active': True})
+        def unchanged_state():
+            return (self.party.processing_messages.copy(), self.party.setting('processingMessages'),
+                    self.party.last_seen, self.party.revision,
+                    (self.party.data / 'state.json').read_bytes(),
+                    [tuple(row) for row in self.party.db.execute('SELECT id,read_at FROM chat ORDER BY id')])
+        before = unchanged_state()
+        self.stamp += 1000
+        invalid = [
+            {'messageIds': [second, reply_id + 1], 'active': True},
+            {'messageIds': [reply_id], 'active': True},
+            {'messageIds': [str(second)], 'active': True},
+            {'messageIds': [True], 'active': True},
+            {'messageIds': [float(second)], 'active': True},
+            {'messageIds': [0], 'active': True},
+            {'messageIds': [-1], 'active': True},
+            {'messageIds': [2**63], 'active': True},
+            {'messageIds': [], 'active': True},
+            {'messageIds': [second] * (server.PROCESSING_LIMIT + 1), 'active': True},
+            {'messageIds': second, 'active': True},
+            {'messageIds': [second]},
+            {'messageIds': [second], 'active': 1},
+            {'active': False},
+        ]
+        for body in invalid:
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    self.party.admin('processing', {**body, 'readThrough': second})
+                self.assertEqual(unchanged_state(), before)
+
+    def test_processing_capacity_rejects_overflow_then_prunes_expired_leases(self):
+        identifiers = self.guest_messages(server.PROCESSING_LIMIT + 1)
+        self.party.admin('processing', {'messageIds': identifiers[:-1], 'active': True})
+        saved = self.party.setting('processingMessages')
+        last_seen = self.party.last_seen
+        self.stamp += 1000
+        with self.assertRaises(ValueError):
+            self.party.admin('processing', {'messageIds': [identifiers[-1]], 'active': True,
+                                            'readThrough': identifiers[-1]})
+        self.assertEqual(self.party.setting('processingMessages'), saved)
+        self.assertEqual(self.party.last_seen, last_seen)
+        self.assertTrue(all(m['status'] == 'delivered' for m in self.party.chat()['messages']))
+        self.stamp += server.PROCESSING_LEASE_MS
+        result = self.party.admin('processing', {'messageIds': [identifiers[-1]], 'active': True})
+        self.assertEqual(result['dj']['processingMessageIds'], [identifiers[-1]])
+        self.assertEqual(len(self.party.setting('processingMessages')), 1)
+
+    def test_processing_http_requires_admin_and_cli_updates_an_empty_chat_poll(self):
+        message_id = self.guest_messages(1)[0]
+        class QuietHandler(server.Handler):
+            def log_message(self, *args):
+                pass
+        http = server.ThreadingHTTPServer(('127.0.0.1', 0), QuietHandler)
+        http.party = self.party
+        http.daemon_threads = True
+        worker = threading.Thread(target=lambda: http.serve_forever(poll_interval=.05), daemon=True)
+        worker.start()
+        base = f'http://127.0.0.1:{http.server_port}'
+        def request(path, body=None, token=None):
+            headers = {'Content-Type': 'application/json'}
+            if token:
+                headers['Authorization'] = 'Bearer ' + token
+            data = None if body is None else json.dumps(body).encode()
+            try:
+                response = urllib.request.urlopen(urllib.request.Request(base + path, data, headers), timeout=5)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                return response.status, json.load(response)
+        try:
+            body = {'messageIds': [message_id], 'active': True}
+            status, unused = request('/api/admin/processing', body)
+            self.assertEqual(status, 401)
+            self.assertEqual(self.party.last_seen, 0)
+            self.assertEqual(self.party.chat()['dj']['processingMessageIds'], [])
+            command = subprocess.run([sys.executable, str(server.ROOT / 'djctl.py'), 'processing',
+                '--json', json.dumps(body), '--url', base, '--data', str(self.party.data)],
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(command.returncode, 0, command.stderr)
+            self.assertEqual(json.loads(command.stdout)['dj']['processingMessageIds'], [message_id])
+            status, chat = request(f'/api/chat?after={message_id}')
+            self.assertEqual(status, 200)
+            self.assertEqual(chat['messages'], [])
+            self.assertEqual(chat['dj']['processingMessageIds'], [message_id])
+            status, unused = request('/api/admin/processing',
+                {'messageIds': [message_id, message_id + 1], 'active': False}, self.party.admin_token)
+            self.assertEqual(status, 400)
+            self.assertEqual(self.party.chat()['dj']['processingMessageIds'], [message_id])
+            status, cleared = request('/api/admin/processing',
+                {'messageIds': [message_id], 'active': False}, self.party.admin_token)
+            self.assertEqual(status, 200)
+            self.assertEqual(cleared['dj']['processingMessageIds'], [])
+        finally:
+            http.shutdown()
+            http.server_close()
+            worker.join(timeout=2)
 
 
 if __name__ == '__main__':

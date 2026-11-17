@@ -120,6 +120,28 @@ changes. A reply can include `readThrough` with the guest chat message ID. Its
 `requestId` makes a repeated submission return the same message. `caption:true`
 also schedules the reply on the native screen.
 
+Mark a guest message while actively handling its request, and clear the marker
+when that work is complete:
+
+```sh
+python3 tools/party_dj/djctl.py processing --json '{"messageIds":[93,107],"active":true}'
+python3 tools/party_dj/djctl.py processing --json '{"messageIds":[93],"active":false}'
+```
+
+The authenticated `POST /api/admin/processing` accepts the same JSON. Each call
+contains 1–50 positive integer IDs of existing guest messages and an explicit
+boolean `active`. DJ replies and unknown IDs are rejected, and the entire batch
+is validated before any presence, read-receipt or settings change. Duplicate IDs
+are harmless. At most 50 messages can be active at once.
+
+Both `/api/chat` and `/api/state` expose the currently active numeric IDs in
+`dj.processingMessageIds`, including chat polls with no new messages. Each active
+mark lasts 15 minutes; another `active:true` call renews only the selected leases.
+The lightweight `processingMessages` settings map survives service restarts.
+Expired marks disappear automatically and are pruned on the next valid update.
+Read receipts and replies leave these markers alone: explicitly clear the IDs
+when the corresponding work has finished.
+
 To request a track as DJ, first search for it, then use its exact returned URI:
 
 ```sh

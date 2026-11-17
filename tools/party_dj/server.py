@@ -31,6 +31,8 @@ MOODS = {'chill': ('Lagano', .22), 'groove': ('Groove', .48),
 TRACK = re.compile(r'^spotify:track:[A-Za-z0-9]{22}$')
 AUDIO_STYLES = ('ring', 'city', 'waterfall')
 AUDIO_ACT_MS = 45 * 60 * 1000
+PROCESSING_LEASE_MS = 15 * 60 * 1000
+PROCESSING_LIMIT = 50
 
 
 def now_ms():
@@ -90,6 +92,7 @@ class Party:
         self.spotify = {'connected': False, 'error': 'Connecting to Spotify.'}
         self.revision = 0
         self.last_seen = 0
+        self.processing_messages = self.setting('processingMessages', {})
         self.last_track = ''
         self.missing_requests = {}
         self.next_dispatch_at = 0
@@ -192,8 +195,40 @@ class Party:
                 'status': 'read' if row['read_at'] else 'delivered'}
 
     def _dj(self):
-        age = now_ms() - self.last_seen
-        return {'status': 'listening' if age < 90000 else 'away', 'lastSeen': self.last_seen}
+        stamp = now_ms()
+        age = stamp - self.last_seen
+        return {'status': 'listening' if age < 90000 else 'away', 'lastSeen': self.last_seen,
+                'processingMessageIds': sorted(int(key) for key in self._active_processing(stamp))}
+
+    def _active_processing(self, stamp):
+        return {key: expires for key, expires in self.processing_messages.items() if expires > stamp}
+
+    def _prepare_processing(self, body):
+        """Validate the complete batch before any admin side effect."""
+        identifiers = body.get('messageIds')
+        if not isinstance(identifiers, list) or not 1 <= len(identifiers) <= PROCESSING_LIMIT:
+            raise ValueError(f'messageIds must contain 1 to {PROCESSING_LIMIT} guest message IDs.')
+        if any(type(value) is not int or not 0 < value <= 2**53 - 1 for value in identifiers):
+            raise ValueError('messageIds must contain positive integer guest message IDs.')
+        active = body.get('active')
+        if type(active) is not bool:
+            raise ValueError('active must be true or false.')
+        identifiers = sorted(set(identifiers))
+        placeholders = ','.join('?' for unused in identifiers)
+        found = {row[0] for row in self.db.execute(
+            f"SELECT id FROM chat WHERE role='user' AND id IN ({placeholders})", identifiers)}
+        if found != set(identifiers):
+            raise ValueError('Choose existing guest message IDs; DJ replies cannot be marked processing.')
+        stamp = now_ms()
+        updated = self._active_processing(stamp)
+        for identifier in identifiers:
+            if active:
+                updated[str(identifier)] = stamp + PROCESSING_LEASE_MS
+            else:
+                updated.pop(str(identifier), None)
+        if len(updated) > PROCESSING_LIMIT:
+            raise ValueError(f'At most {PROCESSING_LIMIT} guest messages can be processing at once.')
+        return updated
 
     def _mood(self):
         active = [m for m, stamp in self.mood_votes.values() if now_ms() - stamp < 20 * 60000]
@@ -414,12 +449,19 @@ class Party:
 
     def admin(self, action, body):
         with self.lock:
-            self.last_seen = now_ms()
+            processing = self._prepare_processing(body) if action == 'processing' else None
             read_through = body.get('readThrough')
             if read_through is not None:
-                self.db.execute('UPDATE chat SET read_at=? WHERE role=? AND id<=?', (now_ms(), 'user', int(read_through)))
+                read_through = int(read_through)
+            self.last_seen = now_ms()
+            if read_through is not None:
+                self.db.execute('UPDATE chat SET read_at=? WHERE role=? AND id<=?', (now_ms(), 'user', read_through))
                 self.db.commit()
             if action == 'heartbeat':
+                result = {'dj': self._dj()}
+            elif action == 'processing':
+                self.set_setting('processingMessages', processing)
+                self.processing_messages = processing
                 result = {'dj': self._dj()}
             elif action == 'reply':
                 result = self.message(body, 'assistant')
