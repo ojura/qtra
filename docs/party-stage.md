@@ -89,6 +89,8 @@ Qt's `plainText` property.
   Spotify's managed windows; other applications retain their own Tab behavior.
   Closing or relaunching Spotify refreshes those bindings. Switching windows
   leaves the track, queue and volume alone.
+  A permanent cyan **Tab: qtra ↔ Spotify** hint appears below the Magic box in
+  its fixed help row, including while a song is selected.
 - The native request and chat panel stays open. Click **Zatraži pjesmu · R**, or
   press **R**, to focus its bottom **Magic box**, which accepts a song, artist, or a
   message to the DJ. Typing shows debounced results above it; **Pošalji poruku (Enter)** always
@@ -154,6 +156,11 @@ error in its runtime status. It reads at most 1 MiB.
 stage's embellishments every 85 seconds. The service can select a mode at any time.
 Energy changes the strength of the extra light effects. `palette:"ice"` changes
 the main accent to cyan; other values use warm orange.
+
+The service alternates `scene.audioStyle` between `city` and `waterfall` every
+ten minutes. Palette and energy changes retain the current act's timer. Book
+photos rotate independently about every 105 seconds; curated visual refreshes
+follow the guests' mood and requests.
 
 `scene.graphicsScale` defaults to 1. It scales the robot fleet and delivered
 records immediately; 1.5 makes them fifty percent larger. The stage reports the

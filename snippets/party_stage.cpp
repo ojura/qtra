@@ -292,7 +292,7 @@ public:
         message_->installEventFilter(this);
         message_->setFixedHeight(178); layout->addWidget(message_);
         magicHelp_ = new QLabel(body); magicHelp_->setObjectName(QStringLiteral("partyMagicHelp"));
-        magicHelp_->setWordWrap(true); magicHelp_->setTextFormat(Qt::PlainText); magicHelp_->setFixedHeight(73);
+        magicHelp_->setWordWrap(true); magicHelp_->setTextFormat(Qt::RichText); magicHelp_->setFixedHeight(73);
         magicHelp_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); layout->addWidget(magicHelp_);
         send_ = new QPushButton(QStringLiteral("Pošalji poruku (Enter)"), body); send_->setObjectName(QStringLiteral("partySendButton")); layout->addWidget(send_);
         searchDelay_.setSingleShot(true); searchDelay_.setInterval(330);
@@ -458,8 +458,7 @@ private:
         const bool song = !selectedTrack_.isEmpty();
         message_->setPlaceholderText(song ? QStringLiteral("Posveta uz pjesmu (po želji)…")
                                          : QStringLiteral("Magic box: pjesma, izvođač ili poruka DJ-u…"));
-        magicHelp_->setText(song ? QStringLiteral("Posveta uz pjesmu (po želji).\nEnter šalje · Shift+Enter: novi red")
-                                : QStringLiteral("Odaberi pjesmu ili piši DJ-u.\nEnter: slanje · Shift+Enter: novi red"));
+        magicHelp_->setText(QStringLiteral("<b style=\"color:#7de4ed\">Tab: qtra ↔ Spotify</b><br>Shift+Enter: novi red"));
         send_->setText(song ? QStringLiteral("Pošalji pjesmu (Enter)") : QStringLiteral("Pošalji poruku (Enter)"));
         const bool busy = requestBusy_ || messageBusy_;
         send_->setEnabled(!busy && (song || !message_->toPlainText().trimmed().isEmpty()));
