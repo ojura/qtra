@@ -131,6 +131,11 @@ class PartyDance(unittest.TestCase):
         self.stage.eventually(lambda: self.run_dance()["beats"] == 8, "beat stream did not recover")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".streamers.png")))
+        self.stage.state["scene"]["audioActStartedAt"] += 600000
+        self.stage.write_state()
+        self.stage.eventually(lambda: self.run_dance()["act"] == "conga", "third act did not start")
+        if capture:
+            self.stage.run_stage(capture=str(Path(capture).with_suffix(".conga.png")))
         after = self.stage.run_stage(getComposerDraft=True)
         self.assertEqual(after["composerDraft"], original["composerDraft"])
         self.assertEqual(self.stage.magic_bounds(), original_bounds)
@@ -140,7 +145,10 @@ class PartyDance(unittest.TestCase):
             self.client.request("object.get", {"objectName": "partyDance", "property": "width"})
         self.assertEqual(self.stage.run_stage(getComposerDraft=True)["composerDraft"], original["composerDraft"])
         reloaded = self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path)
-        self.assertEqual(reloaded["act"], "streamers")
+        self.assertEqual(reloaded["act"], "conga")
+        self.stage.state["scene"]["audioActStartedAt"] += 600000
+        self.stage.write_state()
+        self.stage.eventually(lambda: self.run_dance()["act"] == "disco", "three-act cycle did not wrap")
         self.run_dance(restore=True)
 
 

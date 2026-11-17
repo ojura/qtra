@@ -240,7 +240,9 @@ on the test's private X display. Set
 layer beneath the stage. It follows the free main pane's bounds, leaving the
 permanent guest panel, captions and robot fleet in place. The first act combines
 a faceted disco ball, a perspective neon floor, slowly sweeping lights and up to
-48 confetti pieces. The alternate act uses flowing ribbons and orbiting records.
+48 confetti pieces. The second act uses flowing ribbons and orbiting records.
+The third adds a ten-robot conga line led by a smiling vinyl record in a party
+hat; speaker bodies, antennae, arms and legs dance along a winding floor trail.
 
 The launcher loads it with `stateFile` and `agentSocket`. One asynchronous local
 socket subscribes to the existing `audio.beat` events; the module never opens an
@@ -250,8 +252,9 @@ and stops while the window is hidden. No full-screen flashes or blur passes are
 used. Status reports frames, received beats, connection state and paint time.
 
 `act:"auto"` advances the choreography when the service's ten-minute
-`scene.audioActStartedAt` anchor changes. `act:"disco"` and `act:"streamers"`
-select an act explicitly. Releasing or hot-reloading this module affects only
+`scene.audioActStartedAt` anchor changes, cycling through disco, streamers and
+conga. `act:"disco"`, `act:"streamers"` and `act:"conga"` select an act explicitly.
+Releasing or hot-reloading this module affects only
 its layer, timers and event connection; the audio and request-panel modules stay
 running. Use the GUI executor. The current choice survives a module reload in
 the host window's properties.

@@ -33,7 +33,7 @@ public:
         setObjectName(QStringLiteral("partyDance")); setFocusPolicy(Qt::NoFocus);
         setAttribute(Qt::WA_TransparentForMouseEvents); setAttribute(Qt::WA_NoSystemBackground);
         setAutoFillBackground(false); setGeometry(cube->rect()); cube->installEventFilter(this);
-        cycle_ = cube->window()->property("partyDanceCycle").toInt() % 2;
+        cycle_ = cube->window()->property("partyDanceCycle").toInt() % 3;
         act_ = cube->window()->property("partyDanceAct").toString();
         if (act_.isEmpty()) act_ = QStringLiteral("auto");
         clock_.start(); frameClock_.start(); frame_.setInterval(34); frame_.setTimerType(Qt::PreciseTimer);
@@ -100,13 +100,18 @@ protected:
         const double w = width(), h = height(), u = std::min(w / 1440.0, h / 1000.0);
         const double t = clock_.elapsed() / 1000.0;
         if (w < 2 || h < 2) return;
-        if (currentAct() == QStringLiteral("streamers")) drawStreamers(p, w, h, u, t);
+        if (currentAct() == QStringLiteral("conga")) drawConga(p, w, h, u, t);
+        else if (currentAct() == QStringLiteral("streamers")) drawStreamers(p, w, h, u, t);
         else drawDisco(p, w, h, u, t);
         drawConfetti(p, w, h, u, t);
         ++frames_; drawMs_ = work.nsecsElapsed() / 1000000.0;
     }
 private:
-    QString currentAct() const { return act_ == QStringLiteral("auto") ? (cycle_ ? QStringLiteral("streamers") : QStringLiteral("disco")) : act_; }
+    QString currentAct() const
+    {
+        const QString acts[] = {QStringLiteral("disco"), QStringLiteral("streamers"), QStringLiteral("conga")};
+        return act_ == QStringLiteral("auto") ? acts[cycle_] : act_;
+    }
     void stackBelowStage()
     {
         if (cube_) if (auto* stage = cube_->findChild<QWidget*>(QStringLiteral("partyStage"), Qt::FindDirectChildrenOnly)) stackUnder(stage);
@@ -149,7 +154,7 @@ private:
         cool_ = scene.value(QStringLiteral("palette")).toString() == QStringLiteral("ice");
         const auto anchor = static_cast<qint64>(scene.value(QStringLiteral("audioActStartedAt")).toDouble());
         if (anchor > 0 && lastAct_ > 0 && anchor != lastAct_) {
-            cycle_ = (cycle_ + 1) % 2; cube_->window()->setProperty("partyDanceCycle", cycle_);
+            cycle_ = (cycle_ + 1) % 3; cube_->window()->setProperty("partyDanceCycle", cycle_);
         }
         if (anchor > 0) lastAct_ = anchor;
     }
@@ -223,6 +228,63 @@ private:
             p.setBrush(QColor("#101522")); p.drawEllipse(center, 3 * u, 3 * u);
         }
     }
+    void drawConga(QPainter& p, double w, double h, double u, double t)
+    {
+        QPainterPath trail;
+        for (int point = 0; point <= 64; ++point) {
+            const double x = point / 64.0;
+            const double y = h * (.63 + .07 * std::sin((x + .15) / 1.3 * 2 * pi + t * .20));
+            point ? trail.lineTo(x * w, y + 8 * u) : trail.moveTo(x * w, y + 8 * u);
+        }
+        p.setBrush(Qt::NoBrush); p.setPen(QPen(opacity(color(0), .23), 2 * u, Qt::DashLine)); p.drawPath(trail);
+        for (int robot = 9; robot >= 0; --robot) {
+            const double progress = fraction(.8 + t * .018 - robot * .07);
+            const double x = w * (progress * 1.3 - .15);
+            const double y = h * (.63 + .07 * std::sin(progress * 2 * pi + t * .20));
+            const double gait = std::sin(t * 3.2 - robot * .64);
+            const double bounce = 4 * std::abs(gait) + 2 * pulse_;
+            const QColor accent = color(robot);
+            p.save(); p.translate(x, y); p.scale(u, u);
+            p.setPen(Qt::NoPen); p.setBrush(QColor(0, 0, 0, 70)); p.drawEllipse(QRectF(-38, -1, 76, 10));
+            p.setPen(QPen(opacity(accent, .88), 6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            for (int side : {-1, 1}) {
+                const double step = side * gait;
+                const QPointF hip(side * 13, -36 - bounce);
+                const QPointF knee(side * (20 + 6 * step), -17 - 3 * step);
+                const QPointF foot(side * (22 - 7 * step), -2 - std::max(0.0, step) * 8);
+                p.drawPolyline(QPolygonF{hip, knee, foot});
+                p.drawLine(foot - QPointF(7, 0), foot + QPointF(9, 0));
+                const QPointF shoulder(side * 24, -75 - bounce);
+                const QPointF elbow(side * 41, -69 - bounce + 9 * step);
+                const bool waving = robot % 3 == 1 && side == -1;
+                const QPointF hand(side * 59, (waving ? -116 : -82) - bounce + 5 * step);
+                p.drawPolyline(QPolygonF{shoulder, elbow, hand});
+                p.setBrush(opacity(accent, .95)); p.drawEllipse(hand, 5, 5);
+            }
+            p.translate(0, -bounce);
+            p.setPen(QPen(opacity(accent, .9), 2.5)); p.setBrush(QColor(13, 22, 36, 235));
+            p.drawRoundedRect(QRectF(-25, -88, 50, 53), 9, 9);
+            p.setBrush(opacity(accent, .15)); p.drawEllipse(QPointF(0, -61), 16, 16);
+            p.setBrush(opacity(accent, .65)); p.drawEllipse(QPointF(0, -61), 6 + 2 * pulse_, 6 + 2 * pulse_);
+            if (robot == 0) {
+                p.setBrush(QColor(8, 13, 25, 245)); p.drawEllipse(QPointF(0, -113), 34, 34);
+                p.setBrush(Qt::NoBrush); p.setPen(QPen(opacity(accent, .35), 1));
+                for (int ring = 0; ring < 3; ++ring) p.drawEllipse(QPointF(0, -113), 20 + ring * 4, 20 + ring * 4);
+                p.setPen(Qt::NoPen); p.setBrush(color(1)); p.drawEllipse(QPointF(0, -113), 14, 14);
+                p.setBrush(color(2)); p.drawPolygon(QPolygonF{QPointF(-13, -146), QPointF(0, -169), QPointF(13, -146)});
+            } else {
+                p.setPen(QPen(opacity(accent, .9), 2.5)); p.setBrush(QColor(13, 22, 36, 245));
+                p.drawRoundedRect(QRectF(-30, -132, 60, 39), 10, 10);
+                p.drawLine(QPointF(0, -132), QPointF(5 * gait, -145));
+                p.setBrush(accent); p.drawEllipse(QPointF(5 * gait, -148), 4, 4);
+            }
+            p.setPen(Qt::NoPen); p.setBrush(QColor("#ccfbff"));
+            p.drawEllipse(QPointF(-11, -115), 4, 6); p.drawEllipse(QPointF(11, -115), 4, 6);
+            p.setBrush(Qt::NoBrush); p.setPen(QPen(QColor("#ccfbff"), 2));
+            p.drawArc(QRectF(-8, -115, 16, 16), 205 * 16, 130 * 16);
+            p.restore();
+        }
+    }
     void drawConfetti(QPainter& p, double w, double h, double u, double t)
     {
         p.setPen(Qt::NoPen);
@@ -258,8 +320,8 @@ void run(const RuntimeAgentHost* host)
     if (request.value(QStringLiteral("restore")).toBool()) { release(host); return; }
     if (request.contains(QStringLiteral("act"))) {
         const QString act = request.value(QStringLiteral("act")).toString();
-        if (act != QStringLiteral("auto") && act != QStringLiteral("disco") && act != QStringLiteral("streamers")) {
-            host->fail(host->invocation_context, "act must be auto, disco or streamers"); return;
+        if (act != QStringLiteral("auto") && act != QStringLiteral("disco") && act != QStringLiteral("streamers") && act != QStringLiteral("conga")) {
+            host->fail(host->invocation_context, "act must be auto, disco, streamers or conga"); return;
         }
     }
     if (!dance) {
