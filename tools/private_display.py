@@ -43,9 +43,10 @@ def can_draw() -> bool:
 class OwnDisplay:
     """An Xvfb server this process starts, owns, and stops."""
 
-    def __init__(self) -> None:
+    def __init__(self, screen: str = "1280x800x24") -> None:
         self.number: str | None = None
         self.server: subprocess.Popen | None = None
+        self.screen = screen
 
     def start(self) -> str | None:
         """Returns the display to use, or None if there is none to be had.
@@ -73,7 +74,7 @@ class OwnDisplay:
         readable, writable = os.pipe()
         try:
             self.server = subprocess.Popen(
-                ["Xvfb", "-displayfd", str(writable), "-screen", "0", "1280x800x24",
+                ["Xvfb", "-displayfd", str(writable), "-screen", "0", self.screen,
                  "+extension", "GLX", "+render", "-noreset"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

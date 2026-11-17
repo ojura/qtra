@@ -269,7 +269,9 @@ class PartyStage(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="qtra-party-")
         self.addCleanup(self.directory.cleanup)
         self.folder = Path(self.directory.name)
-        self.display = OwnDisplay()
+        # Match the laptop's physical screen: pointer tests must not target an
+        # enlarged qtra window outside a smaller Xvfb viewport.
+        self.display = OwnDisplay(screen="2560x1600x24")
         self.assertIsNotNone(self.display.start())
         self.addCleanup(self.display.stop)
         self.assertIsNotNone(self.display.server)
@@ -434,11 +436,172 @@ class PartyStage(unittest.TestCase):
             try:
                 item = image.contents
                 return {"width": item.width, "height": item.height,
+                        "hotspot": [item.xhot, item.yhot],
                         "opaque": sum((item.pixels[i] >> 24) & 255 > 0 for i in range(item.width * item.height))}
             finally:
                 x11.XFree(image)
         finally:
             x11.XCloseDisplay(display)
+
+    def test_cursor_scope_covers_tooltips_dynamic_roles_and_release(self):
+        # All pointer input stays on the fixture-owned Xvfb/PID, including a real
+        # Qt tooltip surface; observe the native bitmap rather than a QCursor cache.
+        windows = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--pid", str(self.process.pid)],
+                                          env=self.environment, text=True).splitlines()
+        self.assertTrue(windows)
+        window = windows[-1]
+        subprocess.run(["xdotool", "windowsize", "--sync", window, "2200", "1400"],
+                       env=self.environment, check=True)
+        subprocess.run(["xdotool", "mousemove", "--sync", "--window", window, "400", "400"],
+                       env=self.environment, check=True)
+        baseline = self.cursor_image()
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        subprocess.run(["xdotool", "windowfocus", window], env=self.environment, check=True)
+        self.eventually(lambda: self.client.request("object.get", {"objectName": "mainWindow", "property": "isActiveWindow"}),
+                        "the private tooltip owner never became active")
+        self.run_stage(composerDraft={"text": "Sačuvaj pokazivač i ovu skicu.", "cursor": 12, "anchor": 4})
+        original = self.editor_draft()
+        self.eventually(lambda: self.run_stage()["playbackControl"]["bounds"][2] > 0, "private header never painted")
+
+        def move_widget(name):
+            objects = self.client.request("object.list", {})
+            by_id = {item["id"]: item for item in objects}
+            item = next(item for item in objects if item.get("objectName") == name)
+            width = self.client.request("object.get", {"id": item["id"], "property": "width"})
+            height = self.client.request("object.get", {"id": item["id"], "property": "height"})
+            x, y = width // 2, height // 2
+            while item.get("objectName") != "mainWindow":
+                x += self.client.request("object.get", {"id": item["id"], "property": "x"}) or 0
+                y += self.client.request("object.get", {"id": item["id"], "property": "y"}) or 0
+                item = by_id[item["parentId"]]
+            subprocess.run(["xdotool", "mousemove", "--sync", "--window", window, str(x), str(y)],
+                           env=self.environment, check=True)
+
+        def large():
+            image = self.cursor_image()
+            return image["width"] == 48 and image["height"] == 48 and image["opaque"] > 100
+
+        # A dynamically changed role must keep its text shape and size.
+        move_widget("partyMessage")
+        self.eventually(lambda: large() and self.cursor_image()["hotspot"] == [24, 24],
+                        "the editor's actual text cursor was not applied after the hover event")
+        self.client.request("object.set", {"objectName": "partyDjOnlineBadge", "property": "toolTip",
+                                          "value": "Private tooltip cursor fixture"})
+        before = set(subprocess.check_output(["xdotool", "search", "--onlyvisible", "--pid", str(self.process.pid)],
+                                            env=self.environment, text=True).splitlines())
+        move_widget("partyDjOnlineBadge")
+
+        def tooltip_window():
+            visible = set(subprocess.check_output(["xdotool", "search", "--onlyvisible", "--pid", str(self.process.pid)],
+                                                  env=self.environment, text=True).splitlines())
+            return next(iter(visible - before), None)
+
+        self.eventually(lambda: bool(tooltip_window()), "a real Qt tooltip never appeared")
+        tooltip = tooltip_window()
+        self.eventually(large, "tooltip hover reverted the native cursor")
+        geometry = dict(line.split("=", 1) for line in subprocess.check_output(
+            ["xdotool", "getwindowgeometry", "--shell", tooltip], env=self.environment, text=True).splitlines() if "=" in line)
+        subprocess.run(["xdotool", "mousemove", "--sync",
+                        str(int(geometry["X"]) + int(geometry["WIDTH"]) // 2),
+                        str(int(geometry["Y"]) + int(geometry["HEIGHT"]) // 2)], env=self.environment, check=True)
+        self.eventually(large, "the tooltip's own native surface used a small cursor")
+        # Leaving the owned window must leave the private desktop's cursor alone.
+        subprocess.run(["xdotool", "mousemove", "--sync", "2500", "1550"], env=self.environment, check=True)
+        self.eventually(lambda: self.cursor_image()["width"] != 48, "the DJ cursor escaped its window")
+        move_widget("partyMessage")
+        self.eventually(lambda: large() and self.cursor_image()["hotspot"] == [24, 24],
+                        "returning to the editor lost the actual text cursor")
+        self.assertEqual(self.editor_draft(), original)
+        self.assertFalse(self.server.playback_requests or self.server.skip_requests or self.server.requests or self.server.message_attempts)
+
+        # The fixture module supplies actual custom cursors and a child that
+        # acquires a native surface later, then leaves/re-enters the DJ tree.
+        probe_source = self.folder / "cursor_probe.cpp"
+        probe_source.write_text(r"""#include "agent/agent_abi.h"
+#include <QCursor>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPointer>
+#include <QPixmap>
+#include <QWidget>
+#include <QWindow>
+namespace {
+QPointer<QWidget> custom, square;
+QImage original, squareOriginal;
+void run(const RuntimeAgentHost* host) {
+    const auto request = QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
+    auto* cube = static_cast<QWidget*>(host->find_qobject(host->agent_context, "cubeView"));
+    const QString action = request.value("action").toString();
+    if (action == "create") {
+        custom = new QWidget(cube); custom->setObjectName("privateCursorChild"); custom->setGeometry(40, 320, 160, 80);
+        QPixmap image(16, 32); image.fill(Qt::red); original = image.toImage();
+        custom->setCursor(QCursor(image, 3, 4)); custom->show();
+        square = new QWidget(cube); square->setObjectName("privateCursorSquare"); square->setGeometry(240, 320, 160, 80);
+        QPixmap other(48, 48); other.fill(Qt::green); squareOriginal = other.toImage();
+        square->setCursor(QCursor(other, 2, 3)); square->show();
+    } else if (action == "native") { custom->winId(); }
+    else if (action == "detach") { custom->setParent(nullptr, Qt::Window); custom->show(); }
+    else if (action == "attach") { custom->setParent(cube); custom->show(); }
+    else if (action == "link") { custom->setCursor(Qt::PointingHandCursor); }
+    else if (action == "remove") { delete custom.data(); delete square.data(); }
+    QJsonObject result;
+    if (custom) {
+        const auto cursor = custom->cursor(); const auto size = cursor.pixmap().size();
+        result.insert("customSize", QJsonArray{size.width(), size.height()});
+        result.insert("customOriginal", cursor.pixmap().toImage() == original);
+        result.insert("customShape", int(cursor.shape()));
+        result.insert("customHotspot", QJsonArray{cursor.hotSpot().x(), cursor.hotSpot().y()});
+        if (custom->windowHandle()) {
+            const auto native = custom->windowHandle()->cursor();
+            result.insert("nativeOriginal", native.pixmap().toImage() == original);
+            result.insert("nativeShape", int(native.shape()));
+        }
+    }
+    if (square) result.insert("squareOriginal", square->cursor().pixmap().toImage() == squareOriginal);
+    host->complete_json(host->invocation_context, QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+}
+const RuntimeAgentSnippet descriptor{RUNTIME_AGENT_ABI, sizeof(RuntimeAgentSnippet), "private cursor lifecycle fixture", &run};
+}
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet_init() { return &descriptor; }
+""")
+        probe_library = self.folder / "cursor_probe.so"
+        compiled = subprocess.run([sys.executable, str(ROOT / "tools" / "compile_snippet.py"),
+            "--compile-db", str(BUILD / "compile_commands.json"), "--context", "snippets/party_stage.cpp",
+            "--source", str(probe_source), "--output", str(probe_library), "--compact"],
+            capture_output=True, text=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        probe_module = self.client.request("snippet.load", {"path": str(probe_library)})["moduleId"]
+        def probe(action="status"):
+            operation = self.client.request("snippet.run", {"moduleId": probe_module, "executor": "gui", "request": {"action": action}})
+            result = self.client.wait_for_operation(operation["operationId"], timeout=10)["data"]
+            self.assertEqual(result["outcome"], "completed", result)
+            return result["result"]
+
+        probe("create")
+        self.eventually(lambda: probe()["customSize"] == [24, 48], "a non-square cursor was not enlarged proportionally")
+        self.assertTrue(probe()["squareOriginal"], "an unrelated 48px cursor lost its artwork")
+        probe("native"); time.sleep(.15)
+        for _ in range(3):
+            self.assertEqual(probe()["customSize"], [24, 48], "the installed non-square bitmap was treated as new intent")
+        probe("detach")
+        self.eventually(lambda: probe()["customOriginal"], "reparenting retained the enlarged custom bitmap")
+        self.assertTrue(probe()["nativeOriginal"], "a late native surface did not restore its unscoped cursor")
+        probe("attach")
+        self.eventually(lambda: probe()["customSize"] == [24, 48], "returning to the DJ tree did not reapply its scale")
+        probe("link")
+        self.eventually(lambda: probe()["customSize"] == [48, 48] and probe()["customHotspot"] == [18, 5],
+                        "a Qt-selected link role did not retain its large hand shape")
+        self.run_stage(restore=True)
+        self.assertEqual(probe()["customShape"], 13, "release did not restore Qt's latest pointing-hand intent")
+        self.assertEqual(probe()["nativeShape"], 13, "the late native surface lost Qt's latest cursor intent")
+        self.assertTrue(probe()["squareOriginal"], "release changed an unrelated 48px bitmap")
+        probe("remove")
+        subprocess.run(["xdotool", "mousemove", "--sync", "--window", window, "400", "400"],
+                       env=self.environment, check=True)
+        self.eventually(lambda: self.cursor_image()["width"] == baseline["width"]
+                        and self.cursor_image()["height"] == baseline["height"],
+                        "release did not restore the original native cursor")
 
     def test_playback_feedback_cursor_and_shortcuts_preserve_editor_intent(self):
         (self.folder / "admin-token").write_text("private-fixture-token")

@@ -208,13 +208,13 @@ showing its error; the client never retries that GET automatically.
 - Send sits ten pixels above the panel bottom. Short outcome/error notices appear
   for six seconds over the transcript, without reserving an empty footer or
   moving the composer, button or results.
-- The DJ window and its controls use a 48-pixel cursor. Releasing the stage restores
-  the previous window cursor; the desktop cursor setting and other apps retain
-  their own size.
-  Playback enable/disable transitions refresh the actual native cursor after Qt
-  finishes the transition, including while the pointer stays over the button.
-  The private Xvfb regression checks the displayed XFixes cursor's size and alpha,
-  rather than relying only on Qt's cached cursor property.
+- One cursor scope covers the DJ window, descendants created later and its owned
+  Qt tooltip/pop-up surfaces. It retains arrow, text, link and resize meanings at
+  48 pixels and repairs the actual native surface after hover or enabled-state
+  transitions, including when the pointer stays still. Release restores the
+  original widget/native cursors; other windows and the desktop keep their own
+  cursors. Private Xvfb cases inspect displayed XFixes size, alpha and hotspots
+  through tooltips, outside-window movement, disabled playback and release.
 - **F11** toggles qtra fullscreen. In native Spotify, plain **F11** toggles only its
   focused window; Caps/Num Lock variants work too. Modified F11 and other apps
   retain their own behavior. This does not switch to qtra or affect playback.

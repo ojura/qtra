@@ -161,11 +161,286 @@ QCursor djCursor(Qt::CursorShape shape = Qt::ArrowCursor)
         p.setPen(QPen(QColor("#f1fbff"), 3, Qt::SolidLine, Qt::RoundCap)); p.drawPath(beam);
         p.end(); return QCursor(image, 24, 24);
     }
+
+    if (shape == Qt::PointingHandCursor || shape == Qt::OpenHandCursor || shape == Qt::ClosedHandCursor) {
+        QPainterPath hand;
+        hand.moveTo(14, 26); hand.lineTo(14, 7); hand.cubicTo(14, 1, 22, 1, 22, 7);
+        hand.lineTo(22, 20); hand.cubicTo(25, 15, 29, 17, 29, 22);
+        hand.cubicTo(33, 17, 37, 20, 37, 24); hand.cubicTo(42, 21, 44, 25, 42, 33);
+        hand.lineTo(38, 44); hand.lineTo(20, 44); hand.lineTo(7, 29);
+        hand.cubicTo(4, 24, 8, 21, 12, 25); hand.closeSubpath();
+        p.setPen(QPen(QColor("#07111e"), 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(QColor("#f1fbff")); p.drawPath(hand); p.end(); return QCursor(image, 18, 5);
+    }
+    if (shape == Qt::SizeHorCursor || shape == Qt::SplitHCursor || shape == Qt::SizeVerCursor || shape == Qt::SplitVCursor
+        || shape == Qt::SizeFDiagCursor || shape == Qt::SizeBDiagCursor || shape == Qt::SizeAllCursor
+        || shape == Qt::CrossCursor) {
+        p.translate(24, 24);
+        if (shape == Qt::SizeVerCursor || shape == Qt::SplitVCursor) p.rotate(90);
+        if (shape == Qt::SizeFDiagCursor) p.rotate(45);
+        if (shape == Qt::SizeBDiagCursor) p.rotate(-45);
+        QPainterPath arrows;
+        const auto axis = [&arrows](bool vertical, bool tips) {
+            const auto point = [vertical](double x, double y) { return vertical ? QPointF(y, x) : QPointF(x, y); };
+            arrows.moveTo(point(-18, 0)); arrows.lineTo(point(18, 0));
+            if (tips) for (int sign : {-1, 1}) {
+                arrows.moveTo(point(sign * 11, -7)); arrows.lineTo(point(sign * 18, 0)); arrows.lineTo(point(sign * 11, 7));
+            }
+        };
+        axis(false, shape != Qt::CrossCursor);
+        if (shape == Qt::SizeAllCursor || shape == Qt::CrossCursor) axis(true, shape != Qt::CrossCursor);
+        p.setPen(QPen(QColor("#07111e"), 7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.drawPath(arrows);
+        p.setPen(QPen(QColor("#f1fbff"), 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.drawPath(arrows);
+        p.end(); return QCursor(image, 24, 24);
+    }
+    if (shape == Qt::ForbiddenCursor || shape == Qt::WaitCursor || shape == Qt::BusyCursor) {
+        p.setPen(QPen(QColor("#07111e"), 7)); p.setBrush(Qt::NoBrush); p.drawEllipse(QRectF(7, 7, 34, 34));
+        p.setPen(QPen(QColor("#f1fbff"), 3)); p.drawEllipse(QRectF(7, 7, 34, 34));
+        p.setPen(QPen(QColor("#f1fbff"), 4, Qt::SolidLine, Qt::RoundCap));
+        if (shape == Qt::ForbiddenCursor) p.drawLine(QPointF(12, 12), QPointF(36, 36));
+        else { p.drawLine(QPointF(24, 24), QPointF(24, 12)); p.drawLine(QPointF(24, 24), QPointF(33, 28)); }
+        p.end(); return QCursor(image, 24, 24);
+    }
     QPainterPath arrow; arrow.moveTo(7, 4); arrow.lineTo(7, 36); arrow.lineTo(16, 28);
     arrow.lineTo(23, 44); arrow.lineTo(30, 40); arrow.lineTo(23, 25); arrow.lineTo(37, 25); arrow.closeSubpath();
     p.setPen(QPen(QColor("#07111e"), 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.setBrush(QColor("#f1fbff")); p.drawPath(arrow);
     p.end(); return QCursor(image, 7, 4);
 }
+// One cursor owner for the DJ window, including children created later and Qt's
+// transient tooltip surfaces. It changes no application-wide or desktop cursor.
+class DjCursorScope final : public QObject {
+public:
+    explicit DjCursorScope(QWidget* root, QObject* parent) : QObject(parent), root_(root)
+    {
+        setObjectName(QStringLiteral("partyCursorScope"));
+        qApp->installEventFilter(this); refresh();
+    }
+    ~DjCursorScope() override
+    {
+        qApp->removeEventFilter(this); changing_ = true;
+        for (const auto& saved : widgets_) restore(saved);
+        for (const auto& saved : surfaces_) if (saved.window) saved.window->setCursor(saved.cursor);
+    }
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override
+    {
+        if (changing_ || !root_) return false;
+        auto* widget = qobject_cast<QWidget*>(object);
+        if (!widget) return false;
+        if (event->type() == QEvent::ParentAboutToChange) {
+            restoreSubtree(widget); schedule(); return false;
+        }
+        if (event->type() == QEvent::ParentChange) prune();
+        if (event->type() == QEvent::ToolTip) {
+            if (belongs(widget)) tooltipSource_ = widget;
+            else { tooltipSource_.clear(); tooltips_.clear(); prune(); }
+        }
+        const bool tooltip = widget->windowType() == Qt::ToolTip;
+        if (tooltip && event->type() == QEvent::Hide) {
+            tooltips_.remove(widget); prune(); schedule(); return false;
+        }
+        if (tooltip && event->type() == QEvent::Show && tooltipSource_ && belongs(tooltipSource_))
+            claimTooltip(widget);
+        if (!belongs(widget)) return false;
+        if (event->type() == QEvent::CursorChange) manage(widget, true);
+        switch (event->type()) {
+        case QEvent::CursorChange: case QEvent::Enter: case QEvent::Leave:
+        case QEvent::MouseMove: case QEvent::MouseButtonPress: case QEvent::MouseButtonRelease:
+        case QEvent::EnabledChange: case QEvent::StyleChange: case QEvent::ToolTip:
+        case QEvent::Show: case QEvent::Hide: case QEvent::WinIdChange:
+        case QEvent::ParentChange:
+            schedule(); break;
+        default: break;
+        }
+        return false;
+    }
+private:
+    struct WidgetCursor {
+        QPointer<QWidget> widget; QCursor cursor, applied; bool explicitCursor;
+    };
+    struct SurfaceCursor {
+        QPointer<QWindow> window; QPointer<QWidget> widget; QCursor cursor;
+    };
+    static bool sameBitmap(const QCursor& a, const QCursor& b)
+    {
+        return a.shape() == Qt::BitmapCursor && b.shape() == Qt::BitmapCursor
+            && a.pixmap().cacheKey() == b.pixmap().cacheKey() && a.hotSpot() == b.hotSpot();
+    }
+    bool attached(QWidget* widget) const
+    {
+        if (!root_ || !widget) return false;
+        if (widget == root_ || root_->isAncestorOf(widget)) return true;
+        for (auto* parent = widget->window()->parentWidget(); parent; parent = parent->parentWidget())
+            if (parent == root_ || root_->isAncestorOf(parent)) return true;
+        if (widget->window()->windowType() != Qt::Popup) return false;
+        const auto* main = root_->windowHandle();
+        for (auto* surface = widget->window()->windowHandle(); surface; surface = surface->transientParent())
+            if (main && surface == main) return true;
+        return false;
+    }
+    bool belongs(QWidget* widget) const
+    {
+        if (!widget) return false;
+        if (widget->window()->windowType() == Qt::ToolTip) {
+            const auto source = tooltips_.value(widget->window());
+            return source && attached(source);
+        }
+        return attached(widget);
+    }
+    void claimTooltip(QWidget* tooltip)
+    {
+        const bool first = !tooltips_.contains(tooltip);
+        tooltips_.insert(tooltip, tooltipSource_);
+        if (first) connect(tooltip, &QObject::destroyed, this, [this, tooltip] { tooltips_.remove(tooltip); });
+    }
+    QCursor unscopedCursor(QWidget* widget) const
+    {
+        for (auto* current = widget; current; current = current->parentWidget()) {
+            const auto found = widgets_.constFind(current);
+            if (found != widgets_.cend()) {
+                if (found->explicitCursor) return found->cursor;
+            } else if (current->testAttribute(Qt::WA_SetCursor)) return current->cursor();
+        }
+        return QCursor(Qt::ArrowCursor);
+    }
+    void rememberSurface(QWidget* widget)
+    {
+        auto* surface = widget ? widget->windowHandle() : nullptr;
+        if (!surface || surfaces_.contains(surface)) return;
+        QCursor original = surface->cursor();
+        for (const auto& installed : widgets_) if (sameBitmap(original, installed.applied)) {
+            original = unscopedCursor(widget); break;
+        }
+        surfaces_.insert(surface, {surface, widget, original});
+        connect(surface, &QObject::destroyed, this, [this, surface] { surfaces_.remove(surface); });
+    }
+    void manage(QWidget* widget, bool changedByQt = false)
+    {
+        if (!widget || !belongs(widget)) return;
+        rememberSurface(widget);
+        const QCursor current = widget->cursor();
+        const auto existing = widgets_.find(widget);
+        if (existing != widgets_.end() && sameBitmap(current, existing->applied)) return;
+        // An inherited bitmap belongs to its ancestor. Do not make it explicit
+        // or accidentally save our own cursor as this child's previous value.
+        if (!widget->testAttribute(Qt::WA_SetCursor)) {
+            for (const auto& installed : widgets_) if (sameBitmap(current, installed.applied)) return;
+        }
+        if (changedByQt) if (auto* surface = widget->windowHandle()) {
+            if (auto saved = surfaces_.find(surface); saved != surfaces_.end()) saved->cursor = current;
+        }
+        if (current.shape() == Qt::BlankCursor) {
+            if (existing != widgets_.end()) { existing->cursor = current; existing->applied = current; }
+            return;
+        }
+        QCursor large;
+        if (current.shape() == Qt::BitmapCursor) {
+            const QPixmap original = current.pixmap();
+            if (original.isNull()) return;
+            const QPixmap image = original.scaled(48, 48, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            const QPoint hot(qRound(current.hotSpot().x() * double(image.width()) / original.width()),
+                             qRound(current.hotSpot().y() * double(image.height()) / original.height()));
+            large = QCursor(image, hot.x(), hot.y());
+        } else large = djCursor(current.shape());
+        if (existing == widgets_.end()) {
+            widgets_.insert(widget, {widget, current, large, widget->testAttribute(Qt::WA_SetCursor)});
+            connect(widget, &QObject::destroyed, this, [this, widget] { widgets_.remove(widget); tooltips_.remove(widget); });
+        } else {
+            existing->cursor = current; existing->applied = large;
+            existing->explicitCursor = widget->testAttribute(Qt::WA_SetCursor);
+        }
+        changing_ = true; widget->setCursor(large); changing_ = false;
+    }
+    static void restore(const WidgetCursor& saved)
+    {
+        if (!saved.widget) return;
+        if (saved.explicitCursor) saved.widget->setCursor(saved.cursor); else saved.widget->unsetCursor();
+    }
+    void restoreSubtree(QWidget* root)
+    {
+        changing_ = true;
+        for (auto it = widgets_.begin(); it != widgets_.end();) {
+            if (it->widget && (it->widget == root || root->isAncestorOf(it->widget))) { restore(*it); it = widgets_.erase(it); }
+            else ++it;
+        }
+        for (auto it = surfaces_.begin(); it != surfaces_.end();) {
+            if (it->widget && (it->widget == root || root->isAncestorOf(it->widget))) {
+                if (it->window) it->window->setCursor(it->cursor);
+                it = surfaces_.erase(it);
+            } else ++it;
+        }
+        for (auto it = tooltips_.begin(); it != tooltips_.end();) {
+            if (!it.value() || it.value() == root || root->isAncestorOf(it.value())) it = tooltips_.erase(it);
+            else ++it;
+        }
+        changing_ = false; prune();
+    }
+    void prune()
+    {
+        changing_ = true;
+        for (auto it = tooltips_.begin(); it != tooltips_.end();) {
+            if (!it.value() || !attached(it.value())) it = tooltips_.erase(it); else ++it;
+        }
+        for (auto it = widgets_.begin(); it != widgets_.end();) {
+            if (!it->widget || !belongs(it->widget)) { restore(*it); it = widgets_.erase(it); } else ++it;
+        }
+        for (auto it = surfaces_.begin(); it != surfaces_.end();) {
+            if (!it->widget || !belongs(it->widget)) {
+                if (it->window) it->window->setCursor(it->cursor);
+                it = surfaces_.erase(it);
+            } else ++it;
+        }
+        changing_ = false;
+    }
+    void schedule()
+    {
+        if (queued_) return;
+        queued_ = true;
+        QTimer::singleShot(0, this, [this] { queued_ = false; refresh(); });
+    }
+    void refresh()
+    {
+        if (!root_) return;
+        prune(); rememberSurface(root_);
+        for (auto* top : QApplication::topLevelWidgets()) {
+            if (top->windowType() == Qt::ToolTip && top->isVisible() && tooltipSource_ && attached(tooltipSource_))
+                claimTooltip(top);
+            if (belongs(top)) rememberSurface(top);
+        }
+        manage(root_);
+        for (auto* child : root_->findChildren<QWidget*>()) manage(child);
+        for (auto* top : QApplication::topLevelWidgets()) if (belongs(top)) {
+            manage(top);
+            for (auto* child : top->findChildren<QWidget*>()) manage(child);
+        }
+        const QPoint position = QCursor::pos();
+        QWidget* hovered = QApplication::widgetAt(position);
+        for (auto* top : QApplication::topLevelWidgets())
+            if (belongs(top) && top->isVisible() && (top->windowType() == Qt::ToolTip || top->windowType() == Qt::Popup)
+                && top->rect().contains(top->mapFromGlobal(position)))
+                hovered = top->childAt(top->mapFromGlobal(position)) ? top->childAt(top->mapFromGlobal(position)) : top;
+        if (!belongs(hovered)) return;
+        manage(hovered);
+        QWidget* nativeOwner = hovered->windowHandle() ? hovered : hovered->nativeParentWidget();
+        if (nativeOwner && nativeOwner->windowHandle()) {
+            rememberSurface(nativeOwner);
+            // Qt may change a native cursor after dispatch without changing the
+            // QWidget cache. Reapply the actual hovered role after that event.
+            const QCursor cursor = hovered->cursor();
+            changing_ = true;
+            if (cursor.shape() == Qt::BitmapCursor)
+                nativeOwner->windowHandle()->setCursor(QCursor(cursor.pixmap(), cursor.hotSpot().x(), cursor.hotSpot().y()));
+            else nativeOwner->windowHandle()->setCursor(cursor);
+            changing_ = false;
+        }
+    }
+    QPointer<QWidget> root_, tooltipSource_;
+    QHash<QWidget*, WidgetCursor> widgets_;
+    QHash<QWindow*, SurfaceCursor> surfaces_;
+    QHash<QWidget*, QPointer<QWidget>> tooltips_;
+    bool changing_ = false, queued_ = false;
+};
+
 void panel(QPainter& p, const QRectF& r, const QColor& stroke, double opacity = 0.84)
 {
     p.setPen(QPen(alpha(stroke, 0.30), 1));
@@ -422,7 +697,6 @@ public:
                                 chat_->verticalScrollBar(), results_, results_->viewport(), results_->verticalScrollBar(), send_, cancelSong_, describe_, alternate_})
         {
             control->installEventFilter(this);
-            control->setCursor(djCursor(control->cursor().shape()));
         }
         idleClock_.start(); idleReturn_.setInterval(250);
         connect(&idleReturn_, &QTimer::timeout, this, [this] {
@@ -563,10 +837,6 @@ protected:
                 QToolTip::showText(help->globalPos(), workTooltip(messageWork_.value(id).toObject()), chat_->viewport());
                 return true;
             }
-        }
-        if (event->type() == QEvent::CursorChange) {
-            if (auto* widget = qobject_cast<QWidget*>(watched); widget && widget->cursor().shape() != Qt::BitmapCursor)
-                widget->setCursor(djCursor(widget->cursor().shape()));
         }
         if (event->type() == QEvent::KeyPress || event->type() == QEvent::Wheel || event->type() == QEvent::MouseButtonPress
             || event->type() == QEvent::MouseButtonRelease
@@ -1385,15 +1655,8 @@ public:
         connect(&poll_, &QTimer::timeout, this, [this] { readState(); updatePlaybackControl(); });
         poll_.start();
         auto* window = cube->window();
-        originalCursor_ = window->cursor(); cursorWasSet_ = window->testAttribute(Qt::WA_SetCursor);
-        if (window->windowHandle()) originalNativeCursor_ = window->windowHandle()->cursor();
-        window->setCursor(djCursor());
-        // A disabled child uses the input surface's cursor, not its own cached
-        // bitmap. Give the GL surface an explicit cursor as well as the window.
-        originalCubeCursor_ = cube_->cursor(); cubeCursorWasSet_ = cube_->testAttribute(Qt::WA_SetCursor);
-        cube_->setCursor(djCursor());
         playbackButton_ = new QPushButton(cube_); playbackButton_->setObjectName(QStringLiteral("partyPlaybackButton"));
-        playbackButton_->setFocusPolicy(Qt::NoFocus); playbackButton_->setCursor(djCursor());
+        playbackButton_->setFocusPolicy(Qt::NoFocus); playbackButton_->setCursor(Qt::ArrowCursor);
         playbackButton_->installEventFilter(this);
         connect(playbackButton_, &QPushButton::clicked, this, [this] { setPlaybackPaused(); });
         playbackStatus_ = new QLabel(cube_); playbackStatus_->setObjectName(QStringLiteral("partyPlaybackStatus"));
@@ -1413,7 +1676,7 @@ public:
         sourceLyricsText_->verticalScrollBar()->setObjectName(QStringLiteral("partySourceLyricsScroll"));
         for (QWidget* widget : {static_cast<QWidget*>(sourceLyricsText_.data()), sourceLyricsText_->viewport(),
                                static_cast<QWidget*>(sourceLyricsText_->verticalScrollBar())}) {
-            widget->setCursor(djCursor()); widget->installEventFilter(this);
+            widget->setCursor(Qt::ArrowCursor); widget->installEventFilter(this);
         }
         sourceLyricsText_->hide();
         playbackAction_ = createShortcut(GuestShortcut::Playback, [this] { setPlaybackPaused(); });
@@ -1454,17 +1717,19 @@ public:
             auto* action = shortcutAction(static_cast<GuestShortcut>(i));
             auto* button = new QPushButton(cube_); shortcutButtons_[i] = button;
             button->setObjectName(QString::fromUtf8(guestShortcuts[i].objectName).replace(QStringLiteral("Action"), QStringLiteral("ShortcutButton")));
-            button->setFocusPolicy(Qt::NoFocus); button->setCursor(djCursor()); button->installEventFilter(this);
+            button->setFocusPolicy(Qt::NoFocus); button->setCursor(Qt::ArrowCursor); button->installEventFilter(this);
             connect(button, &QPushButton::clicked, action, &QAction::trigger);
         }
         configureWindowToggle(QJsonObject::fromVariantMap(window->property("partyWindowToggleConfig").toMap()));
         window->setWindowTitle(QStringLiteral("LARICS / LYRICS · after hours"));
         setStateFile(stateFile);
         showRequests(true);
+        cursorScope_ = new DjCursorScope(window, this);
         show(); raise();
     }
     ~PartyStage() override
     {
+        delete cursorScope_;
         clearSourceLyrics();
         delete sourceLyricsText_.data();
         for (auto* manager : {&artworkNetwork_, &controlNetwork_})
@@ -1481,11 +1746,6 @@ public:
             }
             cube_->removeEventFilter(this);
             cube_->window()->setWindowTitle(originalTitle_);
-            if (cubeCursorWasSet_) cube_->setCursor(originalCubeCursor_);
-            else cube_->unsetCursor();
-            if (cursorWasSet_) cube_->window()->setCursor(originalCursor_);
-            else cube_->window()->unsetCursor();
-            if (cube_->window()->windowHandle()) cube_->window()->windowHandle()->setCursor(originalNativeCursor_);
             if (auto* main = qobject_cast<QMainWindow*>(cube_->window())) {
                 main->menuBar()->setVisible(menuWasVisible_); main->statusBar()->setVisible(statusWasVisible_);
             }
@@ -1700,31 +1960,6 @@ protected:
     }
     bool eventFilter(QObject* o, QEvent* e) override
     {
-        const bool lyricsControl = sourceLyricsText_ && (o == sourceLyricsText_ || o == sourceLyricsText_->viewport()
-            || o == sourceLyricsText_->verticalScrollBar());
-        const bool controlEvent = lyricsControl || o == playbackButton_ || std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), [o](const auto& button) { return o == button.data(); });
-        if (controlEvent && (e->type() == QEvent::EnabledChange || e->type() == QEvent::MouseButtonRelease
-                                    || e->type() == QEvent::Enter || e->type() == QEvent::StyleChange)) {
-            if (!cursorRefreshQueued_) {
-                cursorRefreshQueued_ = true;
-                QTimer::singleShot(0, this, [this] {
-                    cursorRefreshQueued_ = false;
-                    if (!cube_) return;
-                    const QPoint pointer = QCursor::pos();
-                    const auto underPointer = [&pointer](const auto& button) {
-                        return button && button->isVisible() && button->rect().contains(button->mapFromGlobal(pointer));
-                    };
-                    if (!underPointer(playbackButton_) && !underPointer(sourceLyricsText_)
-                        && !std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), underPointer)) return;
-                    auto* hovered = QApplication::widgetAt(pointer);
-                    if (!hovered || hovered->window() != cube_->window()) return;
-                    // Qt may apply a system cursor when disabling the child,
-                    // without changing its cached QCursor. Refresh the actual
-                    // native surface after that transition has finished.
-                    if (auto* native = cube_->window()->windowHandle()) native->setCursor(djCursor());
-                });
-            }
-        }
         if (o == cube_) {
             if (e->type() == QEvent::Resize) { setGeometry(cube_->rect()); raise(); updatePlaybackControl(); }
             if (e->type() == QEvent::MouseButtonRelease) {
@@ -2541,7 +2776,7 @@ private:
                 : frame.clockState == QStringLiteral("paused") ? QStringLiteral("Pauza")
                 : frame.clockState == QStringLiteral("held") ? QStringLiteral("Čekam položaj pjesme")
                 : frame.countIn > 0 ? QStringLiteral("Za %1 s").arg(static_cast<int>(std::ceil(frame.countIn / 1000)))
-                : QStringLiteral("Redak po retku");
+                : QStringLiteral("Redak po redak");
         }
         p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#b6c5dc"));
         p.drawText(title, Qt::AlignRight | Qt::AlignVCenter, label);
@@ -2912,7 +3147,7 @@ private:
     QString trackClockKey_;
     double trackClockPosition_ = 0, trackClockStamp_ = 0, trackClockDuration_ = 0;
     bool trackClockKnown_ = false, trackClockPlaying_ = false, trackClockTrusted_ = false;
-    QCursor originalCursor_, originalCubeCursor_, originalNativeCursor_;
+    DjCursorScope* cursorScope_ = nullptr;
     QString originalTitle_, stateFile_, fileError_, qrPath_, bookPath_, lastTrack_, lastRequest_, missionText_, effectError_;
     QHash<QString, bool> effectBefore_;
     QJsonObject state_, karaokeGeometry_, windowToggle_;
@@ -2933,7 +3168,7 @@ private:
     double nextEffectCheck_ = 0;
     std::size_t aside_ = 0;
     quint64 paints_ = 0;
-    bool menuWasVisible_ = true, statusWasVisible_ = true, cursorWasSet_ = false, cubeCursorWasSet_ = false, cursorRefreshQueued_ = false;
+    bool menuWasVisible_ = true, statusWasVisible_ = true;
 };
 
 QPointer<PartyStage> stage;
