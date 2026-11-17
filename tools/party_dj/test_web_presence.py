@@ -20,7 +20,7 @@ const START = 1800000000000;
 const lease = (changes = {}) => ({status: 'online', lastSeen: START,
   expiresAt: START + 30000, remainingMs: 30000, activeCount: 1, ...changes});
 
-async function fixture() {
+async function fixture(state = {}) {
   let wall = START, monotonic = 0, timerId = 0;
   const timeouts = new Map(), intervals = new Map(), pending = [], calls = [], unexpected = [];
   const blocked = detail => { unexpected.push(detail); throw new Error(detail); };
@@ -125,7 +125,7 @@ async function fixture() {
       }
       calls.push({path: url.pathname, url: value});
       if (url.pathname === '/api/state') return Promise.resolve(response({
-        spotify: {connected: false}, nowPlaying: null, queue: [], mood: {}, bookMoment: null,
+        spotify: {connected: false}, nowPlaying: null, queue: [], mood: {}, bookMoment: null, ...state,
       }));
       return new Promise((resolve, reject) => pending.push({resolve, reject}));
     },
@@ -230,7 +230,7 @@ class WebPresenceTests(unittest.TestCase):
         self.run_js(r'''
 const f = await fixture();
 await f.reply({llm: lease(), status: 'offline', lastSeen: 0, watcher: {status: 'offline'}});
-assert.deepEqual(f.presence(), {state: 'online', text: 'DJ is here'});
+assert.deepEqual(f.presence(), {state: 'online', text: 'DJ je tu'});
 await f.poll();
 await f.reply({llm: lease({activeCount: 256})});
 assert.equal(f.presence().state, 'online');
@@ -248,7 +248,7 @@ await f.reply({status: 'working', lastSeen: START, watcher: {status: 'online'},
   [{id: 1, role: 'user', name: 'Fixture', text: 'A private fixture message.', status: 'read', createdAt: START}]);
 assert.equal(f.presence().state, 'away');
 const delivery = f.elements.get('chat-log').querySelector('.chat-delivery');
-assert.match(delivery.textContent, /DJ is working on this/);
+assert.match(delivery.textContent, /DJ radi na ovome/);
 ''')
 
     def test_local_expiry_works_while_the_next_poll_remains_unresolved(self):
@@ -340,7 +340,7 @@ await f.poll();
 await f.failChat();
 assert.equal(f.presence().state, 'online');
 await f.advance(25000);
-assert.deepEqual(f.presence(), {state: 'away', text: 'Chat reconnecting'});
+assert.deepEqual(f.presence(), {state: 'away', text: 'Spajam razgovor'});
 ''')
 
     def test_genuine_renewal_can_extend_presence(self):
@@ -378,6 +378,44 @@ await f.visible(false);
 await f.advance(30000);
 await f.visible(true);
 assert.equal(f.presence().state, 'away');
+''')
+
+    def test_croatian_statuses_preserve_original_music_metadata(self):
+        self.run_js(r'''
+const f = await fixture({spotify: {connected: true},
+  nowPlaying: {title: 'Original song title', artist: 'Original artist', progressMs: 60000,
+    durationMs: 180000, observedAt: START, playing: false},
+  queue: [{title: 'Another original title', artist: 'Original artist', status: 'uncertain'}],
+  mood: {label: 'singalong'}});
+assert.equal(f.elements.get('connection-text').textContent, 'Tu si s ekipom');
+assert.equal(f.elements.get('room-mood').textContent, 'Pjevamo');
+assert.equal(f.elements.get('now-title').textContent, 'Original song title');
+assert.equal(f.elements.get('now-artist').textContent, 'Original artist');
+assert.equal(f.elements.get('track-progress').attributes['aria-valuetext'], '1:00 od 3:00');
+assert.equal(f.elements.get('queue').querySelector('.queue-status').textContent, 'Provjeravam Spotify…');
+assert.equal(f.elements.get('queue').querySelector('.track-title').textContent, 'Another original title');
+await f.reply({llm: lease()}, [{id: 1, role: 'user', text: 'Keep this original message.',
+  status: 'read', createdAt: START, work: {state: 'waiting'}}]);
+assert.equal(f.elements.get('chat-log').querySelector('.chat-text').textContent, 'Keep this original message.');
+assert.equal(f.elements.get('chat-log').querySelector('.chat-delivery').textContent, 'DJ je pročitao · Na čekanju');
+''')
+
+    def test_displayed_service_errors_are_localized_and_do_not_leak_unknown_details(self):
+        self.run_js(r'''
+const cases = [
+  ['Choose a song from the search results.', 'Odaberi pjesmu iz rezultata pretrage.'],
+  ['Spotify search is still loading. Try again in a moment.', 'Spotify još učitava pretragu. Pokušaj ponovno za trenutak.'],
+  ['A message can contain at most 1500 characters.', 'Poruka može sadržavati najviše 1500 znakova.'],
+  ['Spotify returned HTTP 429', 'Previše zahtjeva odjednom. Pričekaj trenutak pa pokušaj ponovno.'],
+  ['Spotify is disconnected', 'Veza s DJ-em ili Spotifyjem trenutačno nije dostupna. Pokušaj ponovno za trenutak.'],
+  ['Unhandled internal fixture detail\nstack trace', 'Zahtjev se nije mogao dovršiti. Pokušaj ponovno.'],
+  ['constructor', 'Zahtjev se nije mogao dovršiti. Pokušaj ponovno.'],
+];
+for (const [error, expected] of cases) {
+  const f = await fixture({spotify: {connected: false, error}});
+  assert.equal(f.elements.get('room-notice').textContent, expected);
+  assert.equal(f.elements.get('room-notice').hidden, false);
+}
 ''')
 
 

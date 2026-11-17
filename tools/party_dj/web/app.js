@@ -12,7 +12,7 @@
     'book-page', 'book-source', 'toasts', 'chat-log', 'chat-empty', 'chat-name', 'chat-new',
     'chat-unread', 'dj-presence', 'dj-presence-text'
   ].map((id) => [id, byId(id)]));
-  const moodNames = { chill: 'Chill', groove: 'Groove', dance: 'Dance', chaos: 'Chaos', singalong: 'Sing along' };
+  const moodNames = { chill: 'Lagano', groove: 'Ritam', dance: 'Ples', chaos: 'Kaos', singalong: 'Pjevamo' };
   const stored = {
     get(key) { try { return localStorage.getItem('larics.dj.' + key); } catch { return null; } },
     set(key, value) { try { localStorage.setItem('larics.dj.' + key, value); } catch { /* The page works without storage. */ } }
@@ -116,10 +116,39 @@
     setTimeout(() => item.remove(), 6000);
   }
   function readableError(value) {
-    const message = String(value || 'The DJ desk could not complete that request.')
+    const message = String(value?.message || value || '')
       .split(/\r?\n/, 1)[0].replace(/^Error:\s*/, '');
-    if (/returned (?:HTTP )?429\b/.test(message)) return 'Spotify is busy. Give it a moment and try again.';
-    return message.slice(0, 300);
+    const known = {
+      'Expected text.': 'Upiši tekst pa pokušaj ponovno.',
+      'A little breathing room, please. Try again in a moment.': 'Samo trenutak predaha. Pokušaj ponovno malo kasnije.',
+      'Choose an exact Spotify track URI.': 'Odaberi pjesmu iz rezultata pretrage.',
+      'Choose a song from the search results.': 'Odaberi pjesmu iz rezultata pretrage.',
+      'This request ID belongs to a different song.': 'Ovaj je zahtjev već vezan uz drugu pjesmu. Ponovi pretragu i odaberi pjesmu.',
+      'This message ID was already used.': 'Ova je poruka već poslana. Provjeri razgovor prije novog slanja.',
+      'Write a message first.': 'Najprije napiši poruku.',
+      'Choose one of the mood buttons.': 'Odaberi jednu od ponuđenih atmosfera.',
+      'A guest ID is required.': 'Nedostaje oznaka gosta. Ponovno otvori ovu stranicu.',
+      'Invalid message size.': 'Poruka je preduga. Skrati je pa pokušaj ponovno.',
+      'Expected a JSON object.': 'Zahtjev nije ispravno oblikovan. Osvježi stranicu pa pokušaj ponovno.',
+      'That song could not be requested.': 'Pjesmu nije bilo moguće zatražiti. Pokušaj ponovno.',
+      'Spotify search is still loading. Try again in a moment.': 'Spotify još učitava pretragu. Pokušaj ponovno za trenutak.',
+      'The DJ desk returned an unreadable response. Please try again.': 'DJ pult vratio je nečitljiv odgovor. Pokušaj ponovno.'
+    };
+    if (Object.prototype.hasOwnProperty.call(known, message)) return known[message];
+    const length = message.match(/^A message can contain at most (\d+) characters\.$/);
+    if (length) return 'Poruka može sadržavati najviše ' + length[1] + ' znakova.';
+    const field = message.match(/^(name|requestedBy|dedication|text) must be text of at most (\d+) characters\.$/);
+    if (field) return ({ name: 'Ime', requestedBy: 'Ime', dedication: 'Posveta', text: 'Tekst' })[field[1]]
+      + ' može sadržavati najviše ' + field[2] + ' znakova.';
+    if (value?.status === 429 || /(?:returned (?:HTTP )?429\b|too many requests|rate.?limit)/i.test(message))
+      return 'Previše zahtjeva odjednom. Pričekaj trenutak pa pokušaj ponovno.';
+    if (value?.status === 401 || value?.status === 403 || /(?:unauthorized|forbidden|authentication)/i.test(message))
+      return 'Pristup trenutačno nije dostupan. Ponovno otvori DJ stranicu.';
+    if (/(?:timed? ?out|timeout|taking too long)/i.test(message))
+      return 'Odgovor kasni. Pričekaj trenutak pa pokušaj ponovno.';
+    if (/(?:not connected|disconnected|connection|network|failed to fetch|fetch failed|unavailable)/i.test(message))
+      return 'Veza s DJ-em ili Spotifyjem trenutačno nije dostupna. Pokušaj ponovno za trenutak.';
+    return 'Zahtjev se nije mogao dovršiti. Pokušaj ponovno.';
   }
   async function api(url, options = {}) {
     const controller = options.signal ? null : new AbortController();
@@ -128,7 +157,11 @@
       const response = await fetch(url, { cache: 'no-store', ...options, signal: options.signal || controller.signal });
       let body;
       try { body = await response.json(); } catch { throw new Error('The DJ desk returned an unreadable response. Please try again.'); }
-      if (!response.ok || body?.ok === false) throw new Error(readableError(body?.error || body?.message));
+      if (!response.ok || body?.ok === false) {
+        const error = new Error(body?.error || body?.message || '');
+        error.status = response.status;
+        throw error;
+      }
       return body;
     } finally { if (timeout) clearTimeout(timeout); }
   }
@@ -145,8 +178,8 @@
     const sent = queued(track.uri) || state?.accepted;
     button.disabled = Boolean(state?.pending || sent || !track.uri);
     button.dataset.status = state?.pending ? 'pending' : sent ? 'sent' : 'ready';
-    button.textContent = state?.pending ? 'Sending…' : sent ? 'Requested ✓' : state?.uncertain ? 'Try again' : 'Request';
-    button.setAttribute('aria-label', sent ? track.title + ' has been requested' : 'Request ' + track.title + ' by ' + track.artist);
+    button.textContent = state?.pending ? 'Šaljem…' : sent ? 'Zatraženo ✓' : state?.uncertain ? 'Pokušaj opet' : 'Zatraži';
+    button.setAttribute('aria-label', sent ? 'Pjesma ' + track.title + ' je zatražena' : 'Zatraži ' + track.title + ', ' + track.artist);
   }
   function syncRequestButtons() {
     requestButtons.forEach(({ button, track }) => updateRequestButton(button, track));
@@ -175,14 +208,14 @@
       state.acceptedAt = Date.now();
       saveRequests();
       syncRequestButtons();
-      toast('“' + track.title + '” is on the request list.');
+      toast('„' + track.title + '” je na popisu želja.');
       void pollState();
     } catch (error) {
       state.pending = false;
       state.uncertain = true;
       saveRequests();
       syncRequestButtons();
-      toast(error.name === 'AbortError' ? 'The connection is taking a moment. Try again to check the same request.' : error.message, 'error');
+      toast(error.name === 'AbortError' ? 'Veza kasni. Pokušaj opet za provjeru istog zahtjeva.' : readableError(error), 'error');
     }
   }
   function renderResults(tracks) {
@@ -192,18 +225,18 @@
       const row = textNode('li', 'track-row', '');
       row.append(artNode(track.artUrl, 'track-art'));
       const info = textNode('div', 'track-info', '');
-      info.append(textNode('span', 'track-title', track.title || 'Untitled track'));
-      info.append(textNode('div', 'track-artist', track.artist || 'Unknown artist'));
+      info.append(textNode('span', 'track-title', track.title || 'Pjesma bez naslova'));
+      info.append(textNode('div', 'track-artist', track.artist || 'Nepoznat izvođač'));
       const meta = textNode('div', 'track-meta', duration(track.durationMs));
       const url = spotifyUrl(track);
       if (url) {
         const link = textNode('a', '', 'Spotify ↗');
         link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
-        link.setAttribute('aria-label', 'Open ' + (track.title || 'track') + ' in Spotify');
+        link.setAttribute('aria-label', 'Otvori ' + (track.title || 'pjesmu') + ' u Spotifyju');
         meta.append(link);
       }
       info.append(meta);
-      const button = textNode('button', 'request-button', 'Request');
+      const button = textNode('button', 'request-button', 'Zatraži');
       button.type = 'button';
       button.addEventListener('click', () => void requestTrack(track));
       requestButtons.set(track.uri || track.id, { button, track });
@@ -222,14 +255,14 @@
     if (!query) {
       renderResults([]);
       elements['search-spinner'].hidden = true;
-      elements['search-status'].textContent = 'Search the Spotify catalogue, then tap Request.';
-      elements['search-empty'].querySelector('p').textContent = 'The next good idea could be yours.';
+      elements['search-status'].textContent = 'Pretraži Spotify pa dodirni Zatraži.';
+      elements['search-empty'].querySelector('p').textContent = 'Sljedeća dobra ideja može biti tvoja.';
       return;
     }
     const controller = new AbortController();
     searchController = controller;
     elements['search-spinner'].hidden = false;
-    elements['search-status'].textContent = 'Looking for “' + query + '”…';
+    elements['search-status'].textContent = 'Tražim „' + query + '”…';
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const answer = await api('/api/search?q=' + encodeURIComponent(query), { signal: controller.signal });
@@ -237,13 +270,13 @@
       if (answer.error) throw new Error(answer.error);
       const tracks = Array.isArray(answer.tracks) ? answer.tracks : [];
       renderResults(tracks);
-      elements['search-status'].textContent = tracks.length ? tracks.length + ' songs found. Tap Request to send one.' : 'Nothing for “' + query + '” yet.';
-      elements['search-empty'].querySelector('p').textContent = tracks.length ? '' : 'Try a different title or artist.';
+      elements['search-status'].textContent = tracks.length ? 'Rezultati: ' + tracks.length + '. Dodirni Zatraži za slanje.' : 'Još nema rezultata za „' + query + '”.';
+      elements['search-empty'].querySelector('p').textContent = tracks.length ? '' : 'Pokušaj s drugim naslovom ili izvođačem.';
     } catch (error) {
       if (sequence !== searchSequence) return;
       renderResults([]);
-      elements['search-status'].textContent = error.name === 'AbortError' ? 'Search is taking a moment. Tap Find to try again.' : error.message;
-      elements['search-empty'].querySelector('p').textContent = 'Your next song is worth another try.';
+      elements['search-status'].textContent = error.name === 'AbortError' ? 'Pretraga kasni. Dodirni Traži za novi pokušaj.' : readableError(error);
+      elements['search-empty'].querySelector('p').textContent = 'Sljedeća pjesma vrijedi još jednog pokušaja.';
     } finally {
       clearTimeout(timeout);
       if (sequence === searchSequence) elements['search-spinner'].hidden = true;
@@ -272,11 +305,11 @@
       const row = textNode('li', 'track-row', '');
       row.append(textNode('span', 'queue-position', String(index + 1).padStart(2, '0')));
       const info = textNode('div', 'track-info', '');
-      info.append(textNode('span', 'track-title', track.title || 'Finding your song…'));
-      const description = [track.artist, track.requestedBy ? 'for ' + track.requestedBy : ''].filter(Boolean).join(' / ');
+      info.append(textNode('span', 'track-title', track.title || 'Tražimo tvoju pjesmu…'));
+      const description = [track.artist, track.requestedBy ? 'za ' + track.requestedBy : ''].filter(Boolean).join(' / ');
       if (description) info.append(textNode('div', 'track-artist', description));
-      const labels = { queued: 'Added to Spotify', playing: 'Playing now', pending: 'With the DJ', accepted: 'With the DJ', sending: 'Adding to Spotify…', processing: 'Adding to Spotify…', uncertain: 'Checking Spotify…', failed: 'Could not add this song', rejected: 'Request declined' };
-      const label = textNode('div', 'queue-status', labels[track.status] || 'With the DJ');
+      const labels = { queued: 'Dodano u Spotify', playing: 'Sada svira', pending: 'Čeka DJ-a', accepted: 'Čeka DJ-a', sending: 'Dodajem u Spotify…', processing: 'Dodajem u Spotify…', uncertain: 'Provjeravam Spotify…', failed: 'Pjesmu nije bilo moguće dodati', rejected: 'Zahtjev je odbijen' };
+      const label = textNode('div', 'queue-status', labels[track.status] || 'Čeka DJ-a');
       label.dataset.status = track.status || 'pending';
       info.append(label);
       row.append(info);
@@ -288,13 +321,13 @@
   }
   function renderNow(track) {
     const current = track || {};
-    elements['now-title'].textContent = current.title || 'The night is warming up';
-    elements['now-artist'].textContent = current.artist || (latestState?.spotify?.connected ? 'Pick the next song with us' : 'Waiting for Spotify');
+    elements['now-title'].textContent = current.title || 'Glazba se zagrijava';
+    elements['now-artist'].textContent = current.artist || (latestState?.spotify?.connected ? 'Odaberi sljedeću pjesmu s nama' : 'Čekamo Spotify');
     document.body.classList.toggle('playing', Boolean(current.playing));
     const signature = current.artUrl || '';
     if (signature !== artSignature) {
       artSignature = signature;
-      const art = artNode(signature, 'now-art', current.album ? 'Album artwork for ' + current.album : 'Current album artwork');
+      const art = artNode(signature, 'now-art', current.album ? 'Omot albuma ' + current.album : 'Omot trenutačnog albuma');
       elements['now-art'].replaceChildren(...art.childNodes);
     }
     const url = spotifyUrl(current);
@@ -314,7 +347,7 @@
     const percent = total ? Math.min(100, elapsed / total * 100) : 0;
     elements['progress-fill'].style.width = percent + '%';
     elements['track-progress'].setAttribute('aria-valuenow', String(Math.round(percent)));
-    elements['track-progress'].setAttribute('aria-valuetext', duration(elapsed) + ' of ' + duration(total));
+    elements['track-progress'].setAttribute('aria-valuetext', duration(elapsed) + ' od ' + duration(total));
     elements.elapsed.textContent = duration(elapsed);
     elements.duration.textContent = duration(total);
   }
@@ -327,9 +360,9 @@
     if (!moment || !imageUrl) return;
     elements['book-image'].src = imageUrl;
     elements['book-image'].alt = String(moment.alt || moment.title || '');
-    elements['book-title'].textContent = moment.title || 'Thirty years of stories';
+    elements['book-title'].textContent = moment.title || 'Trideset godina priča';
     elements['book-caption'].textContent = moment.caption || moment.text || '';
-    elements['book-page'].textContent = moment.page ? 'Spomenar, p. ' + moment.page : '';
+    elements['book-page'].textContent = moment.page ? 'Spomenar, str. ' + moment.page : '';
     const sourceUrl = safeImage(moment.sourceUrl);
     elements['book-source'].hidden = !sourceUrl;
     if (sourceUrl) elements['book-source'].href = sourceUrl;
@@ -344,7 +377,7 @@
       latestState = state;
       receivedAt = Date.now();
       elements.connection.dataset.state = state.spotify?.connected ? 'online' : 'connecting';
-      elements['connection-text'].textContent = state.spotify?.connected ? 'You’re in the room' : 'DJ desk connected';
+      elements['connection-text'].textContent = state.spotify?.connected ? 'Tu si s ekipom' : 'Veza s DJ pultom';
       const notice = state.spotify?.error;
       elements['room-notice'].hidden = !notice;
       elements['room-notice'].textContent = notice ? readableError(notice) : '';
@@ -366,13 +399,13 @@
         if (changed) saveRequests();
       }
       syncRequestButtons();
-      elements['room-mood'].textContent = moodNames[state.mood?.label] || state.mood?.label || 'Finding the groove';
+      elements['room-mood'].textContent = moodNames[state.mood?.label] || state.mood?.label || 'Tražimo ritam';
       renderBook(state.bookMoment);
     } catch {
       elements.connection.dataset.state = 'offline';
-      elements['connection-text'].textContent = 'Reconnecting';
+      elements['connection-text'].textContent = 'Ponovno spajanje';
       elements['room-notice'].hidden = false;
-      elements['room-notice'].textContent = 'The DJ desk is reconnecting. Your requests stay here.';
+      elements['room-notice'].textContent = 'DJ pult ponovno se spaja. Tvoji zahtjevi ostaju ovdje.';
       document.body.classList.remove('playing');
     } finally {
       statePending = false;
@@ -390,22 +423,22 @@
     if (moodPending) return;
     const mood = button.dataset.mood;
     moodPending = true; paintMood();
-    elements['mood-feedback'].textContent = 'Passing that to the DJ…';
+    elements['mood-feedback'].textContent = 'Javljam DJ-u…';
     try {
       await post('/api/mood', { guestId, mood });
       selectedMood = mood;
       stored.set('mood', mood);
-      elements['mood-feedback'].textContent = mood === 'chaos' ? 'A considered request for chaos. Noted.' : moodNames[mood] + '. The DJ got the hint.';
+      elements['mood-feedback'].textContent = mood === 'chaos' ? 'Promišljena želja za kaosom. Zabilježeno.' : moodNames[mood] + '. DJ je primio mig.';
       void pollState();
     } catch (error) {
-      elements['mood-feedback'].textContent = error.name === 'AbortError' ? 'That took too long. Tap your mood again.' : error.message;
+      elements['mood-feedback'].textContent = error.name === 'AbortError' ? 'Odgovor kasni. Ponovno odaberi atmosferu.' : readableError(error);
     } finally { moodPending = false; paintMood(); }
   }));
   function chatTime(value) {
     let number = value;
     if (typeof value === 'number' && value < 1e12) number = value * 1000;
     const date = new Date(number);
-    return Number.isFinite(date.getTime()) ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    return Number.isFinite(date.getTime()) ? date.toLocaleTimeString('hr-HR', { hour: '2-digit', minute: '2-digit' }) : '';
   }
   function scrollChat() {
     elements['chat-log'].scrollTop = elements['chat-log'].scrollHeight;
@@ -414,10 +447,10 @@
   }
   function paintDelivery(entry) {
     const work = entry.message.work;
-    const labels = { active: 'DJ is working on this', waiting: 'Waiting', blocked: 'Blocked',
-      completed: 'Completed', cancelled: 'Cancelled', unconfirmed: 'Work status needs confirmation' };
+    const labels = { active: 'DJ radi na ovome', waiting: 'Na čekanju', blocked: 'Rad je blokiran',
+      completed: 'Dovršeno', cancelled: 'Otkazano', unconfirmed: 'Stanje rada treba potvrdu' };
     const parts = [];
-    if (entry.status === 'read') parts.push('Read by DJ');
+    if (entry.status === 'read') parts.push('DJ je pročitao');
     if (work && labels[work.effectiveState || work.state]) parts.push(labels[work.effectiveState || work.state]);
     const node = entry.node.querySelector('.chat-delivery');
     node.textContent = parts.join(' · ');
@@ -441,10 +474,10 @@
       const testing = message.isTest || message.role === 'test';
       const bubble = textNode('article', 'chat-bubble ' + (assistant ? 'chat-dj' : 'chat-guest'), '');
       const meta = textNode('div', 'chat-meta', '');
-      meta.append(textNode('strong', '', (testing ? 'Test · ' : '') + (assistant ? (message.name || 'Your DJ') : (message.name || 'Guest'))));
+      meta.append(textNode('strong', '', (testing ? 'Proba · ' : '') + (assistant ? (message.name || 'Tvoj DJ') : (message.name || 'Gost'))));
       meta.append(textNode('time', '', chatTime(message.createdAt)));
       bubble.append(meta, textNode('p', 'chat-text', message.text || ''));
-      bubble.append(textNode('span', 'chat-delivery', message.status === 'read' ? 'Read by DJ' : ''));
+      bubble.append(textNode('span', 'chat-delivery', message.status === 'read' ? 'DJ je pročitao' : ''));
       let rawTime = message.createdAt;
       if (typeof rawTime === 'number' && rawTime < 1e12) rawTime *= 1000;
       const stamp = typeof rawTime === 'number' ? rawTime : Date.parse(rawTime || '');
@@ -500,8 +533,8 @@
     const active = presenceAvailable && presenceLease && Number.isFinite(wall) && Number.isFinite(monotonic)
       && wall >= presenceLease.lastSeen && wall < presenceLease.expiresAt && monotonic < presenceLease.deadline;
     elements['dj-presence'].dataset.state = active ? 'online' : 'away';
-    elements['dj-presence-text'].textContent = active ? 'DJ is here'
-      : presenceConnection === 'reconnecting' ? 'Chat reconnecting' : 'Leave the DJ a message';
+    elements['dj-presence-text'].textContent = active ? 'DJ je tu'
+      : presenceConnection === 'reconnecting' ? 'Spajam razgovor' : 'Ostavi poruku DJ-u';
   }
   async function pollChat() {
     clearTimeout(chatTimer);
@@ -550,16 +583,16 @@
     messagePending = true;
     const button = elements['message-form'].querySelector('button');
     button.disabled = true;
-    elements['message-status'].textContent = 'Sending…';
+    elements['message-status'].textContent = 'Šaljem…';
     try {
       const response = await post('/api/message', pendingMessage);
       if (response.message) appendMessages([response.message], true);
       if (elements.message.value.trim() === content) elements.message.value = '';
       pendingMessage = null;
-      elements['message-status'].textContent = 'Delivered. Replies appear above.';
+      elements['message-status'].textContent = 'Dostavljeno. Odgovor stiže iznad.';
       void pollChat();
     } catch (error) {
-      elements['message-status'].textContent = error.name === 'AbortError' ? 'The connection is slow. Your message is still here.' : error.message;
+      elements['message-status'].textContent = error.name === 'AbortError' ? 'Veza je spora. Tvoja je poruka još ovdje.' : readableError(error);
     } finally { messagePending = false; button.disabled = false; }
   });
   document.addEventListener('visibilitychange', () => {
