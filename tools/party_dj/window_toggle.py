@@ -28,8 +28,10 @@ class Desktop:
         self.root = self.display.screen().root
         self.agent_socket = str(agent_socket)
         self.bound = {}
+        self.fullscreen_bound = {}
         self.last_error = ''
         self.tab = self.display.keysym_to_keycode(XK.string_to_keysym('Tab'))
+        self.f11 = self.display.keysym_to_keycode(XK.string_to_keysym('F11'))
         numlock = self.display.keysym_to_keycode(XK.string_to_keysym('Num_Lock'))
         num_mask = next((1 << index for index, keys in enumerate(self.display.get_modifier_mapping()) if numlock in keys), 0)
         self.modifiers = sorted({0, X.LockMask, num_mask, X.LockMask | num_mask})
@@ -70,28 +72,39 @@ class Desktop:
         except (OSError, RuntimeError):
             ready = False
         windows = self.spotify_windows() if ready else {}
-        for identifier, window in list(self.bound.items()):
-            if identifier not in windows:
+        binding_errors, installed = [], False
+        # Each shortcut owns its own grabs: an F11 conflict must leave the
+        # already-working Tab return path available.
+        for key, label, bindings in self.shortcuts():
+            for identifier, window in list(bindings.items()):
+                if identifier not in windows:
+                    for modifier in self.modifiers:
+                        window.ungrab_key(key, modifier, onerror=lambda *_: None)
+                    del bindings[identifier]
+            for identifier, window in windows.items():
+                if identifier in bindings:
+                    continue
+                errors = []
                 for modifier in self.modifiers:
-                    window.ungrab_key(self.tab, modifier, onerror=lambda *_: None)
-                del self.bound[identifier]
-        for identifier, window in windows.items():
-            if identifier in self.bound:
-                continue
-            errors = []
-            for modifier in self.modifiers:
-                window.grab_key(self.tab, modifier, False, self.X.GrabModeAsync, self.X.GrabModeAsync,
-                                onerror=lambda problem, *_: errors.append(problem))
-            self.display.sync()
-            if errors:
-                for modifier in self.modifiers:
-                    window.ungrab_key(self.tab, modifier, onerror=lambda *_: None)
-                self.last_error = 'Tab is already bound in the Spotify window.'
-            else:
-                self.bound[identifier] = window
-                self.last_error = ''
+                    window.grab_key(key, modifier, False, self.X.GrabModeAsync, self.X.GrabModeAsync,
+                                    onerror=lambda problem, *_: errors.append(problem))
+                self.display.sync()
+                if errors:
+                    for modifier in self.modifiers:
+                        window.ungrab_key(key, modifier, onerror=lambda *_: None)
+                    binding_errors.append(f'{label} is already bound in the Spotify window.')
+                else:
+                    bindings[identifier] = window
+                    installed = True
+        if binding_errors:
+            self.last_error = ' '.join(binding_errors)
+        elif installed:
+            self.last_error = ''
         self.display.flush()
         return windows
+
+    def shortcuts(self):
+        return ((self.tab, 'Tab', self.bound), (self.f11, 'F11', self.fullscreen_bound))
 
     def native(self, method, name='mainWindow'):
         with AgentClient(self.agent_socket, timeout=4) as client:
@@ -183,11 +196,28 @@ class Desktop:
         if event.type == self.X.KeyPress and event.detail == self.tab and event.window.id in self.bound:
             self.to_qtra()
             self.last_error = ''
+        elif event.type == self.X.KeyPress and event.detail == self.f11 and event.window.id in self.fullscreen_bound:
+            window = self.fullscreen_bound[event.window.id]
+            if self.focus_is(window):
+                self.toggle_fullscreen(window)
+                self.last_error = ''
+
+    def toggle_fullscreen(self, window):
+        fullscreen = self.atom('_NET_WM_STATE_FULLSCREEN')
+        before = fullscreen in self.property(window, '_NET_WM_STATE')
+        self.message(window, '_NET_WM_STATE', [2, fullscreen, 0, 2, 0])
+        deadline = time.monotonic() + 2
+        while (fullscreen in self.property(window, '_NET_WM_STATE')) == before:
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Spotify nije promijenio prikaz preko cijelog zaslona.')
+            time.sleep(.03)
+        return {'shown': 'spotify', 'window': window.id, 'fullscreen': not before}
 
     def close(self):
-        for window in self.bound.values():
-            for modifier in self.modifiers:
-                window.ungrab_key(self.tab, modifier, onerror=lambda *_: None)
+        for key, unused_label, bindings in self.shortcuts():
+            for window in bindings.values():
+                for modifier in self.modifiers:
+                    window.ungrab_key(key, modifier, onerror=lambda *_: None)
         self.display.sync()
         self.display.close()
 
@@ -294,7 +324,8 @@ def serve(data, agent_socket):
                                 desktop.last_error = ''
                             elif action in ('status', 'stop'):
                                 result = {'pid': os.getpid(), 'agentSocket': str(agent_socket),
-                                          'windows': sorted(desktop.bound), 'error': desktop.last_error}
+                                          'windows': sorted(desktop.bound), 'fullscreenWindows': sorted(desktop.fullscreen_bound),
+                                          'error': desktop.last_error}
                                 if action == 'stop':
                                     running = False
                             else:
