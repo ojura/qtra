@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 import desk
@@ -72,6 +72,112 @@ class DeskTests(unittest.TestCase):
             side_effect=AssertionError('A desk test attempted real HTTP.'))
         offline.start()
         self.addCleanup(offline.stop)
+        native = patch.object(desk, 'AgentClient', side_effect=AssertionError('A desk test attempted the real native socket.'))
+        native.start()
+        self.addCleanup(native.stop)
+
+    def native_fixture(self, result, *, pid=731, module_name='LARICS / LYRICS party stage', extra_modules=()):
+        (self.data / 'qtra-modules.json').write_text(json.dumps({
+            'pid': 731, 'socket': str(self.data / 'fixture.sock'), 'modules': {'party_stage': '55'}}))
+        client = MagicMock()
+        client.__enter__.return_value = client
+        responses = {'hello': {'pid': pid, 'uid': desk.os.getuid(), 'name': 'qt-runtime-cube'},
+                     'module.list': [{'id': '55', 'name': module_name}, *extra_modules],
+                     'snippet.run': {'operationId': 'fixture-op'}}
+        client.request.side_effect = lambda command, params: copy.deepcopy(responses[command])
+        client.wait_for_operation.return_value = {'data': {'outcome': 'completed', 'result': result}}
+        return client
+
+    def test_presence_is_one_explicit_write_and_lost_response_is_not_repeated(self):
+        client = ScriptedClient(('/api/admin/presence', {'ok': True}))
+        with patch.object(desk, 'ServiceClient', return_value=client), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(desk.main(['presence', 'online', '--agent-session', 'actual-dj.1', '--sequence', '7']), 0)
+        self.assertEqual(client.calls, [('/api/admin/presence', {
+            'agentSessionId': 'actual-dj.1', 'sequence': 7, 'state': 'online', 'leaseSeconds': 60})])
+        lost = ScriptedClient(('/api/admin/presence', desk.DeskError({'error': 'Response lost', 'responseLost': True})))
+        with self.assertRaises(desk.DeskError):
+            desk.set_presence(lost, 'offline', 'actual-dj.1', 8)
+        self.assertEqual(len(lost.calls), 1)
+
+    def test_invalid_presence_is_rejected_before_any_service_call(self):
+        for fields in [('online', '', 1, 60), ('online', 'space id', 1, 60), ('online', '_dj', 1, 60),
+                       ('watching', 'dj', 1, 60), ('online', 'dj', True, 60),
+                       ('online', 'dj', 0, 60), ('online', 'dj', 2**53, 60),
+                       ('online', 'dj', 1, 29), ('online', 'dj', 1, 121)]:
+            with self.subTest(fields=fields):
+                client = ScriptedClient()
+                with self.assertRaises(desk.DeskError):
+                    desk.set_presence(client, *fields)
+                self.assertFalse(client.calls)
+
+    def test_watcher_exposes_separate_presence_without_renewing_it(self):
+        state = observation()['state']
+        state['dj'] = {'status': 'away', 'lastSeen': 0,
+                       'llm': {'status': 'offline', 'remainingMs': 0, 'activeCount': 0},
+                       'watcher': {'status': 'polling', 'remainingMs': 90000}}
+        client = ScriptedClient(('/api/admin/events?after=10&wait=0',
+                                {'state': state, 'events': [], 'lastId': 10}))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            desk.watch(client, after=10, once=True, wait=0)
+        self.assertEqual(json.loads(output.getvalue())['state']['dj'], state['dj'])
+        self.assertEqual(client.calls, [('/api/admin/events?after=10&wait=0', None)])
+
+    def test_composer_save_and_intent_preserve_the_exact_draft_binding(self):
+        draft = {'guestId': 'fixture-guest', 'composerId': 'fixture-editor', 'draftRevision': 4,
+                 'text': '  Reci DJ-u\nbez pretrage  ', 'editorMode': 'message',
+                 'cursor': 8, 'anchor': 3, 'selectedTrack': {}, 'alternateDraft': {'text': 'Other draft'}}
+        client = self.native_fixture({'composerDraft': draft})
+        saved = self.data / 'draft.json'
+        with patch.object(desk, 'AgentClient', return_value=client), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(desk.main(['--data', str(self.data), 'composer', '--save', str(saved)]), 0)
+        self.assertEqual(json.loads(saved.read_text()), draft)
+        self.assertEqual(client.request.call_args_list[-1].args, ('snippet.run', {
+            'moduleId': '55', 'executor': 'gui', 'request': {'getComposerDraft': True}}))
+        setter = self.native_fixture({'searchIntentResult': {'applied': True, 'effectiveIntent': 'chat'}})
+        with patch.object(desk, 'AgentClient', return_value=setter), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(desk.main(['--data', str(self.data), 'intent', 'chat', '--draft', str(saved)]), 0)
+        payload = setter.request.call_args_list[-1].args[1]
+        self.assertEqual(payload, {'moduleId': '55', 'executor': 'gui', 'request': {
+            'setSearchIntent': {key: draft[key] for key in desk.COMPOSER_FIELDS} | {'intent': 'chat'}}})
+        self.assertEqual([call.args[0] for call in setter.request.call_args_list], ['hello', 'module.list', 'snippet.run'])
+
+    def test_stale_intent_is_reported_without_reading_or_rebinding_a_new_draft(self):
+        draft = {'guestId': 'g', 'composerId': 'editor-A', 'draftRevision': 3, 'text': 'A', 'editorMode': 'message'}
+        saved = self.data / 'draft.json'; saved.write_text(json.dumps(draft))
+        client = self.native_fixture({'searchIntentResult': {'applied': False, 'error': 'Composer changed.'}})
+        output = io.StringIO()
+        with patch.object(desk, 'AgentClient', return_value=client), contextlib.redirect_stdout(output):
+            self.assertEqual(desk.main(['--data', str(self.data), 'intent', 'music', '--draft', str(saved)]), 1)
+        self.assertEqual(json.loads(output.getvalue()), {'applied': False, 'error': 'Composer changed.'})
+        self.assertEqual(client.wait_for_operation.call_count, 1)
+        self.assertEqual([call.args[0] for call in client.request.call_args_list], ['hello', 'module.list', 'snippet.run'])
+
+    def test_stale_native_process_or_module_stops_before_invocation(self):
+        for fields in ({'pid': 732}, {'module_name': 'Unrelated module'}):
+            with self.subTest(fields=fields):
+                client = self.native_fixture({}, **fields)
+                with patch.object(desk, 'AgentClient', return_value=client), self.assertRaises(desk.DeskError):
+                    desk.read_composer(self.data)
+                self.assertNotIn('snippet.run', [call.args[0] for call in client.request.call_args_list])
+                client.wait_for_operation.assert_not_called()
+
+    def test_incomplete_binding_and_old_native_response_are_rejected(self):
+        for draft in ({'text': 'Legacy'}, {'guestId': 'g', 'composerId': 'c', 'draftRevision': True,
+                                         'text': 'A', 'editorMode': 'message'}):
+            with self.subTest(draft=draft), self.assertRaises(desk.DeskError):
+                desk.set_search_intent(self.data, draft, 'chat')
+        client = self.native_fixture({'composerDraft': {'text': 'Legacy'}})
+        with patch.object(desk, 'AgentClient', return_value=client), self.assertRaises(desk.DeskError):
+            desk.read_composer(self.data)
+
+    def test_older_resident_stage_is_rejected_even_when_newer_generation_has_not_run(self):
+        client = self.native_fixture({}, extra_modules=[{
+            'id': '56', 'name': 'LARICS / LYRICS party stage', 'hadSuccessfulRun': False, 'hadAttemptedRun': False}])
+        with patch.object(desk, 'AgentClient', return_value=client), self.assertRaisesRegex(desk.DeskError, 'newer'):
+            desk.read_composer(self.data)
+        self.assertEqual([call.args[0] for call in client.request.call_args_list], ['hello', 'module.list'])
+        client.wait_for_operation.assert_not_called()
 
     def test_front_plan_uses_occurrences_and_preserves_remaining_order(self):
         sync = observation([track('same-first'), track('middle', URI_B),

@@ -54,6 +54,9 @@
   let chatCursor = '';
   let chatTimer = null;
   let chatPending = false;
+  let presenceLease = null;
+  let presenceAvailable = false;
+  let presenceConnection = 'connecting';
   const chatMessages = new Map();
   const requests = new Map();
   let requestButtons = new Map();
@@ -469,14 +472,36 @@
         if (entry) { entry.message.work = work; paintDelivery(entry); }
       }
     }
-    let lastSeen = dj?.lastSeen;
-    if (typeof lastSeen === 'number' && lastSeen < 1e12) lastSeen *= 1000;
-    const stamp = typeof lastSeen === 'number' ? lastSeen : Date.parse(lastSeen || '');
-    const recent = Number.isFinite(stamp) && Date.now() - stamp < 90000;
-    const status = String(dj?.status || '');
-    const active = recent && !['offline', 'away', 'stopped'].includes(status);
+    // Availability comes from an explicit agent lease. Watcher and work records
+    // keep their own lifetimes and cannot renew it.
+    presenceConnection = 'connected';
+    presenceAvailable = false;
+    const lease = dj?.llm;
+    const wall = Date.now(), monotonic = performance.now();
+    if (lease && typeof lease === 'object' && !Array.isArray(lease)
+        && lease.status === 'online' && Number.isSafeInteger(lease.activeCount) && lease.activeCount > 0 && lease.activeCount <= 256
+        && Number.isFinite(wall) && Number.isFinite(monotonic)
+        && Number.isFinite(lease.lastSeen) && lease.lastSeen > 0 && lease.lastSeen <= wall
+        && Number.isFinite(lease.expiresAt) && lease.expiresAt > wall
+        && lease.expiresAt - lease.lastSeen >= 30000 && lease.expiresAt - lease.lastSeen <= 120000
+        && Number.isFinite(lease.remainingMs) && lease.remainingMs > 0
+        && lease.remainingMs <= lease.expiresAt - lease.lastSeen) {
+      let deadline = monotonic + Math.min(lease.remainingMs, lease.expiresAt - wall);
+      // Re-reading a lease with the same wall deadline must not extend its
+      // monotonic deadline, including when another active session leaves.
+      if (presenceLease?.expiresAt === lease.expiresAt) deadline = Math.min(deadline, presenceLease.deadline);
+      presenceLease = { lastSeen: lease.lastSeen, expiresAt: lease.expiresAt, deadline };
+      presenceAvailable = true;
+    }
+    renderPresence();
+  }
+  function renderPresence() {
+    const wall = Date.now(), monotonic = performance.now();
+    const active = presenceAvailable && presenceLease && Number.isFinite(wall) && Number.isFinite(monotonic)
+      && wall >= presenceLease.lastSeen && wall < presenceLease.expiresAt && monotonic < presenceLease.deadline;
     elements['dj-presence'].dataset.state = active ? 'online' : 'away';
-    elements['dj-presence-text'].textContent = active ? (['thinking', 'working'].includes(status) ? 'DJ is on it' : 'DJ is here') : 'Leave the DJ a message';
+    elements['dj-presence-text'].textContent = active ? 'DJ is here'
+      : presenceConnection === 'reconnecting' ? 'Chat reconnecting' : 'Leave the DJ a message';
   }
   async function pollChat() {
     clearTimeout(chatTimer);
@@ -494,8 +519,8 @@
       if (last?.id !== undefined && last?.id !== null) chatCursor = String(last.id);
       paintPresence(reply.dj);
     } catch {
-      elements['dj-presence'].dataset.state = 'away';
-      elements['dj-presence-text'].textContent = 'Chat reconnecting';
+      presenceConnection = 'reconnecting';
+      renderPresence();
     } finally {
       chatPending = false;
       if (!document.hidden) chatTimer = setTimeout(() => void pollChat(), 2000);
@@ -540,9 +565,9 @@
   document.addEventListener('visibilitychange', () => {
     clearTimeout(stateTimer);
     clearTimeout(chatTimer);
-    if (!document.hidden) { void pollState(); void pollChat(); }
+    if (!document.hidden) { renderPresence(); void pollState(); void pollChat(); }
   });
-  setInterval(() => { if (!document.hidden) updateProgress(); }, 1000);
+  setInterval(() => { if (!document.hidden) { updateProgress(); renderPresence(); } }, 1000);
   void pollState();
   void pollChat();
 })();

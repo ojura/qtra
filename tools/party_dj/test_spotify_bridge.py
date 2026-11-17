@@ -8,6 +8,7 @@ import unittest
 
 
 BRIDGE = Path(os.environ.get('SPOTIFY_BRIDGE_PATH', Path(__file__).with_name('spotify_bridge.js'))).resolve()
+NODE = os.environ.get('QTRA_TEST_NODE', 'node')
 HARNESS = r'''
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -88,17 +89,39 @@ async function fixture(options = {}) {
   const connect = {getActiveDevice: () => options.observedDevice || devices.find(device => device.is_active)};
   const map = new Map([[Symbol('PlayerAPI'), api], [Symbol('ConnectDevicesAPI'), connect]]);
   const registry = {_map: map, resolve: symbol => map.get(symbol)};
-  const platform = {getRegistry: () => registry, getSession: async () => ({isAnonymous: false})};
+  const location = {hostname: options.hostname || 'open.spotify.com', pathname: options.path || '/search/previous/tracks'};
+  const catalogue = {query: 'previous', requestId: 'previous-response', tracks: [], mainText: '', visible: true, pushes: []};
+  const showSearch = (query, tracks, requestId = 'response-' + query) => {
+    catalogue.query = query; catalogue.tracks = tracks; catalogue.requestId = requestId; catalogue.mainText = '';
+  };
+  const platform = {getRegistry: () => registry, getSession: async () => ({isAnonymous: false}),
+    getHistory: () => ({push: destination => {
+      catalogue.pushes.push(destination); location.pathname = destination;
+      if (options.onNavigate) options.onNavigate({destination, catalogue, showSearch, location});
+    }})};
   const element = {'__reactFiber$fixture': {memoizedProps: {value: platform}}};
+  const page = {'__reactFiber$search': {get memoizedProps() {
+    return {results: {requestId: catalogue.requestId, tracks: {items: catalogue.tracks}}};
+  }}};
+  const row = {'__reactFiber$row': {get memoizedProps() { return {tracks: catalogue.tracks}; }}};
+  const list = {getAttribute: () => `Search results for “${catalogue.query}”`,
+    querySelector: () => catalogue.tracks.length ? row : null};
   const window = {__laricsDJ: options.previousBridge};
-  const context = {window, document: {querySelectorAll: () => [element]},
-    location: {hostname: options.hostname || 'open.spotify.com'},
-    Date: {now: () => clock}, setTimeout: (callback, ms) => { clock += ms; callback(); }};
+  const timerCalls = [];
+  const context = {window, document: {querySelectorAll: () => [element],
+      getElementById: id => id === 'searchPage' && catalogue.visible ? page : null,
+      querySelector: selector => selector === '[data-testid="track-list"]' ? (catalogue.visible ? list : null)
+        : selector === 'main' ? {innerText: catalogue.mainText} : null},
+    location, Date: {now: () => clock}, setTimeout: (callback, ms) => {
+      timerCalls.push(ms); clock += ms;
+      if (options.onTimer) options.onTimer({catalogue, showSearch, location, clock});
+      callback();
+    }};
   const ready = await vm.runInNewContext(bridgeSource, context);
   assert.equal(ready.ready, true);
   return {bridge: window.__laricsDJ, calls, raw, state, devices, harmony, api, manager, queue, internal, syncQueue,
     lastQueuePayload: () => lastQueuePayload,
-    advance: milliseconds => { clock += milliseconds; }};
+    advance: milliseconds => { clock += milliseconds; }, catalogue, showSearch, location, timerCalls};
 }
 '''
 
@@ -106,9 +129,120 @@ async function fixture(options = {}) {
 class BridgeTransportTests(unittest.TestCase):
     def run_js(self, script):
         source = HARNESS + '\n(async()=>{' + script + '\n})().catch(error=>{console.error(error.stack);process.exitCode=1;});'
-        result = subprocess.run(['node', '-e', source, str(BRIDGE)], capture_output=True,
+        result = subprocess.run([NODE, '-e', source, str(BRIDGE)], capture_output=True,
                                 text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_incremental_catalogue_steps_wait_without_timers_or_transport_commands(self):
+        self.run_js(r'''
+          const f = await fixture();
+          const before = plain(await f.bridge.status());
+          const id = 'catalogue-first';
+          assert.deepEqual(plain(f.bridge.beginSearch('mirna pjesma', id)), {searchId: id, state: 'pending'});
+          assert.equal(f.bridge.pollSearch(id).state, 'pending');
+          assert.deepEqual(f.timerCalls, []);
+          assert.deepEqual(plain(await f.bridge.status()), before);
+          f.showSearch('mirna pjesma', [queuedTrack('one', 'b'), queuedTrack('two', 'b')]);
+          const result = f.bridge.pollSearch(id);
+          assert.equal(result.state, 'complete'); assert.equal(result.searchId, id);
+          assert.deepEqual(plain(result.tracks.map(t => t.uid)), ['one', 'two']);
+          assert.equal(f.bridge.pollSearch(id).state, 'cancelled');
+          assert.deepEqual(f.catalogue.pushes, ['/search/mirna%20pjesma/tracks']);
+          assert.deepEqual(f.calls, []);
+        ''')
+
+    def test_old_catalogue_result_or_cancel_cannot_replace_a_new_search(self):
+        self.run_js(r'''
+          const f = await fixture();
+          f.bridge.beginSearch('first query', 'catalogue-old');
+          f.bridge.beginSearch('second query', 'catalogue-new');
+          assert.equal(f.bridge.cancelSearch('catalogue-old').cancelled, false);
+          assert.equal(f.bridge.pollSearch('catalogue-old').state, 'cancelled');
+          f.showSearch('first query', [queuedTrack('old', 'b')], 'response-old');
+          assert.equal(f.bridge.pollSearch('catalogue-new').state, 'pending');
+          f.showSearch('second query', [queuedTrack('new', 'c')], 'response-new');
+          const current = f.bridge.pollSearch('catalogue-new');
+          assert.equal(current.state, 'complete'); assert.equal(current.tracks[0].uid, 'new');
+          assert.deepEqual(f.catalogue.pushes, ['/search/first%20query/tracks', '/search/second%20query/tracks']);
+          assert.deepEqual(f.calls, []); assert.deepEqual(f.timerCalls, []);
+        ''')
+
+    def test_delayed_catalogue_begin_expires_before_navigation_and_preserves_newer_job(self):
+        self.run_js(r'''
+          const f = await fixture();
+          f.bridge.beginSearch('current query', 'catalogue-current');
+          const delayed = f.bridge.beginSearch('obsolete query', 'catalogue-delayed', 999999);
+          assert.equal(delayed.state, 'cancelled');
+          assert.equal(f.bridge.pollSearch('catalogue-current').state, 'pending');
+          assert.deepEqual(f.catalogue.pushes, ['/search/current%20query/tracks']);
+          assert.throws(() => f.bridge.beginSearch('bad clock', 'catalogue-clock', 1100000), /deadline/);
+          assert.deepEqual(f.calls, []); assert.deepEqual(f.timerCalls, []);
+        ''')
+
+    def test_catalogue_cancellation_and_manual_navigation_do_not_navigate_back(self):
+        self.run_js(r'''
+          const f = await fixture();
+          f.bridge.beginSearch('cancel me', 'catalogue-cancel');
+          assert.equal(f.bridge.cancelSearch('unrelated-job').cancelled, false);
+          assert.equal(f.bridge.cancelSearch('catalogue-cancel').cancelled, true);
+          assert.equal(f.bridge.cancelSearch('catalogue-cancel').cancelled, false);
+          f.showSearch('cancel me', [queuedTrack('late', 'b')]);
+          assert.equal(f.bridge.pollSearch('catalogue-cancel').state, 'cancelled');
+          f.bridge.beginSearch('manual route', 'catalogue-route');
+          f.location.pathname = '/album/user-selected';
+          assert.equal(f.bridge.pollSearch('catalogue-route').state, 'cancelled');
+          assert.equal(f.location.pathname, '/album/user-selected');
+          assert.equal(f.catalogue.pushes.length, 2);
+          assert.deepEqual(f.calls, []); assert.deepEqual(f.timerCalls, []);
+        ''')
+
+    def test_catalogue_deadline_and_no_results_release_the_single_job(self):
+        self.run_js(r'''
+          const f = await fixture();
+          f.bridge.beginSearch('never arrives', 'catalogue-expire');
+          f.advance(16000);
+          assert.equal(f.bridge.pollSearch('catalogue-expire').state, 'error');
+          assert.equal(f.bridge.pollSearch('catalogue-expire').state, 'cancelled');
+          f.bridge.beginSearch('no matching song', 'catalogue-empty');
+          f.catalogue.mainText = 'No results found for no matching song';
+          const empty = f.bridge.pollSearch('catalogue-empty');
+          assert.equal(empty.state, 'complete'); assert.deepEqual(plain(empty.tracks), []);
+          assert.equal(f.bridge.pollSearch('catalogue-empty').state, 'cancelled');
+          assert.deepEqual(f.calls, []); assert.deepEqual(f.timerCalls, []);
+        ''')
+
+    def test_catalogue_identity_validation_and_cached_same_query_are_navigation_safe(self):
+        self.run_js(r'''
+          const f = await fixture({path: '/search/cached%20song/tracks'});
+          f.showSearch('cached song', [queuedTrack('cached', 'b')]);
+          for (const [query, id] of [['', 'catalogue-empty'], ['song', 'bad id'], ['song', null]]) {
+            assert.throws(() => f.bridge.beginSearch(query, id), /query.*unique search ID/);
+          }
+          f.bridge.beginSearch('cached song', 'catalogue-cached');
+          f.bridge.beginSearch('cached song', 'catalogue-cached');
+          assert.throws(() => f.bridge.beginSearch('different text', 'catalogue-cached'), /another query/);
+          const cached = f.bridge.pollSearch('catalogue-cached');
+          assert.equal(cached.state, 'complete'); assert.equal(cached.tracks[0].uid, 'cached');
+          assert.deepEqual(f.catalogue.pushes, []); assert.deepEqual(f.calls, []);
+        ''')
+
+    def test_legacy_catalogue_and_queue_metadata_fast_path_remain_compatible(self):
+        self.run_js(r'''
+          const found = queuedTrack('catalogue-found', 'b');
+          const f = await fixture({onNavigate: ({destination, showSearch}) => {
+            const query = decodeURIComponent(destination.split('/')[2]);
+            showSearch(query, [found]);
+          }});
+          const known = await f.bridge.trackInQueue('spotify:track:' + 'a'.repeat(22));
+          assert.equal(known.uid, 'occurrence-a'); assert.deepEqual(f.catalogue.pushes, []);
+          assert.equal(await f.bridge.trackInQueue(found.uri), null);
+          const legacy = await f.bridge.search('legacy query');
+          assert.equal(legacy[0].uri, found.uri);
+          const metadata = await f.bridge.track(found.uri);
+          assert.equal(metadata.uri, found.uri);
+          assert.equal(f.catalogue.pushes.length, 2);
+          assert.deepEqual(f.calls, []);
+        ''')
 
     def test_targeted_pause_and_resume_return_the_observed_device_state(self):
         self.run_js(r'''

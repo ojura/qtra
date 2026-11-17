@@ -20,7 +20,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit, unquote
 
-from spotify_native import SpotifyClient, SpotifyError
+from spotify_native import SpotifyClient, SpotifyError, SpotifySearchCancelled
 from speech import DedicationAudio
 from karaoke import Karaoke
 
@@ -35,6 +35,13 @@ AUDIO_ACT_MS = 10 * 60 * 1000
 PROCESSING_LEASE_MS = 15 * 60 * 1000
 PROCESSING_LIMIT = 50
 OBSERVATION_TTL_MS = 10000
+WATCHER_LEASE_MS = 90000
+AGENT_SESSION_LIMIT = 256
+AGENT_SESSION = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$')
+SEARCH_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$')
+SEARCH_RETAINED_LIMIT = 256
+SEARCH_ACTIVE_LIMIT = 16
+SEARCH_RETENTION_MS = 120000
 MESSAGE_SOURCES = ('native', 'web', 'api', 'test')
 MATCH_BASES = ('title', 'literal_lyrics', 'semantic')
 COMMAND_ACTIONS = ('next', 'pause', 'resume', 'move', 'reorder', 'playback')
@@ -45,6 +52,10 @@ SONG_THEMES = ('record', 'speaker', 'headphones', 'microphone', 'bottles',
 
 def now_ms():
     return int(time.time() * 1000)
+
+
+def monotonic_ms():
+    return int(time.monotonic() * 1000)
 
 
 def clean(value, maximum=500):
@@ -60,6 +71,19 @@ def bounded_text(value, field, maximum, *, required=False):
     if required and not result:
         raise ValueError(f'{field} must not be empty.')
     return result
+
+
+def search_identifier(value):
+    if not isinstance(value, str) or not SEARCH_ID.fullmatch(value):
+        raise ValueError('searchId must be an 8 to 128 character letters/digits/._:- identifier.')
+    return value
+
+
+class SearchRejected(ValueError):
+    def __init__(self, search_id, status, message):
+        super().__init__(message)
+        self.search_id = search_id
+        self.status = status
 
 
 def prepare_matches(body, uris):
@@ -170,12 +194,18 @@ class Party:
         self.guests = {}
         self.rate = collections.defaultdict(collections.deque)
         self.search_cache = {}
+        self.search_requests = {}
         self.track_cache = {}
         self.playback = {'nowPlaying': None, 'queue': []}
         self._control_generation = 0
         self.spotify = {'connected': False, 'error': 'Connecting to Spotify.'}
         self.revision = 0
         self.last_seen = 0
+        # Availability is an explicit live-agent lease, never reader activity.
+        # Retain expired/offline sequence watermarks for this process lifetime.
+        self.agent_presence = {}
+        self.watcher_last_seen = 0
+        self.watcher_deadline = 0
         self.processing_messages = self.setting('processingMessages', {})
         self.last_track = ''
         self._queue_signature = None
@@ -322,10 +352,64 @@ class Party:
 
     def _dj(self):
         stamp = now_ms()
-        age = stamp - self.last_seen
-        return {'status': 'listening' if age < 90000 else 'away', 'lastSeen': self.last_seen,
+        monotonic = monotonic_ms()
+        active = []
+        for presence in self.agent_presence.values():
+            if presence['state'] != 'online' or presence['lastSeen'] > stamp:
+                continue
+            remaining = min(presence['expiresAt'] - stamp, presence['deadline'] - monotonic)
+            if remaining > 0:
+                active.append((presence, remaining))
+        llm = {'status': 'online' if active else 'offline',
+               'lastSeen': max((value['lastSeen'] for value, unused in active), default=0) if active else
+                           max((value['lastSeen'] for value in self.agent_presence.values()), default=0),
+               'expiresAt': max((value['expiresAt'] for value, unused in active), default=0),
+               'remainingMs': max((remaining for unused, remaining in active), default=0),
+               'activeCount': len(active)}
+        watcher_remaining = (max(0, min(self.watcher_last_seen + WATCHER_LEASE_MS - stamp,
+                                        self.watcher_deadline - monotonic))
+                             if 0 < self.watcher_last_seen <= stamp else 0)
+        watcher = {'status': 'polling' if watcher_remaining else 'away',
+                   'lastSeen': self.watcher_last_seen,
+                   'expiresAt': self.watcher_last_seen + WATCHER_LEASE_MS if watcher_remaining else 0,
+                   'remainingMs': watcher_remaining}
+        return {'status': 'listening' if active else 'away', 'lastSeen': llm['lastSeen'],
+                'llm': llm, 'watcher': watcher,
                 'processingMessageIds': sorted(int(key) for key in self._active_processing(stamp)),
                 'messageWork': self._work_map(stamp)}
+
+    def _set_presence(self, body):
+        """Validate and update one explicit producer while the caller holds lock."""
+        if set(body) - {'agentSessionId', 'sequence', 'state', 'leaseSeconds'}:
+            raise ValueError('Presence accepts agentSessionId, sequence, state and optional leaseSeconds only.')
+        session = body.get('agentSessionId')
+        sequence = body.get('sequence')
+        state = body.get('state')
+        lease = body.get('leaseSeconds', 60)
+        if not isinstance(session, str) or not AGENT_SESSION.fullmatch(session):
+            raise ValueError('agentSessionId must be a 1 to 128 character letters/digits/._:- identifier.')
+        if type(sequence) is not int or not 1 <= sequence <= 2**53 - 1:
+            raise ValueError('sequence must be a positive integer no greater than 2^53 - 1.')
+        if state not in ('online', 'offline'):
+            raise ValueError('Presence state must be online or offline.')
+        if type(lease) is not int or not 30 <= lease <= 120:
+            raise ValueError('leaseSeconds must be an integer from 30 to 120.')
+        prepared = {'sequence': sequence, 'state': state, 'leaseSeconds': lease}
+        previous = self.agent_presence.get(session)
+        if previous:
+            if sequence < previous['sequence']:
+                raise ValueError('Presence sequence is older than the last accepted update.')
+            if sequence == previous['sequence']:
+                if any(previous[key] != value for key, value in prepared.items()):
+                    raise ValueError('This presence sequence was already used for a different update.')
+                return False
+        elif len(self.agent_presence) >= AGENT_SESSION_LIMIT:
+            raise ValueError('This service has reached its agent-session limit; reuse an existing session with a higher sequence.')
+        stamp = now_ms()
+        self.agent_presence[session] = {**prepared, 'lastSeen': stamp,
+            'expiresAt': stamp + lease * 1000 if state == 'online' else 0,
+            'deadline': monotonic_ms() + lease * 1000 if state == 'online' else 0}
+        return True
 
     def _work_dict(self, row, stamp=None):
         stamp = now_ms() if stamp is None else stamp
@@ -546,23 +630,107 @@ class Party:
                 raise ValueError('A little breathing room, please. Try again in a moment.')
             bucket.append(time.monotonic())
 
-    def search(self, query):
+    def _prune_search_requests(self):
+        stamp = monotonic_ms()
+        for identifier, request in list(self.search_requests.items()):
+            if not request['active'] and request['expiresAt'] <= stamp:
+                del self.search_requests[identifier]
+
+    def _search_capacity_error(self, identifier):
+        return SearchRejected(identifier, 429, 'Too many retained or active searches. Try again shortly.')
+
+    def _begin_search(self, identifier):
+        self._prune_search_requests()
+        previous = self.search_requests.get(identifier)
+        if previous:
+            if previous['cancelled']:
+                return None
+            raise SearchRejected(identifier, 409, 'This searchId has already been used.')
+        if (len(self.search_requests) >= SEARCH_RETAINED_LIMIT
+                or sum(request['active'] for request in self.search_requests.values()) >= SEARCH_ACTIVE_LIMIT):
+            raise self._search_capacity_error(identifier)
+        # The active entry reserves its eventual tombstone slot. Never evict it.
+        request = {'active': True, 'cancelled': False, 'event': threading.Event(), 'expiresAt': None}
+        self.search_requests[identifier] = request
+        return request
+
+    def _finish_search(self, identifier, request, tracks):
+        request['cancelled'] = request['cancelled'] or request['event'].is_set()
+        request['active'] = False
+        request['expiresAt'] = monotonic_ms() + SEARCH_RETENTION_MS
+        del request['event']
+        return {'tracks': [] if request['cancelled'] else tracks,
+                'cancelled': request['cancelled'], 'searchId': identifier}
+
+    def cancel_search(self, body):
+        if not isinstance(body, dict) or set(body) != {'searchId'}:
+            raise ValueError('Search cancellation requires only searchId.')
+        identifier = search_identifier(body['searchId'])
+        with self.lock:
+            self._prune_search_requests()
+            request = self.search_requests.get(identifier)
+            if request is None:
+                if len(self.search_requests) >= SEARCH_RETAINED_LIMIT:
+                    raise self._search_capacity_error(identifier)
+                # A cancel can arrive before the delayed GET admission.
+                self.search_requests[identifier] = {'active': False, 'cancelled': True,
+                    'expiresAt': monotonic_ms() + SEARCH_RETENTION_MS}
+            else:
+                request['cancelled'] = True
+                if request['active']:
+                    request['event'].set()
+                # Repeated cancellation never extends terminal retention.
+            return {'searchId': identifier, 'cancelRequested': True}
+
+    def search(self, query, *, search_id=None):
+        if search_id is not None:
+            search_identifier(search_id)
         query = clean(query, 180)
-        if len(query) < 2:
-            return {'tracks': []}
         key = query.casefold()
         with self.lock:
+            request = self._begin_search(search_id) if search_id is not None else None
+            if search_id is not None and request is None:
+                return {'tracks': [], 'cancelled': True, 'searchId': search_id}
             cached = self.search_cache.get(key)
-            if cached and time.monotonic() - cached[0] < 45:
-                return {'tracks': cached[1]}
-        tracks = self.client.search(query)
+            if len(query) < 2 or (cached and time.monotonic() - cached[0] < 45):
+                tracks = [] if len(query) < 2 else cached[1]
+                return self._finish_search(search_id, request, tracks) if request is not None else {'tracks': tracks}
+        # The transport only receives an Event, never a callback into Party.
+        # Its own search gate and short poll evaluations release the client lock.
+        try:
+            tracks = (self.client.search(query, cancel_event=request['event']) if request is not None
+                      else self.client.search(query))
+        except SpotifySearchCancelled:
+            with self.lock:
+                if request is None:
+                    return {'tracks': [], 'cancelled': True}
+                request['cancelled'] = True
+                return self._finish_search(search_id, request, [])
+        except Exception:
+            with self.lock:
+                if request is not None:
+                    cancelled = request['cancelled'] or request['event'].is_set()
+                    result = self._finish_search(search_id, request, [])
+                    if cancelled:
+                        return result
+            raise
         with self.lock:
-            for track in tracks:
-                self.track_cache[track['uri']] = track
-            self.search_cache[key] = (time.monotonic(), tracks)
-            if len(self.search_cache) > 100:
-                self.search_cache.pop(next(iter(self.search_cache)))
-        return {'tracks': tracks}
+            try:
+                if request is not None and (request['cancelled'] or request['event'].is_set()):
+                    return self._finish_search(search_id, request, [])
+                if (not isinstance(tracks, list) or any(not isinstance(track, dict)
+                        or not isinstance(track.get('uri'), str) or not TRACK.fullmatch(track['uri']) for track in tracks)):
+                    raise SpotifyError('Spotify returned malformed catalogue tracks.', dispatched=False)
+                for track in tracks:
+                    self.track_cache[track['uri']] = track
+                self.search_cache[key] = (time.monotonic(), tracks)
+                if len(self.search_cache) > 100:
+                    self.search_cache.pop(next(iter(self.search_cache)))
+                return self._finish_search(search_id, request, tracks) if request is not None else {'tracks': tracks}
+            except Exception:
+                if request is not None and request['active']:
+                    self._finish_search(search_id, request, [])
+                raise
 
     def lookup_track(self, uri):
         if not isinstance(uri, str) or not TRACK.fullmatch(uri):
@@ -896,6 +1064,10 @@ class Party:
 
     def _admin(self, action, body, *, context=None, command=None):
         with self.lock:
+            if action == 'presence':
+                if self._set_presence(body):
+                    self._publish()
+                return {'dj': self._dj()}
             processing = self._prepare_processing(body) if action == 'processing' else None
             work = self._prepare_work(body) if action == 'work' else None
             if action == 'configure' and 'bookEnabled' in body and not isinstance(body['bookEnabled'], bool):
@@ -1092,6 +1264,8 @@ class Party:
         deadline = time.monotonic() + min(max(wait, 0), 45)
         with self.changed:
             self.last_seen = now_ms()
+            self.watcher_last_seen = self.last_seen
+            self.watcher_deadline = monotonic_ms() + WATCHER_LEASE_MS
             if after < 0:
                 after = self.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
                 return {'events': [], 'lastId': after, 'state': self.snapshot()}
@@ -1330,8 +1504,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.party.visit(query.get('guestId', [''])[0])
                 self.send_json(self.party.snapshot())
             elif url.path == '/api/search':
+                identifiers = parse_qs(url.query, keep_blank_values=True).get('searchId')
+                if identifiers is not None and len(identifiers) != 1:
+                    raise ValueError('Supply searchId exactly once.')
+                search_id = search_identifier(identifiers[0]) if identifiers is not None else None
                 self.party.limit(self.client_address[0], 'search', 30, 60)
-                self.send_json(self.party.search(query.get('q', [''])[0]))
+                self.send_json(self.party.search(query.get('q', [''])[0], search_id=search_id))
             elif url.path == '/api/search/describe':
                 self.send_json(self.party.description_search(query.get('id', [''])[0]))
             elif url.path == '/api/track':
@@ -1347,6 +1525,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.file(self.party.data, 'request-qr.png')
             else:
                 self.file(ROOT / 'web', 'index.html' if url.path == '/' else url.path.lstrip('/'))
+        except SearchRejected as error:
+            self.send_json({'tracks': [], 'searchId': error.search_id, 'error': str(error)}, error.status)
         except ValueError as error:
             self.send_json({'error': str(error)}, 400)
         except SpotifyError as error:
@@ -1384,6 +1564,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == '/api/message/recall':
                 self.party.limit(self.client_address[0], 'recall', 30, 60)
                 self.send_json(self.party.recall_message(body))
+            elif url.path == '/api/search/cancel':
+                self.send_json(self.party.cancel_search(body))
             elif url.path == '/api/search/describe':
                 self.party.limit(self.client_address[0], 'describe', 15, 60)
                 self.send_json(self.party.describe_search(body))
@@ -1393,6 +1575,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(self.party.mood(body))
             else:
                 self.send_json({'error': 'Unknown endpoint.'}, 404)
+        except SearchRejected as error:
+            self.send_json({'tracks': [], 'searchId': error.search_id, 'error': str(error)}, error.status)
         except (ValueError, TypeError) as error:
             self.send_json({'error': str(error)}, 400)
         except SpotifyError as error:

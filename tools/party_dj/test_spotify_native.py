@@ -344,5 +344,282 @@ class SpotifyTransportTests(unittest.TestCase):
         self.assertEqual(operations, ['reorder-dispatched', 'reorder-confirmed', 'status-observed'])
 
 
+class CatalogueFixture:
+    def __init__(self, client):
+        self.client = client
+        self.calls = []
+        self.http_paths = []
+        self.started = threading.Event()
+        self.ready = threading.Event()
+        self.active = None
+        self.on_bootstrap = None
+        self.on_method = None
+        self.known = None
+        self.tracks = [{'uri': 'spotify:track:' + 'b' * 22, 'title': 'Fixture song'}]
+        self.status = {'nowPlaying': {'uid': 'current', 'paused': False}, 'queue': []}
+
+    def http(self, url, body=None, timeout=25):
+        path = urlsplit(url).path
+        self.http_paths.append(path)
+        if path in ('/release', '/cdp'):
+            return {}
+        if path != '/eval':
+            raise AssertionError('Unexpected connection operation: ' + path)
+        if not self.client.lock._is_owned():
+            raise AssertionError('A search evaluation escaped the shared transport lock.')
+        expression = body['expression']
+        if expression.startswith('(async'):
+            if self.on_bootstrap:
+                self.on_bootstrap()
+            return {'result': {'value': {'ready': True}}}
+        cleanup = 'window.__laricsDJ?.cancelSearch?.('
+        if expression.startswith(cleanup):
+            method, arguments = 'cancelSearch', [json.loads(expression[len(cleanup):-1])]
+        else:
+            name, raw = expression[len('window.__laricsDJ['):].split('](...', 1)
+            method, arguments = json.loads(name), json.loads(raw[:-1])
+        self.calls.append((method, arguments))
+        if self.on_method:
+            overridden = self.on_method(method, arguments)
+            if overridden is not NotImplemented:
+                return {'result': {'value': overridden}}
+        if method == 'beginSearch':
+            query, identifier, expires_at = arguments
+            if not time.time() * 1000 - 1000 <= expires_at <= time.time() * 1000 + 17000:
+                raise AssertionError('Search admission has no bounded absolute deadline.')
+            self.active = (query, identifier)
+            self.started.set()
+            result = {'searchId': identifier, 'state': 'pending'}
+        elif method == 'pollSearch':
+            identifier = arguments[0]
+            if not self.active or self.active[1] != identifier:
+                result = {'searchId': identifier, 'state': 'cancelled'}
+            elif self.ready.is_set():
+                result = {'searchId': identifier, 'state': 'complete', 'tracks': self.tracks}
+                self.active = None
+            else:
+                result = {'searchId': identifier, 'state': 'pending'}
+        elif method == 'cancelSearch':
+            identifier = arguments[0]
+            if self.active and self.active[1] == identifier:
+                self.active = None
+            result = {'searchId': identifier, 'state': 'cancelled'}
+        elif method == 'status':
+            result = self.status
+        elif method == 'setPaused':
+            result = {'ok': True, 'changed': True, 'status': self.status}
+        elif method == 'trackInQueue':
+            result = self.known
+        else:
+            raise AssertionError('Unexpected fixture method: ' + method)
+        return {'result': {'value': result}}
+
+
+class SpotifyCatalogueTests(unittest.TestCase):
+    def setUp(self):
+        for target, attribute in ((native.urllib.request, 'urlopen'), (native.websocket, 'create_connection')):
+            guard = patch.object(target, attribute, side_effect=AssertionError('No real connection in catalogue fixtures'))
+            guard.start()
+            self.addCleanup(guard.stop)
+        for name, value in (('SEARCH_POLL_INTERVAL', .01), ('SEARCH_LOCK_INTERVAL', .01)):
+            setting = patch.object(native, name, value)
+            setting.start()
+            self.addCleanup(setting.stop)
+
+    def fixture(self):
+        client = native.SpotifyClient()
+        client.session = 'fixture-existing-session'
+        client.last_native_check = time.monotonic()
+        daemon = CatalogueFixture(client)
+        transport = patch.object(client, '_http', side_effect=daemon.http)
+        transport.start()
+        self.addCleanup(transport.stop)
+        self.addCleanup(client.close)
+        return client, daemon
+
+    def test_cancel_before_admission_or_during_bootstrap_never_navigates(self):
+        for during_bootstrap in (False, True):
+            with self.subTest(during_bootstrap=during_bootstrap):
+                client, daemon = self.fixture()
+                cancelled = threading.Event()
+                if during_bootstrap:
+                    daemon.on_bootstrap = cancelled.set
+                else:
+                    cancelled.set()
+                with self.assertRaises(native.SpotifySearchCancelled) as caught:
+                    client.search('obsolete query', cancel_event=cancelled)
+                self.assertFalse(caught.exception.dispatched)
+                self.assertEqual(daemon.calls, [])
+                self.assertFalse(any(path in ('/attach', '/prepare', '/release') for path in daemon.http_paths))
+                self.assertEqual(client.session, 'fixture-existing-session')
+
+    def test_pending_catalogue_yields_to_fresh_status_and_an_explicit_write(self):
+        client, daemon = self.fixture()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            search = pool.submit(client.search, 'slow catalogue')
+            try:
+                self.assertTrue(daemon.started.wait(2))
+                self.assertEqual(pool.submit(client.status).result(timeout=1), daemon.status)
+                self.assertTrue(pool.submit(client.set_paused, True, 'current', 'device').result(timeout=1)['ok'])
+                self.assertFalse(search.done(), 'Search completed before its result was available.')
+            finally:
+                daemon.ready.set()
+            self.assertEqual(search.result(timeout=2), daemon.tracks)
+        methods = [method for method, unused in daemon.calls]
+        self.assertLess(methods.index('beginSearch'), methods.index('status'))
+        self.assertEqual(methods.count('setPaused'), 1)
+
+    def test_superseded_waiter_never_starts_and_newest_search_can_follow(self):
+        client, daemon = self.fixture()
+        first_cancel, old_cancel, old_entered = threading.Event(), threading.Event(), threading.Event()
+        def old_search():
+            old_entered.set()
+            return client.search('obsolete waiter', cancel_event=old_cancel)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(client.search, 'active old query', cancel_event=first_cancel)
+            try:
+                self.assertTrue(daemon.started.wait(2))
+                old = pool.submit(old_search)
+                self.assertTrue(old_entered.wait(2))
+                old_cancel.set()
+                with self.assertRaises(native.SpotifySearchCancelled):
+                    old.result(timeout=1)
+                newest = pool.submit(client.search, 'newest query')
+                first_cancel.set()
+                with self.assertRaises(native.SpotifySearchCancelled):
+                    first.result(timeout=1)
+                daemon.ready.set()
+                self.assertEqual(newest.result(timeout=2), daemon.tracks)
+            finally:
+                first_cancel.set(); old_cancel.set(); daemon.ready.set()
+        self.assertEqual([args[0] for method, args in daemon.calls if method == 'beginSearch'],
+                         ['active old query', 'newest query'])
+        self.assertEqual(client.session, 'fixture-existing-session')
+        self.assertNotIn('/release', daemon.http_paths)
+
+    def test_waiting_for_transport_can_be_cancelled_without_acquiring_it(self):
+        client, daemon = self.fixture()
+        cancelled, entered = threading.Event(), threading.Event()
+        def search():
+            entered.set()
+            return client.search('obsolete', cancel_event=cancelled)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            with client.lock:
+                pending = pool.submit(search)
+                self.assertTrue(entered.wait(2))
+                cancelled.set()
+                with self.assertRaises(native.SpotifySearchCancelled):
+                    pending.result(timeout=1)
+        self.assertEqual(daemon.http_paths, [])
+        self.assertFalse(client.search_lock.locked())
+
+    def test_search_cancel_does_not_interrupt_or_wait_behind_a_real_write(self):
+        client, daemon = self.fixture()
+        cancelled, write_entered, release_write = threading.Event(), threading.Event(), threading.Event()
+        def handle(method, arguments):
+            if method == 'setPaused':
+                write_entered.set()
+                if not release_write.wait(2):
+                    raise AssertionError('The fixture did not release its explicit write.')
+                return {'ok': True, 'status': daemon.status}
+            return NotImplemented
+        daemon.on_method = handle
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            searching = pool.submit(client.search, 'slow result', cancel_event=cancelled)
+            try:
+                self.assertTrue(daemon.started.wait(2))
+                writing = pool.submit(client.set_paused, True, 'current', 'device')
+                self.assertTrue(write_entered.wait(2))
+                count = len(daemon.calls)
+                cancelled.set()
+                with self.assertRaises(native.SpotifySearchCancelled):
+                    searching.result(timeout=1)
+                self.assertFalse(writing.done())
+                self.assertEqual(len(daemon.calls), count, 'Cancelled search interleaved an evaluation with the write.')
+            finally:
+                release_write.set(); cancelled.set(); daemon.ready.set()
+            self.assertTrue(writing.result(timeout=2)['ok'])
+        self.assertEqual(sum(method == 'setPaused' for method, unused in daemon.calls), 1)
+
+    def test_close_cancels_active_and_waiting_reads_without_new_attachment(self):
+        client, daemon = self.fixture()
+        waiter_entered = threading.Event()
+        acquire = client._search_acquire
+        def observed_acquire(lock, *arguments):
+            if lock is client.search_lock:
+                waiter_entered.set()
+            return acquire(lock, *arguments)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            active = pool.submit(client.search, 'active before close')
+            self.assertTrue(daemon.started.wait(2))
+            with patch.object(client, '_search_acquire', side_effect=observed_acquire):
+                waiting = pool.submit(client.search, 'queued before close')
+                self.assertTrue(waiter_entered.wait(2))
+                client.close()
+                for future in (active, waiting):
+                    with self.assertRaises(native.SpotifySearchCancelled):
+                        future.result(timeout=1)
+        self.assertEqual([args[0] for method, args in daemon.calls if method == 'beginSearch'], ['active before close'])
+        self.assertFalse(any(path in ('/targets', '/attach', '/prepare') for path in daemon.http_paths))
+        self.assertIsNone(client.session)
+
+    def test_connection_change_abandons_the_old_job_without_rebinding(self):
+        client, daemon = self.fixture()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            search = pool.submit(client.search, 'old connection')
+            self.assertTrue(daemon.started.wait(2))
+            with client.lock:
+                before = len(daemon.calls)
+                client.session = 'replacement-owned-session'
+            with self.assertRaises(native.SpotifySearchCancelled):
+                search.result(timeout=1)
+        self.assertFalse(any(method in ('pollSearch', 'cancelSearch') for method, unused in daemon.calls[before:]))
+        self.assertFalse(any(path in ('/targets', '/attach', '/prepare', '/release') for path in daemon.http_paths))
+
+    def test_unreadable_or_wrong_id_results_fail_once_and_release_the_catalogue_gate(self):
+        for malformed in (None, {}, {'searchId': 'wrong', 'state': 'complete', 'tracks': []},
+                          {'state': 'unknown'}, {'state': 'complete', 'tracks': None},
+                          {'state': 'complete', 'tracks': ['not a track']}):
+            with self.subTest(result=malformed):
+                client, daemon = self.fixture()
+                def reply(method, arguments):
+                    if method != 'pollSearch':
+                        return NotImplemented
+                    return {'searchId': arguments[0], **malformed} if isinstance(malformed, dict) else malformed
+                daemon.on_method = reply
+                with self.assertRaises(native.SpotifyError):
+                    client.search('fixture')
+                self.assertEqual(sum(method == 'beginSearch' for method, unused in daemon.calls), 1)
+                self.assertFalse(client.search_lock.locked())
+                self.assertNotIn('/release', daemon.http_paths)
+
+    def test_timeout_cleanup_does_not_reconnect_or_replay_search(self):
+        client, daemon = self.fixture()
+        with patch.object(native, 'SEARCH_TIMEOUT', .04):
+            with self.assertRaisesRegex(native.SpotifyError, 'still loading'):
+                client.search('never ready')
+        self.assertEqual(sum(method == 'beginSearch' for method, unused in daemon.calls), 1)
+        self.assertEqual(sum(method == 'cancelSearch' for method, unused in daemon.calls), 1)
+        self.assertEqual(client.session, 'fixture-existing-session')
+        self.assertNotIn('/release', daemon.http_paths)
+
+    def test_track_lookup_keeps_queue_fast_path_and_yields_during_catalogue_fallback(self):
+        client, daemon = self.fixture()
+        uri = daemon.tracks[0]['uri']
+        daemon.known = daemon.tracks[0]
+        self.assertEqual(client.track(uri), daemon.known)
+        self.assertEqual([method for method, unused in daemon.calls], ['trackInQueue'])
+        daemon.known = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            lookup = pool.submit(client.track, uri)
+            try:
+                self.assertTrue(daemon.started.wait(2))
+                self.assertEqual(pool.submit(client.status).result(timeout=1), daemon.status)
+            finally:
+                daemon.ready.set()
+            self.assertEqual(lookup.result(timeout=2), daemon.tracks[0])
+        self.assertEqual([args[0] for method, args in daemon.calls if method == 'beginSearch'], [uri])
+
+
 if __name__ == '__main__':
     unittest.main()

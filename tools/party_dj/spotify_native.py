@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 import websocket
 
@@ -22,11 +23,44 @@ class SpotifyTransportError(SpotifyError):
     """The browser/native control connection needs to be established again."""
 
 
+class SpotifySearchCancelled(SpotifyError):
+    """An obsolete catalogue read ended without a playback or queue command."""
+
+    def __init__(self, message='This catalogue search was cancelled.'):
+        super().__init__(message, dispatched=False)
+
+
+SEARCH_TIMEOUT = 16.0
+SEARCH_POLL_INTERVAL = .18
+SEARCH_LOCK_INTERVAL = .05
+
+
+class _SearchCancellation:
+    def __init__(self, client, event):
+        self.client, self.event = client, event
+        self.epoch = client._search_epoch
+
+    def is_set(self):
+        return self.epoch != self.client._search_epoch or (self.event is not None and self.event.is_set())
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while not self.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            delay = min(SEARCH_LOCK_INTERVAL, remaining)
+            self.event.wait(delay) if self.event is not None else time.sleep(delay)
+        return True
+
+
 class SpotifyClient:
     def __init__(self, native_port=9224, daemon='http://127.0.0.1:7799'):
         self.native_port = native_port
         self.daemon = daemon
         self.lock = threading.RLock()
+        self.search_lock = threading.Lock()
+        self._search_epoch = 0
         self.ws = None
         self.target = None
         self.session = None
@@ -94,6 +128,7 @@ class SpotifyClient:
 
     def close(self):
         with self.lock:
+            self._search_epoch += 1
             self._release_browser()
             if self.ws:
                 self.ws.close()
@@ -112,35 +147,48 @@ class SpotifyClient:
         self.last_native_check = -100
         self.mode = 'connecting'
 
+    def _evaluate_connected(self, expression, timeout=None):
+        """Evaluate under self.lock using only the caller's existing connection."""
+        params = {'expression': expression, 'returnByValue': True, 'awaitPromise': True, 'userGesture': True}
+        if self.ws:
+            self.sequence += 1
+            ident = self.sequence
+            previous_timeout = self.ws.gettimeout() if timeout is not None else None
+            if timeout is not None:
+                self.ws.settimeout(timeout)
+            try:
+                self.ws.send(json.dumps({'id': ident, 'method': 'Runtime.evaluate', 'params': params}))
+                deadline = time.monotonic() + (25 if timeout is None else timeout)
+                while True:
+                    if time.monotonic() > deadline:
+                        raise SpotifyTransportError('The native Spotify control did not respond in time.')
+                    event = json.loads(self.ws.recv())
+                    if event.get('id') == ident:
+                        if 'error' in event:
+                            raise SpotifyTransportError(str(event['error']))
+                        result = event['result']
+                        break
+            finally:
+                if timeout is not None:
+                    self.ws.settimeout(previous_timeout)
+        else:
+            result = self._http(self.daemon + '/eval', {'sessionId': self.session,
+                'expression': expression, 'returnByValue': True, 'awaitPromise': True,
+                'timeout_seconds': 20 if timeout is None else timeout},
+                timeout=25 if timeout is None else timeout + 1)
+        if 'exceptionDetails' in result:
+            exception = result['exceptionDetails'].get('exception', {})
+            description = exception.get('description') or result['exceptionDetails'].get('text', 'Spotify command failed.')
+            raise SpotifyError(description.split('\n', 1)[0].removeprefix('Error: '))
+        if 'error' in result:
+            raise SpotifyTransportError(str(result['error']))
+        return result.get('result', {}).get('value')
+
     def evaluate(self, expression):
         with self.lock:
             try:
                 self._connect()
-                params = {'expression': expression, 'returnByValue': True, 'awaitPromise': True, 'userGesture': True}
-                if self.ws:
-                    self.sequence += 1
-                    ident = self.sequence
-                    self.ws.send(json.dumps({'id': ident, 'method': 'Runtime.evaluate', 'params': params}))
-                    deadline = time.monotonic() + 25
-                    while True:
-                        if time.monotonic() > deadline:
-                            raise SpotifyTransportError('The native Spotify control did not respond in time.')
-                        event = json.loads(self.ws.recv())
-                        if event.get('id') == ident:
-                            if 'error' in event:
-                                raise SpotifyTransportError(str(event['error']))
-                            result = event['result']
-                            break
-                else:
-                    result = self._http(self.daemon + '/eval', {'sessionId': self.session,
-                        'expression': expression, 'returnByValue': True, 'awaitPromise': True, 'timeout_seconds': 20})
-                if 'exceptionDetails' in result:
-                    exception = result['exceptionDetails'].get('exception', {})
-                    description = exception.get('description') or result['exceptionDetails'].get('text', 'Spotify command failed.')
-                    raise SpotifyError(description.split('\n', 1)[0].removeprefix('Error: '))
-                if 'error' in result:
-                    raise SpotifyTransportError(str(result['error']))
-                return result.get('result', {}).get('value')
+                return self._evaluate_connected(expression)
             except SpotifyTransportError:
                 self._reset_transport()
                 raise
@@ -162,11 +210,116 @@ class SpotifyClient:
     def status(self):
         return self.call('status')
 
-    def search(self, query):
-        return self.call('search', query)
+    @staticmethod
+    def _check_search(cancel_event, deadline):
+        if cancel_event is not None and cancel_event.is_set():
+            raise SpotifySearchCancelled()
+        if time.monotonic() >= deadline:
+            raise SpotifyError('Spotify search is still loading. Try again in a moment.', dispatched=False)
+
+    def _search_acquire(self, lock, cancel_event, deadline):
+        while True:
+            self._check_search(cancel_event, deadline)
+            if lock.acquire(timeout=min(SEARCH_LOCK_INTERVAL, max(0, deadline - time.monotonic()))):
+                try:
+                    self._check_search(cancel_event, deadline)
+                except Exception:
+                    lock.release()
+                    raise
+                return
+
+    def _connection_key(self):
+        return (id(self.ws) if self.ws is not None else None, self.target, self.session)
+
+    def _search_step(self, method, arguments, cancel_event, deadline, connection=None):
+        self._search_acquire(self.lock, cancel_event, deadline)
+        try:
+            if connection is not None and connection != self._connection_key():
+                raise SpotifySearchCancelled('The catalogue connection changed before its result arrived.')
+            ready = self.evaluate((Path(__file__).parent / 'spotify_bridge.js').read_text())
+            if not isinstance(ready, dict) or not ready.get('ready'):
+                detail = ready.get('error') if isinstance(ready, dict) else None
+                raise SpotifyError(detail or 'Spotify is still loading.', dispatched=False)
+            # Cancellation may arrive during connection/bootstrap, before a
+            # browser search has been admitted. Do not navigate after it.
+            self._check_search(cancel_event, deadline)
+            if connection is not None and connection != self._connection_key():
+                raise SpotifySearchCancelled('The catalogue connection changed before its result arrived.')
+            if method == 'beginSearch':
+                # CDP response expiry does not revoke a queued evaluation.
+                # A late begin must not navigate after this read's budget.
+                expires_at = int(time.time() * 1000 + max(0, deadline - time.monotonic()) * 1000)
+                arguments = [*arguments, expires_at]
+            expression = f'window.__laricsDJ[{json.dumps(method)}](...{json.dumps(arguments, ensure_ascii=False)})'
+            return self.evaluate(expression), self._connection_key()
+        finally:
+            self.lock.release()
+
+    def _abandon_search(self, identifier, connection):
+        # A search job contains no running JS loop. Cleanup is best-effort and
+        # must neither wait behind a real command nor reconnect a lost session.
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
+            if connection != self._connection_key() or not (self.ws or self.session):
+                return
+            self._evaluate_connected(f'window.__laricsDJ?.cancelSearch?.({json.dumps(identifier)})', timeout=1)
+        except Exception:
+            pass
+        finally:
+            self.lock.release()
+
+    def search(self, query, *, cancel_event=None):
+        """Keep one catalogue route, yielding the transport lock while it loads."""
+        cancel_event = _SearchCancellation(self, cancel_event)
+        deadline = time.monotonic() + SEARCH_TIMEOUT
+        self._search_acquire(self.search_lock, cancel_event, deadline)
+        identifier = uuid.uuid4().hex
+        connection = None
+        finished = False
+        try:
+            result, connection = self._search_step('beginSearch', [query, identifier], cancel_event, deadline)
+            while True:
+                self._check_search(cancel_event, deadline)
+                if not isinstance(result, dict) or result.get('searchId') != identifier:
+                    raise SpotifyError('Spotify returned a mismatched catalogue response.', dispatched=False)
+                state = result.get('state')
+                if state == 'cancelled':
+                    raise SpotifySearchCancelled()
+                if state == 'error':
+                    raise SpotifyError(result.get('error') or 'Spotify search failed.', dispatched=False)
+                if state == 'complete':
+                    tracks = result.get('tracks')
+                    if not isinstance(tracks, list) or any(not isinstance(track, dict) for track in tracks):
+                        raise SpotifyError('Spotify returned an unreadable catalogue result.', dispatched=False)
+                    finished = True
+                    return tracks
+                if state != 'pending':
+                    raise SpotifyError('Spotify returned an unreadable catalogue state.', dispatched=False)
+                delay = min(SEARCH_POLL_INTERVAL, max(0, deadline - time.monotonic()))
+                if cancel_event is not None:
+                    cancel_event.wait(delay)
+                else:
+                    time.sleep(delay)
+                result, unused = self._search_step('pollSearch', [identifier], cancel_event, deadline, connection)
+        finally:
+            if connection is not None and not finished:
+                self._abandon_search(identifier, connection)
+            self.search_lock.release()
 
     def track(self, uri):
-        return self.call('track', uri)
+        cancelled = _SearchCancellation(self, None)
+        known = self.call('trackInQueue', uri)
+        if cancelled.is_set():
+            raise SpotifySearchCancelled()
+        if known is not None:
+            if not isinstance(known, dict) or known.get('uri') != uri:
+                raise SpotifyError('Spotify returned an unreadable track.', dispatched=False)
+            return known
+        found = next((track for track in self.search(uri, cancel_event=cancelled) if track.get('uri') == uri), None)
+        if found is None:
+            raise SpotifyError('Find this track in search again before requesting it.', dispatched=False)
+        return found
 
     def enqueue(self, uri, request_id):
         with self.lock:

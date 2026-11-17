@@ -40,11 +40,14 @@ python3 tools/party_dj/launch.py start --fullscreen
 ```
 
 Use the returned guest URL or the stage's QR code on the same reachable network.
-The laptop's request box searches Spotify directly. Selecting a result retains
+The laptop's request box searches concise song and artist queries directly. Selecting a result retains
 the song while the same box accepts an optional dedication; Send submits it.
 The separate **Traži po opisu** action asks the live DJ to interpret a description.
 Exact searches have no reasoning step. Escape or the small × recalls the latest
 own message only before the DJ has accepted it, preserving another draft.
+**Ctrl+K** focuses the Magic box and explicitly searches its current text;
+**Ctrl+P** requests the opposite of the freshly observed playback state.
+The top strip shows both shortcuts and **Tab** for switching to native Spotify.
 
 ## Keep the next two or three songs intentional
 
@@ -115,6 +118,48 @@ an operation needs the fresh full queue rather than the watcher's short preview.
 Concise state shows work counts; changed work records remain in their events,
 and `inbox`, `message-info` or raw state provide the details without repeating
 every historical outcome on every quiet poll.
+
+The watcher reports incoming events even while the agent is away. It never
+asserts LLM availability. The top-right DJ badge follows a separate, short lease
+that the designated live DJ renews only while actually attending to the session:
+
+```sh
+python3 virtual-dj/dj.py --operator 'morning-dj' presence online --agent-session 'morning-dj-20261117-a' --sequence 1 --lease-seconds 60
+python3 virtual-dj/dj.py --operator 'morning-dj' presence offline --agent-session 'morning-dj-20261117-a' --sequence 2
+```
+
+Choose a fresh session identifier at each activation. Increase its sequence for
+each subsequent assertion; a retry of the same assertion uses exactly the same
+sequence and payload, without extending its expiry. While attending, issue the
+next one-shot online assertion during each actual listener check, before the
+previous lease expires. The default is 60 seconds and the permitted range is
+30-120 seconds. On handoff or departure, send offline for that session. An
+unrenewed lease expires even if the watcher keeps running or state.json remains
+unchanged. A service restart clears the in-memory leases. Coding helpers do not
+renew the live DJ's badge. `status` and `watch`
+show `dj.llm` and `dj.watcher` separately.
+
+Local intent gating suppresses obvious conversation and interface instructions
+before automatic catalogue lookup. The DJ can correct that decision for the
+exact native draft it has read:
+
+```sh
+python3 virtual-dj/dj.py composer --save /tmp/dj-composer.json
+python3 virtual-dj/dj.py intent chat --draft /tmp/dj-composer.json
+```
+
+Use `music` to search that exact text, or `auto` to restore local gating. These
+commands address the existing qtra stage from its launcher metadata. If a newer
+stage generation is loaded, stale metadata is rejected without invoking the old
+resident module. An inactive editor also rejects composer control. The commands retain
+the exact guest, editor instance, draft revision, text and message/dedication
+mode. A changed binding is rejected; read and assess the new draft before trying
+again. A music cue does not select or submit a song. Draft identity and revision
+remain local. Text treated as a music query may be sent to catalogue search
+before submission; an explicit composer read returns the exact full draft.
+Editing cancels an
+already dispatched automatic search by its unique request ID so old lookups
+release the catalogue promptly.
 
 Song requests, mood changes and descriptions deserve a quick acknowledgement
 followed by the action they actually need. Send a reply using a stable request ID

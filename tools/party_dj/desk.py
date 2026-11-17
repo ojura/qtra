@@ -20,6 +20,10 @@ import uuid
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_DATA = Path.home() / '.local/state/larics-dj'
 REORDER_FIELDS = ('orderedQueuedUids', 'expectedQueuedUids', 'expectedCurrentUid', 'expectedDeviceId')
+COMPOSER_FIELDS = ('guestId', 'composerId', 'draftRevision', 'text', 'editorMode')
+sys.path.insert(0, str(REPO / 'tools'))
+from agentctl import AgentClient
+from launch_party_stage import invoke
 
 
 class DeskError(Exception):
@@ -136,7 +140,7 @@ def concise_state(state):
             'progressMs', 'durationMs', 'observedAt', 'requestedBy')
     current = state.get('nowPlaying')
     dj = state.get('dj') or {}
-    presence = {key: dj[key] for key in ('status', 'lastSeen', 'processingMessageIds') if key in dj}
+    presence = {key: dj[key] for key in ('status', 'lastSeen', 'llm', 'watcher', 'processingMessageIds') if key in dj}
     work_counts = {}
     for work in (dj.get('messageWork') or {}).values():
         if isinstance(work, dict):
@@ -162,6 +166,76 @@ def write_json(value, path=None):
         os.replace(temporary, path)
     else:
         print(text, flush=True)
+
+
+def set_presence(client, state, agent_session, sequence, lease_seconds=60):
+    """One explicit agent assertion; event polling never calls this function."""
+    if (state not in ('online', 'offline') or not isinstance(agent_session, str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', agent_session)
+            or type(sequence) is not int or not 1 <= sequence <= 2**53 - 1
+            or type(lease_seconds) is not int or not 30 <= lease_seconds <= 120):
+        raise DeskError('Use a session identifier, positive sequence and a 30-120 second presence lease.')
+    return client.call('/api/admin/presence', {'agentSessionId': agent_session,
+        'sequence': sequence, 'state': state, 'leaseSeconds': lease_seconds})
+
+
+def native_stage(data, request):
+    """Address only the existing stage recorded by its launcher; never start it."""
+    metadata = json.loads((Path(data) / 'qtra-modules.json').read_text(encoding='utf-8'))
+    if not isinstance(metadata, dict) or not isinstance(metadata.get('modules'), dict):
+        raise DeskError('The existing native stage metadata is unavailable.')
+    socket_path, pid = metadata.get('socket'), metadata.get('pid')
+    module = metadata['modules'].get('party_stage')
+    if (not isinstance(socket_path, str) or not Path(socket_path).is_absolute()
+            or type(pid) is not int or pid <= 0 or not isinstance(module, str) or not module.isdigit()):
+        raise DeskError('The existing native stage metadata is incomplete.')
+    try:
+        with AgentClient(socket_path, timeout=10) as client:
+            hello = client.request('hello', {})
+            if (not isinstance(hello, dict) or hello.get('name') != 'qt-runtime-cube' or hello.get('uid') != os.getuid()
+                    or hello.get('pid') != pid):
+                raise DeskError('The native stage process changed; inspect its current launcher metadata.')
+            modules = client.request('module.list', {})
+            if not isinstance(modules, list) or not any(isinstance(item, dict)
+                    and str(item.get('id')) == module and item.get('name') == 'LARICS / LYRICS party stage'
+                    for item in modules):
+                raise DeskError('The recorded native stage module is no longer loaded.')
+            if any(isinstance(item, dict) and item.get('name') == 'LARICS / LYRICS party stage'
+                    and str(item.get('id', '')).isdigit() and int(item['id']) > int(module)
+                    for item in modules):
+                raise DeskError('A newer native stage generation is loaded; refresh launcher metadata before composer control.')
+            result = invoke(client, module, 'gui', request)
+            if not isinstance(result, dict):
+                raise DeskError('The native stage returned an invalid response.')
+            return result
+    except (RuntimeError, TimeoutError, KeyError, TypeError) as error:
+        raise DeskError(str(error)) from error
+
+
+def composer_binding(draft):
+    if (not isinstance(draft, dict) or any(key not in draft for key in COMPOSER_FIELDS)
+            or any(not isinstance(draft[key], str) or not draft[key] for key in ('guestId', 'composerId'))
+            or type(draft['draftRevision']) is not int or not 0 <= draft['draftRevision'] <= 2**53 - 1
+            or not isinstance(draft['text'], str) or draft['editorMode'] not in ('message', 'dedication')):
+        raise DeskError('Read the current native composer before applying an intent cue.')
+    return {key: draft[key] for key in COMPOSER_FIELDS}
+
+
+def read_composer(data):
+    draft = native_stage(data, {'getComposerDraft': True}).get('composerDraft')
+    composer_binding(draft)
+    return draft
+
+
+def set_search_intent(data, draft, intent):
+    if intent not in ('chat', 'music', 'auto'):
+        raise DeskError('Choose chat, music or auto search intent.')
+    cue = {**composer_binding(draft), 'intent': intent}
+    result = native_stage(data, {'setSearchIntent': cue}).get('searchIntentResult')
+    if not isinstance(result, dict) or result.get('applied') is not True:
+        raise DeskError(result if isinstance(result, dict) and result.get('error')
+                        else 'The native stage did not confirm this exact draft intent.')
+    return result
 
 
 def _read_events(client, after, wait):
@@ -302,6 +376,13 @@ def main(argv=None):
     sub.add_parser('inbox')
     sub.add_parser('queue')
     sub.add_parser('message-info').add_argument('id', type=int)
+    p = sub.add_parser('presence', help='Assert actual agent availability once; never runs a heartbeat loop.')
+    p.add_argument('state', choices=('online', 'offline'))
+    p.add_argument('--agent-session', required=True); p.add_argument('--sequence', type=int, required=True)
+    p.add_argument('--lease-seconds', type=int, default=60)
+    sub.add_parser('composer', help='Read the existing native editor without changing its text.').add_argument('--save', type=Path)
+    p = sub.add_parser('intent', help='Apply a search cue only to the exact saved native draft.')
+    p.add_argument('intent', choices=('chat', 'music', 'auto')); p.add_argument('--draft', type=Path, required=True)
     p = sub.add_parser('work')
     p.add_argument('state', choices=('active', 'waiting', 'blocked', 'completed', 'cancelled'))
     p.add_argument('message_ids', nargs='+', type=int)
@@ -351,6 +432,14 @@ def main(argv=None):
             result = client.call('/api/chat')
         elif args.command == 'message-info':
             result = client.call('/api/admin/message-info?' + urllib.parse.urlencode({'id': args.id}))
+        elif args.command == 'presence':
+            result = set_presence(client, args.state, args.agent_session, args.sequence, args.lease_seconds)
+        elif args.command == 'composer':
+            result = read_composer(args.data)
+            if args.save:
+                write_json(result, args.save)
+        elif args.command == 'intent':
+            result = set_search_intent(args.data, json.loads(args.draft.read_text(encoding='utf-8')), args.intent)
         elif args.command == 'work':
             result = client.call('/api/admin/work', {'messageIds': args.message_ids,
                 'state': args.state, 'summary': args.summary, 'outcome': args.outcome,

@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 9) return {ready: true};
+  if (window.__laricsDJ?.version === 10) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -239,8 +239,14 @@
   }
 
   const operations = window.__laricsDJ?.operations || new Map();
+  let searchJob = null;
+  let legacySearchSequence = 0;
+  const sameSearchRoute = destination => {
+    try { return decodeURIComponent(location.pathname) === decodeURIComponent(destination); }
+    catch { return false; }
+  };
   const bridge = {
-    version: 9,
+    version: 10,
     operations,
     async status() {
       if (browserController) ensureActualState();
@@ -295,39 +301,99 @@
         observedAt: stamp
       };
     },
-    async search(query) {
+    beginSearch(query, searchId, expiresAt = Date.now() + 16000) {
+      if (typeof query !== 'string' || !query.trim() || query.length > 512
+          || typeof searchId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(searchId)) {
+        throw new Error('Supply a catalogue query and a unique search ID.');
+      }
+      const stamp = Date.now();
+      if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt) || expiresAt > stamp + 17000) {
+        throw new Error('Supply a valid catalogue request deadline.');
+      }
+      if (expiresAt <= stamp) return {searchId, state: 'cancelled'};
+      if (searchJob?.id === searchId) {
+        if (searchJob.query !== query) throw new Error('This catalogue search ID belongs to another query.');
+        return {searchId, state: 'pending'};
+      }
       const destination = '/search/' + encodeURIComponent(query) + '/tracks';
       const previous = searchResults();
-      const sameQuery = decodeURIComponent(location.pathname) === decodeURIComponent(destination);
-      if (!sameQuery) platform.getHistory().push(destination);
-      const deadline = Date.now() + 16000;
-      while (Date.now() < deadline) {
-        const results = searchResults();
-        const onQuery = decodeURIComponent(location.pathname) === decodeURIComponent(destination);
-        const list = document.querySelector('[data-testid="track-list"]');
-        const label = list?.getAttribute('aria-label') || '';
-        const labelMatches = label.endsWith(`“${query}”`) || label.endsWith(`"${query}"`);
-        const row = list?.querySelector('[data-testid="tracklist-row"]');
-        if (onQuery && labelMatches && row && results && (sameQuery || results.requestId !== previous?.requestId)) {
-          let fiber = row[Object.keys(row).find(key => key.startsWith('__reactFiber$'))];
-          for (let i = 0; fiber && i < 45; ++i, fiber = fiber.return) {
-            const tracks = fiber.memoizedProps?.tracks;
-            if (Array.isArray(tracks) && tracks.length) {
-              return tracks.filter(t => t.isPlayable !== false).slice(0, 12).map(normalize);
-            }
+      const sameQuery = sameSearchRoute(destination);
+      searchJob = {id: searchId, query, destination, previousId: previous?.requestId,
+        sameQuery, deadline: Math.min(expiresAt, stamp + 16000)};
+      try {
+        if (!sameQuery) platform.getHistory().push(destination);
+      } catch (error) {
+        searchJob = null;
+        throw error;
+      }
+      // No in-page wait, click or playback call is started. The client can
+      // observe the player or dispatch an explicit command before the next poll.
+      return {searchId, state: 'pending'};
+    },
+    pollSearch(searchId) {
+      const job = searchJob;
+      if (!job || job.id !== searchId) return {searchId, state: 'cancelled'};
+      if (!sameSearchRoute(job.destination)) {
+        searchJob = null;
+        return {searchId, state: 'cancelled'};
+      }
+      if (Date.now() >= job.deadline) {
+        searchJob = null;
+        return {searchId, state: 'error', error: 'Spotify search is still loading. Try again in a moment.'};
+      }
+      const results = searchResults();
+      const list = document.querySelector('[data-testid="track-list"]');
+      const label = list?.getAttribute('aria-label') || '';
+      const labelMatches = label.endsWith(`“${job.query}”`) || label.endsWith(`"${job.query}"`);
+      const row = list?.querySelector('[data-testid="tracklist-row"]');
+      if (labelMatches && row && results && (job.sameQuery || results.requestId !== job.previousId)) {
+        let fiber = row[Object.keys(row).find(key => key.startsWith('__reactFiber$'))];
+        for (let i = 0; fiber && i < 45; ++i, fiber = fiber.return) {
+          const tracks = fiber.memoizedProps?.tracks;
+          if (Array.isArray(tracks) && tracks.length) {
+            searchJob = null;
+            return {searchId, state: 'complete', tracks: tracks.filter(t => t.isPlayable !== false).slice(0, 12).map(normalize)};
           }
         }
-        const text = document.querySelector('main')?.innerText || '';
-        if (onQuery && text.includes(query) && /No results found for|No results for/.test(text)) return [];
-        await new Promise(resolve => setTimeout(resolve, 180));
       }
-      throw new Error('Spotify search is still loading. Try again in a moment.');
+      const text = document.querySelector('main')?.innerText || '';
+      if (text.includes(job.query) && /No results found for|No results for/.test(text)) {
+        searchJob = null;
+        return {searchId, state: 'complete', tracks: []};
+      }
+      return {searchId, state: 'pending'};
     },
-    async track(uri) {
+    cancelSearch(searchId) {
+      const cancelled = searchJob?.id === searchId;
+      if (cancelled) searchJob = null;
+      return {searchId, state: 'cancelled', cancelled};
+    },
+    async search(query) {
+      // Compatibility for existing callers. SpotifyClient uses the short
+      // methods above so waiting never occupies its shared transport lock.
+      const searchId = `legacy-${Date.now()}-${++legacySearchSequence}`;
+      bridge.beginSearch(query, searchId);
+      try {
+        while (true) {
+          const result = bridge.pollSearch(searchId);
+          if (result.state === 'complete') return result.tracks;
+          if (result.state === 'cancelled') throw new Error('This catalogue search was superseded.');
+          if (result.state === 'error') throw new Error(result.error);
+          await new Promise(resolve => setTimeout(resolve, 180));
+        }
+      } finally {
+        bridge.cancelSearch(searchId);
+      }
+    },
+    async trackInQueue(uri) {
       if (!/^spotify:track:[A-Za-z0-9]{22}$/.test(uri)) throw new Error('Invalid track.');
       const q = await player.getQueue();
       const known = [q.current, ...(q.queued || []), ...(q.nextUp || [])].find(t => t?.uri === uri);
-      if (known) return normalize(known);
+      return known ? normalize(known) : null;
+    },
+    async track(uri) {
+      const known = await bridge.trackInQueue(uri);
+      if (known) return known;
       const results = await bridge.search(uri);
       const found = results.find(t => t.uri === uri);
       if (!found) throw new Error('Find this track in search again before requesting it.');

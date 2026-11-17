@@ -10,6 +10,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 import server
 from spotify_native import SpotifyError
@@ -59,6 +60,8 @@ class ServiceWorkflows(unittest.TestCase):
         self.stamp = 1800000000000
         clock = patch.object(server, 'now_ms', side_effect=lambda: self.stamp)
         clock.start(); self.addCleanup(clock.stop)
+        monotonic = patch.object(server, 'monotonic_ms', side_effect=lambda: self.stamp)
+        monotonic.start(); self.addCleanup(monotonic.stop)
         # These fixtures do not discover a LAN address, generate QR images,
         # create a real Spotify client or bind an HTTP socket.
         for isolated in (patch.object(server.Party, '_lan_url', return_value='http://fixture.invalid:8787'),
@@ -102,6 +105,9 @@ class ServiceWorkflows(unittest.TestCase):
                                     'text': 'A remembered title or meaning'})
         return identifier
 
+    def presence_body(self, session='fixture-agent', sequence=1, state='online', **extra):
+        return {'agentSessionId': session, 'sequence': sequence, 'state': state, **extra}
+
     def parallel(self, *calls):
         barrier = threading.Barrier(len(calls))
         results = [None] * len(calls)
@@ -128,6 +134,463 @@ class ServiceWorkflows(unittest.TestCase):
             if isinstance(result, BaseException):
                 raise result
         return results
+
+    def test_presence_defaults_offline_and_reader_admin_activity_cannot_advertise_llm(self):
+        initial = {'status': 'offline', 'lastSeen': 0, 'expiresAt': 0, 'remainingMs': 0, 'activeCount': 0}
+        self.assertEqual(self.party.snapshot()['dj']['llm'], initial)
+        sent = self.message()
+        for path in ('/health', '/api/state', '/api/chat'):
+            self.assertEqual(self.http(path)[0], 200)
+        with patch.object(self.client, 'search', create=True, return_value=[]) as direct:
+            self.assertEqual(self.http('/api/search?q=Fixture')[0], 200)
+        direct.assert_called_once_with('Fixture')
+        self.party.admin('heartbeat', {'readThrough': sent['id'], **self.presence_body()})
+        self.party.admin('work', {'messageIds': [sent['id']], 'state': 'waiting', 'summary': 'Waiting for fixture input.'})
+        self.party.admin('configure', {'bookEnabled': False})
+        self.party.admin('reply', {'text': 'A fixture reply.'})
+        self.assertEqual(self.party.snapshot()['dj']['watcher']['status'], 'away')
+        self.assertEqual(self.http('/api/admin/events?after=-1', authorized=True)[0], 200)
+        dj = self.party.chat()['dj']
+        self.assertEqual(dj['llm'], initial)
+        self.assertEqual((dj['status'], dj['lastSeen']), ('away', 0))
+        self.assertEqual(dj['watcher']['status'], 'polling')
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_presence_http_publishes_explicit_lease_and_expires_without_renewal(self):
+        issued_at = self.stamp
+        status, result = self.http('/api/admin/presence', self.presence_body(), authorized=True)
+        self.assertEqual(status, 200)
+        expected = {'status': 'online', 'lastSeen': issued_at, 'expiresAt': issued_at + 60000,
+                    'remainingMs': 60000, 'activeCount': 1}
+        self.assertEqual(result['dj']['llm'], expected)
+        self.assertEqual((result['dj']['status'], result['dj']['lastSeen']), ('listening', issued_at))
+        published = json.loads((self.party.data / 'state.json').read_text())
+        self.assertEqual(published['dj']['llm'], expected)
+        self.assertNotIn('fixture-agent', json.dumps(published))
+        self.stamp += 30000
+        self.party.admin('heartbeat', {})
+        self.party.events(after=-1)
+        self.assertEqual(self.http('/api/state')[0], 200)
+        halfway = self.party.chat()['dj']['llm']
+        self.assertEqual(halfway, {**expected, 'remainingMs': 30000})
+        self.stamp += 30000
+        expired = self.party.snapshot()['dj']
+        self.assertEqual(expired['llm'], {'status': 'offline', 'lastSeen': issued_at,
+            'expiresAt': 0, 'remainingMs': 0, 'activeCount': 0})
+        self.assertEqual((expired['status'], expired['lastSeen']), ('away', issued_at))
+        self.assertEqual(expired['watcher']['status'], 'polling')
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_presence_identical_retries_never_extend_even_after_expiry(self):
+        body = self.presence_body()
+        self.party.admin('presence', body)
+        original = copy.deepcopy(self.party.agent_presence)
+        revision = self.party.revision
+        published = (self.party.data / 'state.json').read_bytes()
+        self.stamp += 15000
+        response = self.party.admin('presence', {**body, 'leaseSeconds': 60})
+        self.assertEqual(response['dj']['llm']['remainingMs'], 45000)
+        self.assertEqual(self.party.agent_presence, original)
+        self.assertEqual((self.party.revision, (self.party.data / 'state.json').read_bytes()), (revision, published))
+        self.stamp += 45000
+        response = self.party.admin('presence', body)
+        self.assertEqual(response['dj']['llm']['status'], 'offline')
+        self.assertEqual(response['dj']['llm']['remainingMs'], 0)
+        self.assertEqual(self.party.agent_presence, original)
+        self.assertEqual((self.party.revision, (self.party.data / 'state.json').read_bytes()), (revision, published))
+
+    def test_presence_sequence_conflicts_and_invalid_schema_are_atomic(self):
+        sent = self.message()
+        self.party.admin('presence', self.presence_body(sequence=2))
+        valid = self.presence_body(sequence=3)
+        invalid = [dict(valid, agentSessionId=value) for value in (None, '', 'a b', 'a\nb', 'x' * 129)]
+        invalid += [dict(valid, sequence=value) for value in (None, True, 0, -1, 2**53, 3.0, '3')]
+        invalid += [dict(valid, state=value) for value in (None, False, 'listening', {}, [])]
+        invalid += [dict(valid, leaseSeconds=value) for value in (None, False, 29, 121, 60.0, '60')]
+        invalid += [dict(valid, readThrough=sent['id']), dict(valid, source='api'),
+                    self.presence_body(sequence=1), self.presence_body(sequence=2, state='offline'),
+                    self.presence_body(sequence=2, leaseSeconds=30)]
+        def state():
+            return (copy.deepcopy(self.party.agent_presence), self.party.last_seen,
+                    self.party.watcher_last_seen, self.party.revision,
+                    (self.party.data / 'state.json').read_bytes(),
+                    [tuple(row) for row in self.party.db.execute('SELECT * FROM settings ORDER BY key')],
+                    [tuple(row) for row in self.party.db.execute('SELECT * FROM events ORDER BY id')],
+                    self.party.message_info(sent['id']))
+        before = state()
+        self.assertEqual(self.http('/api/admin/presence', valid)[0], 401)
+        self.assertEqual(state(), before)
+        for body in invalid:
+            with self.subTest(body=body):
+                self.assertEqual(self.http('/api/admin/presence', body, authorized=True)[0], 400)
+                self.assertEqual(state(), before)
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_presence_newer_offline_update_rejects_late_renewals(self):
+        self.party.admin('presence', self.presence_body())
+        self.stamp += 1000
+        offline = self.presence_body(sequence=3, state='offline')
+        result = self.party.admin('presence', offline)['dj']
+        self.assertEqual(result['llm'], {'status': 'offline', 'lastSeen': self.stamp,
+            'expiresAt': 0, 'remainingMs': 0, 'activeCount': 0})
+        record = copy.deepcopy(self.party.agent_presence)
+        for sequence in (1, 2):
+            with self.assertRaises(ValueError):
+                self.party.admin('presence', self.presence_body(sequence=sequence))
+        self.stamp += 1000
+        self.party.admin('presence', offline)
+        self.assertEqual(self.party.agent_presence, record)
+        renewed = self.party.admin('presence', self.presence_body(sequence=4))['dj']['llm']
+        self.assertEqual((renewed['status'], renewed['lastSeen'], renewed['remainingMs']), ('online', self.stamp, 60000))
+
+    def test_presence_multiple_sessions_keep_independent_leases_and_honest_projection(self):
+        started = self.stamp
+        self.party.admin('presence', self.presence_body('first-agent', leaseSeconds=120))
+        self.stamp += 10000
+        result = self.party.admin('presence', self.presence_body('second-agent', leaseSeconds=30))['dj']['llm']
+        self.assertEqual(result, {'status': 'online', 'lastSeen': self.stamp,
+            'expiresAt': started + 120000, 'remainingMs': 110000, 'activeCount': 2})
+        self.stamp += 5000
+        remaining = self.party.admin('presence', self.presence_body('second-agent', 2, 'offline'))['dj']['llm']
+        self.assertEqual(remaining, {'status': 'online', 'lastSeen': started,
+            'expiresAt': started + 120000, 'remainingMs': 105000, 'activeCount': 1})
+        self.stamp = started + 120000
+        self.assertEqual(self.party.snapshot()['dj']['llm']['activeCount'], 0)
+        self.assertEqual(self.party.agent_presence['first-agent']['sequence'], 1)
+        self.assertEqual(self.party.agent_presence['second-agent']['sequence'], 2)
+
+    def test_presence_restart_clears_leases_but_preserves_message_work(self):
+        sent = self.message()
+        self.party.admin('work', {'messageIds': [sent['id']], 'state': 'waiting', 'summary': 'Waiting for a fixture.'})
+        work = self.party.snapshot()['dj']['messageWork']
+        self.party.admin('presence', self.presence_body())
+        self.party.events(after=-1)
+        restored = server.Party(self.party.data, client=self.client)
+        self.addCleanup(restored.db.close)
+        self.assertEqual(restored.agent_presence, {})
+        dj = restored.snapshot()['dj']
+        self.assertEqual(dj['llm'], {'status': 'offline', 'lastSeen': 0,
+            'expiresAt': 0, 'remainingMs': 0, 'activeCount': 0})
+        self.assertEqual(dj['watcher']['status'], 'away')
+        self.assertEqual(dj['messageWork'], work)
+        self.assertEqual(json.loads((restored.data / 'state.json').read_text())['dj']['llm'], dj['llm'])
+
+    def test_presence_monotonic_expiry_and_future_wall_clock_are_safe(self):
+        started = self.stamp
+        clock = {'mono': started}
+        with patch.object(server, 'monotonic_ms', side_effect=lambda: clock['mono']):
+            self.party.admin('presence', self.presence_body())
+            self.stamp = started - 1
+            clock['mono'] += 1000
+            future = self.party.snapshot()['dj']['llm']
+            self.assertEqual((future['status'], future['expiresAt'], future['remainingMs'], future['activeCount']),
+                             ('offline', 0, 0, 0))
+            self.stamp = started + 5000
+            clock['mono'] = started + 60000
+            expired = self.party.admin('presence', self.presence_body())['dj']['llm']
+            self.assertEqual((expired['status'], expired['remainingMs']), ('offline', 0))
+            renewed = self.party.admin('presence', self.presence_body(sequence=2))['dj']['llm']
+            self.assertEqual((renewed['status'], renewed['expiresAt'], renewed['remainingMs']),
+                             ('online', self.stamp + 60000, 60000))
+            self.stamp += 60000
+            clock['mono'] += 1000
+            wall_expired = self.party.snapshot()['dj']['llm']
+            self.assertEqual((wall_expired['status'], wall_expired['expiresAt'], wall_expired['remainingMs']),
+                             ('offline', 0, 0))
+
+    def test_presence_concurrent_updates_keep_the_highest_sequence(self):
+        def update(sequence, state):
+            try:
+                return self.party.admin('presence', self.presence_body(sequence=sequence, state=state))
+            except ValueError:
+                return {'rejected': sequence}
+        results = self.parallel(lambda: update(2, 'online'), lambda: update(3, 'offline'))
+        self.assertIn('dj', results[1])
+        self.assertEqual(self.party.agent_presence['fixture-agent']['sequence'], 3)
+        self.assertEqual(self.party.snapshot()['dj']['llm']['status'], 'offline')
+        revision = self.party.revision
+        self.stamp += 1000
+        self.party.admin('presence', self.presence_body(sequence=3, state='offline'))
+        self.assertEqual(self.party.revision, revision)
+
+    def test_presence_session_capacity_retains_expired_replay_watermarks(self):
+        with patch.object(server, 'AGENT_SESSION_LIMIT', 2):
+            self.party.admin('presence', self.presence_body('first-agent', leaseSeconds=30))
+            self.party.admin('presence', self.presence_body('second-agent', state='offline'))
+            self.stamp += 30000
+            self.assertEqual(self.party.snapshot()['dj']['llm']['status'], 'offline')
+            before = (copy.deepcopy(self.party.agent_presence), self.party.revision)
+            with self.assertRaises(ValueError):
+                self.party.admin('presence', self.presence_body('third-agent'))
+            self.assertEqual((self.party.agent_presence, self.party.revision), before)
+            self.party.admin('presence', self.presence_body('first-agent', leaseSeconds=30))
+            self.assertEqual(self.party.snapshot()['dj']['llm']['status'], 'offline')
+            self.party.admin('presence', self.presence_body('first-agent', sequence=2))
+            self.assertEqual(self.party.snapshot()['dj']['llm']['activeCount'], 1)
+            with self.assertRaises(ValueError):
+                self.party.admin('presence', self.presence_body('first-agent', leaseSeconds=30))
+            self.assertEqual(len(self.party.agent_presence), 2)
+
+    def test_watcher_presence_tracks_only_event_polling_and_expires_independently(self):
+        self.party.admin('heartbeat', {})
+        self.assertEqual(self.party.snapshot()['dj']['watcher']['status'], 'away')
+        polled = self.stamp
+        self.party.events(after=-1)
+        watcher = self.party.snapshot()['dj']['watcher']
+        self.assertEqual(watcher, {'status': 'polling', 'lastSeen': polled,
+            'expiresAt': polled + 90000, 'remainingMs': 90000})
+        self.stamp += 90000
+        self.party.admin('heartbeat', {})
+        self.party.chat()
+        self.assertEqual(self.party.snapshot()['dj']['watcher'], {'status': 'away', 'lastSeen': polled,
+            'expiresAt': 0, 'remainingMs': 0})
+        self.party.admin('presence', self.presence_body())
+        self.assertEqual(self.party.snapshot()['dj']['watcher']['status'], 'away')
+        self.party.events(after=-1)
+        self.assertEqual(self.party.snapshot()['dj']['watcher']['lastSeen'], self.stamp)
+        self.assertEqual(self.party.snapshot()['dj']['llm']['activeCount'], 1)
+
+    def test_search_id_success_keeps_manual_search_and_cache_compatible(self):
+        tracks = [track(TRACK_A)]
+        with patch.object(self.client, 'search', create=True, return_value=tracks) as direct:
+            status, manual = self.http('/api/search?q=Manual')
+            self.assertEqual((status, manual), (200, {'tracks': tracks}))
+            direct.assert_called_once_with('Manual')
+            self.assertEqual(self.party.search_requests, {})
+            self.assertEqual(self.http('/api/search?q=Manual'), (200, {'tracks': tracks}))
+            self.assertEqual(direct.call_count, 1)
+            status, automatic = self.http('/api/search?q=Another&searchId=search-one')
+            self.assertEqual((status, automatic), (200, {'tracks': tracks, 'cancelled': False, 'searchId': 'search-one'}))
+            self.assertEqual(direct.call_args.args, ('Another',))
+            self.assertIsInstance(direct.call_args.kwargs['cancel_event'], threading.Event)
+            self.assertFalse(self.party.search_requests['search-one']['active'])
+            self.assertNotIn('event', self.party.search_requests['search-one'])
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_search_cancel_before_get_suppresses_cached_results_without_extending_retention(self):
+        identifier = 'cancel-before'
+        with patch.object(self.client, 'search', create=True, return_value=[track(TRACK_A)]) as direct:
+            self.party.search('Cached')
+            direct.reset_mock()
+            expected = {'searchId': identifier, 'cancelRequested': True}
+            self.assertEqual(self.http('/api/search/cancel', {'searchId': identifier}), (200, expected))
+            expires = self.party.search_requests[identifier]['expiresAt']
+            self.stamp += 10000
+            self.assertEqual(self.http('/api/search/cancel', {'searchId': identifier}), (200, expected))
+            self.assertEqual(self.party.search_requests[identifier]['expiresAt'], expires)
+            result = self.http('/api/search?' + urlencode({'q': 'Cached', 'searchId': identifier}))
+            self.assertEqual(result, (200, {'tracks': [], 'cancelled': True, 'searchId': identifier}))
+            self.assertEqual(self.party.search_requests[identifier]['expiresAt'], expires)
+            direct.assert_not_called()
+        self.assertEqual(self.party.search_cache['cached'][1], [track(TRACK_A)])
+
+    def test_search_inflight_cancel_suppresses_success_cancel_and_error_returns(self):
+        for outcome in ('success', 'cancel', 'error'):
+            with self.subTest(outcome=outcome):
+                started, release = threading.Event(), threading.Event()
+                identifier, query = 'inflight-' + outcome, 'Query ' + outcome
+                results = []
+                def search(value, *, cancel_event):
+                    started.set()
+                    self.assertTrue(release.wait(3))
+                    self.assertTrue(cancel_event.is_set())
+                    if outcome == 'cancel':
+                        raise server.SpotifySearchCancelled('Fixture search cancelled.')
+                    if outcome == 'error':
+                        raise SpotifyError('Fixture provider error.', dispatched=False)
+                    return [track(TRACK_A)]
+                with patch.object(self.client, 'search', create=True, side_effect=search) as direct:
+                    worker = threading.Thread(target=lambda: results.append(self.http('/api/search?' + urlencode({'q': query, 'searchId': identifier}))))
+                    worker.start()
+                    try:
+                        self.assertTrue(started.wait(3))
+                        self.assertEqual(self.http('/api/search/cancel', {'searchId': identifier}),
+                            (200, {'searchId': identifier, 'cancelRequested': True}))
+                    finally:
+                        release.set(); worker.join(3)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(results, [(200, {'tracks': [], 'cancelled': True, 'searchId': identifier})])
+                    direct.assert_called_once()
+                self.assertNotIn(query.casefold(), self.party.search_cache)
+                self.assertNotIn(TRACK_A, self.party.track_cache)
+                self.assertFalse(self.party.search_requests[identifier]['active'])
+                self.assertNotIn('event', self.party.search_requests[identifier])
+
+    def test_search_old_id_cancellation_cannot_cancel_a_newer_same_query(self):
+        arrived, release = threading.Barrier(3), threading.Event()
+        results = {}
+        identifiers = ('older-search', 'newer-search')
+        def search(value, *, cancel_event):
+            arrived.wait(3)
+            self.assertTrue(release.wait(3))
+            if cancel_event.is_set():
+                raise server.SpotifySearchCancelled('Fixture search cancelled.')
+            return [track(TRACK_A)]
+        def run(identifier):
+            results[identifier] = self.http('/api/search?' + urlencode({'q': 'Same', 'searchId': identifier}))
+        with patch.object(self.client, 'search', create=True, side_effect=search) as direct:
+            workers = [threading.Thread(target=run, args=(identifier,)) for identifier in identifiers]
+            for worker in workers:
+                worker.start()
+            crossed = False
+            try:
+                arrived.wait(3)
+                crossed = True
+                self.assertEqual(self.http('/api/search/cancel', {'searchId': identifiers[0]})[0], 200)
+                with self.party.lock:
+                    older = self.party.search_requests[identifiers[0]]['event']
+                    newer = self.party.search_requests[identifiers[1]]['event']
+                    self.assertIsNot(older, newer)
+                    self.assertTrue(older.is_set())
+                    self.assertFalse(newer.is_set())
+            finally:
+                if not crossed:
+                    arrived.abort()
+                release.set()
+                for worker in workers:
+                    worker.join(3)
+            self.assertFalse(any(worker.is_alive() for worker in workers))
+            self.assertEqual(direct.call_count, 2)
+        self.assertEqual(results[identifiers[0]], (200, {'tracks': [], 'cancelled': True, 'searchId': identifiers[0]}))
+        self.assertEqual(results[identifiers[1]], (200, {'tracks': [track(TRACK_A)], 'cancelled': False, 'searchId': identifiers[1]}))
+        self.assertEqual(self.party.search_cache['same'][1], [track(TRACK_A)])
+
+    def test_search_duplicate_active_and_completed_ids_never_dispatch_twice(self):
+        started, release = threading.Event(), threading.Event()
+        identifier = 'single-search'
+        results = []
+        def search(value, *, cancel_event):
+            started.set()
+            self.assertTrue(release.wait(3))
+            return [track(TRACK_A)]
+        with patch.object(self.client, 'search', create=True, side_effect=search) as direct:
+            worker = threading.Thread(target=lambda: results.append(self.http('/api/search?q=First&searchId=' + identifier)))
+            worker.start()
+            try:
+                self.assertTrue(started.wait(3))
+                duplicate = self.http('/api/search?q=Different&searchId=' + identifier)
+                self.assertEqual(duplicate, (409, {'tracks': [], 'searchId': identifier, 'error': 'This searchId has already been used.'}))
+            finally:
+                release.set(); worker.join(3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(results[0][0], 200)
+            self.assertEqual(self.http('/api/search?q=First&searchId=' + identifier), duplicate)
+            direct.assert_called_once()
+
+    def test_search_capacity_preserves_known_cancellation_and_protected_tombstones(self):
+        started, release = threading.Event(), threading.Event()
+        results = []
+        def search(value, *, cancel_event=None):
+            started.set()
+            self.assertTrue(release.wait(3))
+            return [track(TRACK_A)]
+        with patch.object(server, 'SEARCH_RETAINED_LIMIT', 4), patch.object(server, 'SEARCH_ACTIVE_LIMIT', 1), \
+             patch.object(self.client, 'search', create=True, side_effect=search) as direct:
+            worker = threading.Thread(target=lambda: results.append(self.http('/api/search?q=Busy&searchId=active-search')))
+            worker.start()
+            try:
+                self.assertTrue(started.wait(3))
+                status, busy = self.http('/api/search?q=New&searchId=blocked-search')
+                self.assertEqual(status, 429)
+                self.assertEqual(busy['searchId'], 'blocked-search')
+                self.assertNotIn('blocked-search', self.party.search_requests)
+                for identifier in ('before-one', 'before-two', 'before-three'):
+                    self.assertEqual(self.http('/api/search/cancel', {'searchId': identifier})[0], 200)
+                self.assertEqual(len(self.party.search_requests), 4)
+                self.assertEqual(self.http('/api/search/cancel', {'searchId': 'unseen-search'})[0], 429)
+                self.assertEqual(self.http('/api/search/cancel', {'searchId': 'active-search'})[0], 200)
+            finally:
+                release.set(); worker.join(3)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(results, [(200, {'tracks': [], 'cancelled': True, 'searchId': 'active-search'})])
+            self.assertEqual(self.http('/api/search?q=Before&searchId=before-one'),
+                             (200, {'tracks': [], 'cancelled': True, 'searchId': 'before-one'}))
+            self.assertEqual(self.http('/api/search?q=Manual'), (200, {'tracks': [track(TRACK_A)]}))
+            self.assertEqual(len(self.party.search_requests), 4)
+            self.stamp += 120000
+            self.assertEqual(self.http('/api/search?q=After&searchId=after-retention')[0], 200)
+            self.assertEqual(set(self.party.search_requests), {'after-retention'})
+            self.assertEqual(direct.call_count, 3)
+
+    def test_search_tombstone_retention_uses_monotonic_clock_and_cancel_is_idempotent(self):
+        clock = {'mono': 1000}
+        with patch.object(server, 'monotonic_ms', side_effect=lambda: clock['mono']):
+            self.party.cancel_search({'searchId': 'clock-search'})
+            self.assertEqual(self.party.search_requests['clock-search']['expiresAt'], 121000)
+            self.stamp += 10**9
+            clock['mono'] = 120999
+            self.party.cancel_search({'searchId': 'clock-search'})
+            self.assertEqual(self.party.search_requests['clock-search']['expiresAt'], 121000)
+            with patch.object(self.client, 'search', create=True, return_value=[track(TRACK_A)]) as direct:
+                self.assertEqual(self.party.search('Old', search_id='clock-search')['cancelled'], True)
+                direct.assert_not_called()
+                clock['mono'] = 121000
+                self.party.search('New', search_id='fresh-search')
+                direct.assert_called_once()
+            self.assertNotIn('clock-search', self.party.search_requests)
+
+    def test_search_identifier_and_cancel_schema_validation_precede_all_effects(self):
+        self.party.search_cache['kept'] = (0, [track(TRACK_B)])
+        self.party.track_cache[TRACK_B] = track(TRACK_B)
+        def state():
+            return (copy.deepcopy(self.party.search_requests), copy.deepcopy(self.party.search_cache),
+                    copy.deepcopy(self.party.track_cache), self.party.revision, self.party.last_seen,
+                    (self.party.data / 'state.json').read_bytes())
+        before = state()
+        invalid = ('', 'short', 'with space', 'bad\nname', 'čudno-ime', 'x' * 129)
+        with patch.object(self.client, 'search', create=True, return_value=[]) as direct:
+            for identifier in invalid:
+                with self.subTest(identifier=identifier):
+                    path = '/api/search?' + urlencode({'q': 'Query', 'searchId': identifier})
+                    self.assertEqual(self.http(path)[0], 400)
+                    self.assertEqual(self.http('/api/search/cancel', {'searchId': identifier})[0], 400)
+                    self.assertEqual(state(), before)
+            for body in ({}, [], {'searchId': None}, {'searchId': False}, {'searchId': 12345678},
+                         {'searchId': 'valid-search', 'text': 'Unfinished draft'}):
+                self.assertEqual(self.http('/api/search/cancel', body)[0], 400)
+                self.assertEqual(state(), before)
+            self.assertEqual(self.http('/api/search?q=Query&searchId=first-search&searchId=second-search')[0], 400)
+            with self.assertRaises(ValueError):
+                self.party.search(42, search_id='valid-search')
+            self.assertEqual(state(), before)
+            direct.assert_not_called()
+
+    def test_search_provider_failures_retire_ids_without_partial_cache_or_redispatch(self):
+        self.party.track_cache[TRACK_B] = track(TRACK_B)
+        self.party.search_cache['kept'] = (0, [track(TRACK_B)])
+        before = (copy.deepcopy(self.party.track_cache), copy.deepcopy(self.party.search_cache))
+        outcomes = [SpotifyError('Fixture provider failed.', dispatched=False), None, [{}],
+                    [{'uri': []}], [track(TRACK_A), {}], [{'uri': 'not-a-track'}]]
+        with patch.object(server, 'SEARCH_ACTIVE_LIMIT', 1):
+            for index, outcome in enumerate(outcomes):
+                identifier = 'failed-search-' + str(index)
+                options = {'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome}
+                with self.subTest(outcome=outcome), patch.object(self.client, 'search', create=True, **options) as direct:
+                    path = '/api/search?' + urlencode({'q': 'Failure ' + str(index), 'searchId': identifier})
+                    self.assertEqual(self.http(path)[0], 503)
+                    self.assertEqual((self.party.track_cache, self.party.search_cache), before)
+                    record = self.party.search_requests[identifier]
+                    self.assertFalse(record['active'])
+                    self.assertNotIn('event', record)
+                    self.assertEqual(record['expiresAt'], self.stamp + 120000)
+                    self.assertEqual(self.http(path)[0], 409)
+                    direct.assert_called_once()
+
+    def test_search_dedicated_transport_cancellation_is_a_successful_cancelled_response(self):
+        error = server.SpotifySearchCancelled('Fixture search cancelled.')
+        self.assertFalse(error.dispatched)
+        with patch.object(self.client, 'search', create=True, side_effect=error) as direct:
+            self.assertEqual(self.http('/api/search?q=Cancelled&searchId=transport-cancel'),
+                             (200, {'tracks': [], 'cancelled': True, 'searchId': 'transport-cancel'}))
+            direct.assert_called_once()
+        self.assertFalse(self.party.search_requests['transport-cancel']['active'])
+        self.assertTrue(self.party.search_requests['transport-cancel']['cancelled'])
+        self.assertEqual(self.party.search_cache, {})
+        self.assertEqual(self.party.track_cache, {})
 
     def test_sync_exposes_only_actual_observation_and_history_without_transport(self):
         self.party.request({'requestId': 'pending-request', 'uri': TRACK_A})
