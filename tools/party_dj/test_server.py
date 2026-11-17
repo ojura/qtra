@@ -102,6 +102,163 @@ class PartyTests(unittest.TestCase):
         self.party._refresh()
         self.assertEqual(self.row()['status'], 'queued')
 
+    def queue_events(self):
+        return [json.loads(row['payload']) for row in self.party.db.execute(
+            "SELECT payload FROM events WHERE kind='queue_changed' ORDER BY id")]
+
+    def test_initial_queue_observation_establishes_baseline_without_change_event(self):
+        for queue in ([], [{**track(TRACK_A), 'uid': 'first-occurrence'}]):
+            with self.subTest(queue=queue):
+                client = FakeSpotify()
+                client.queue = queue
+                party = server.Party(self.party.data / f'initial-{len(queue)}', client=client)
+                self.addCleanup(party.db.close)
+                party._refresh()
+                initial = party.events()
+                self.assertEqual([event['kind'] for event in initial['events']], ['track', 'spotify'])
+                self.assertEqual(initial['state']['queue'], [{**item, 'status': 'queued'} for item in queue])
+                party._refresh()
+                self.assertEqual(party.events(after=initial['lastId'])['events'], [])
+
+    def test_queue_changes_emit_ordered_actual_occurrences_for_reorder_add_and_remove(self):
+        first = {'uid': 'first', 'uri': TRACK_A, 'source': 'queue'}
+        second = {'uid': 'second', 'uri': TRACK_B, 'source': 'queue'}
+        third = {'uid': 'third', 'uri': TRACK_RELINKED, 'source': 'context'}
+        self.client.queue = [first, second]
+        self.party._refresh()
+        expected = []
+        for queue in ([second, first], [second, first, third], [first, third], []):
+            with self.subTest(queue=queue):
+                self.client.queue = copy.deepcopy(queue)
+                self.party._refresh()
+                expected.append({'queue': queue})
+                self.assertEqual(self.queue_events(), expected)
+                self.party._refresh()
+                self.assertEqual(self.queue_events(), expected)
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_queue_changes_distinguish_duplicate_uids_and_no_uid_multiplicity(self):
+        first = {'uid': 'repeat-1', 'uri': TRACK_A, 'source': 'queue'}
+        second = {'uid': 'repeat-2', 'uri': TRACK_A, 'source': 'queue'}
+        replacement = {'uid': 'repeat-3', 'uri': TRACK_A, 'source': 'queue'}
+        unidentified = {'uid': None, 'uri': TRACK_A, 'source': 'queue'}
+        self.client.queue = [first, second]
+        self.party._refresh()
+        expected = []
+        cases = [([second, first], [second, first]),
+                 ([second, replacement], [second, replacement]),
+                 ([replacement], [replacement]),
+                 ([track(TRACK_A)], [unidentified]),
+                 ([track(TRACK_A), track(TRACK_A)], [unidentified, unidentified]),
+                 ([track(TRACK_A)], [unidentified])]
+        for queue, occurrences in cases:
+            with self.subTest(queue=queue):
+                self.client.queue = queue
+                self.party._refresh()
+                expected.append({'queue': occurrences})
+                self.assertEqual(self.queue_events(), expected)
+
+    def test_queue_changes_include_uri_and_source_but_ignore_observation_metadata(self):
+        observed = observation(self.stamp)
+        observed['queue'] = [{**track(TRACK_A), 'uid': 'same-occurrence'}]
+        with patch.object(self.client, 'status', return_value=observed):
+            self.party._refresh()
+            last_id = self.party.events()['lastId']
+            self.stamp += 2500
+            observed['observedAt'] = self.stamp
+            observed['nowPlaying'].update(progressMs=14500, observedAt=self.stamp, title='Updated title')
+            observed['playbackState'].update(positionMs=14500, sourceTimestamp=self.stamp)
+            observed['queue'][0].update(title='New metadata', artist='New artist',
+                                        albumArt='fixture-art', requestedBy='Guest')
+            self.party._refresh()
+            self.assertEqual(self.party.events(after=last_id)['events'], [])
+            self.assertEqual(self.party.snapshot()['nowPlaying']['progressMs'], 14500)
+            expected = []
+            for uri, source in [(TRACK_RELINKED, 'queue'), (TRACK_RELINKED, 'context'),
+                                (TRACK_RELINKED, None)]:
+                observed['queue'][0]['uri'] = uri
+                if source is None:
+                    observed['queue'][0].pop('source')
+                else:
+                    observed['queue'][0]['source'] = source
+                self.party._refresh()
+                expected.append({'queue': [{'uid': 'same-occurrence', 'uri': uri, 'source': source}]})
+                self.assertEqual(self.queue_events(), expected)
+
+    def test_pending_request_overlays_do_not_emit_actual_queue_changes(self):
+        self.party._refresh()
+        self.request()
+        self.assertEqual(self.party.snapshot()['queue'][0]['id'], 'request-a')
+        last_id = self.party.events()['lastId']
+        self.party._refresh()
+        self.assertEqual(self.party.events(after=last_id)['events'], [])
+        self.assertEqual(self.queue_events(), [])
+        self.assertEqual(self.client.queue, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_disconnect_retains_queue_baseline_for_same_and_changed_reconnect(self):
+        first = {'uid': 'first', 'uri': TRACK_A, 'source': 'queue'}
+        second = {'uid': 'second', 'uri': TRACK_B, 'source': 'queue'}
+        self.client.queue = [first]
+        self.party._refresh()
+        last_id = self.party.events()['lastId']
+        for queue, changed in [([first], False), ([second], True)]:
+            with self.subTest(queue=queue):
+                with patch.object(self.client, 'status', side_effect=SpotifyError('Disconnected')):
+                    self.party._refresh()
+                    self.party._refresh()
+                disconnected = self.party.events(after=last_id)
+                self.assertEqual([event['kind'] for event in disconnected['events']], ['spotify'])
+                self.assertFalse(disconnected['state']['spotify']['connected'])
+                self.assertEqual(disconnected['state']['queue'], [])
+                self.client.queue = queue
+                self.party._refresh()
+                reconnected = self.party.events(after=disconnected['lastId'])
+                self.assertEqual([event['kind'] for event in reconnected['events']],
+                                 ['spotify', 'queue_changed'] if changed else ['spotify'])
+                self.assertEqual(reconnected['state']['queue'], [{**item, 'status': 'queued'} for item in queue])
+                if changed:
+                    self.assertEqual(reconnected['events'][-1]['payload'], {'queue': queue})
+                last_id = reconnected['lastId']
+        self.assertEqual(self.queue_events(), [{'queue': [second]}])
+
+    def test_queue_change_wakes_existing_event_wait_with_updated_state(self):
+        first = {'uid': 'first', 'uri': TRACK_A, 'source': 'queue'}
+        second = {'uid': 'second', 'uri': TRACK_B, 'source': 'queue'}
+        self.client.queue = [first, second]
+        self.party._refresh()
+        last_id = self.party.events()['lastId']
+        waiting = threading.Event()
+        condition_wait = self.party.changed.wait
+
+        def signal_wait(timeout=None):
+            waiting.set()
+            return condition_wait(timeout)
+
+        with patch.object(self.party.changed, 'wait', side_effect=signal_wait):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(self.party.events, after=last_id, wait=45)
+                try:
+                    self.assertTrue(waiting.wait(timeout=5))
+                    self.stamp += 2500
+                    self.client.current.update(progressMs=2500, observedAt=self.stamp)
+                    self.party._refresh()
+                    self.assertEqual(self.party.events(after=last_id)['events'], [])
+                    self.assertFalse(pending.done())
+                    self.client.queue = [second, first]
+                    self.party._refresh()
+                    result = pending.result(timeout=5)
+                    self.assertEqual([event['kind'] for event in result['events']], ['queue_changed'])
+                    self.assertEqual(result['events'][0]['payload'], {'queue': [second, first]})
+                    self.assertEqual(result['state']['queue'],
+                                     [{**item, 'status': 'queued'} for item in [second, first]])
+                finally:
+                    with self.party.changed:
+                        self.party.stop.set()
+                        self.party.changed.notify_all()
+                    pending.result(timeout=5)
+
     def test_transport_publishes_verified_pause_and_resume_before_returning(self):
         for action, paused in [('pause', True), ('resume', False)]:
             with self.subTest(action=action):
@@ -183,10 +340,14 @@ class PartyTests(unittest.TestCase):
         for error in (None, SpotifyError('Old poll failed')):
             with self.subTest(error=error):
                 old = observation(self.stamp)
+                old['queue'] = [{'uid': 'old-occurrence', 'uri': TRACK_A, 'source': 'queue'}]
                 self.client.current = old['nowPlaying']
+                self.client.queue = old['queue']
                 self.party._refresh()
                 fresh = observation(self.stamp + 1000, paused=True)
+                fresh['queue'] = [{'uid': 'new-occurrence', 'uri': TRACK_B, 'source': 'queue'}]
                 self.client.control_result = {'ok': True, 'action': 'pause', 'status': fresh}
+                last_id = self.party.events()['lastId']
                 observed = threading.Event()
                 release = threading.Event()
 
@@ -211,6 +372,15 @@ class PartyTests(unittest.TestCase):
                         pending.result(timeout=5)
                 status.assert_called_once_with()
                 self.assertEqual(self.party.snapshot()['nowPlaying'], fresh['nowPlaying'])
+                self.assertEqual(self.party.snapshot()['queue'],
+                                 [{**item, 'status': 'queued'} for item in fresh['queue']])
+                queue_events = [event for event in self.party.events(after=last_id)['events']
+                                if event['kind'] == 'queue_changed']
+                self.assertEqual([event['payload'] for event in queue_events], [{'queue': fresh['queue']}])
+                last_id = self.party.events()['lastId']
+                with patch.object(self.client, 'status', return_value=fresh):
+                    self.party._refresh()
+                self.assertEqual(self.party.events(after=last_id)['events'], [])
                 self.assertTrue(self.party.spotify['connected'])
                 self.assertIsNone(self.party.spotify['error'])
                 with self.party.lock:
@@ -453,7 +623,8 @@ class PartyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.party.message({'requestId': 'one-message-id', 'text': 'Hello DJ'}, role='assistant')
 
-    def test_visual_act_rotates_after_45_minutes_without_restoring_legacy_geometry(self):
+    def test_visual_act_rotates_after_10_minutes_without_restoring_legacy_geometry(self):
+        self.assertEqual(server.AUDIO_ACT_MS, 600000)
         self.party.admin('scene', {'audioStyle': 'city', 'mode': 'auto', 'effect': 7})
         started = self.stamp
         self.assertEqual(self.party.scene['effect'], 0)
@@ -486,6 +657,80 @@ class PartyTests(unittest.TestCase):
         self.assertEqual(reopened.scene['audioStyle'], 'city')
         self.assertEqual(reopened.scene['audioActStartedAt'], self.stamp)
         self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM events WHERE kind='audio_act'").fetchone()[0], 1)
+
+    def book_fixture(self):
+        directory = self.party.data / 'book'
+        directory.mkdir()
+        filename = 'fixture-photo.jpg'
+        # The server checks existence; these tests never decode or render images.
+        (directory / filename).write_bytes(b'fixture-image')
+        (directory / 'cards.json').write_text(json.dumps([
+            {'path': filename, 'kind': 'photo', 'caption': 'Fixture photo'}]))
+        return filename
+
+    def test_book_enabled_defaults_true_and_disable_clears_and_persists(self):
+        filename = self.book_fixture()
+        self.assertTrue(self.party.snapshot()['bookEnabled'])
+        self.assertTrue(self.party.admin('configure', {})['bookEnabled'])
+        self.party.admin('book', {'filename': filename})
+        self.assertIsNotNone(self.party.snapshot()['bookMoment'])
+        result = self.party.admin('configure', {'bookEnabled': False})
+        self.assertFalse(result['bookEnabled'])
+        self.assertFalse(self.party.setting('bookEnabled'))
+        self.assertFalse(self.party.snapshot()['bookEnabled'])
+        self.assertIsNone(self.party.book_moment)
+        published = json.loads((self.party.data / 'state.json').read_text())
+        self.assertFalse(published['bookEnabled'])
+        self.assertIsNone(published['bookMoment'])
+        reopened = server.Party(self.party.data, client=self.client)
+        self.addCleanup(reopened.db.close)
+        self.assertFalse(reopened.snapshot()['bookEnabled'])
+        self.assertFalse(reopened.admin('configure', {})['bookEnabled'])
+        self.assertIsNone(reopened.snapshot()['bookMoment'])
+
+    def test_disabled_book_blocks_automatic_and_manual_display_until_reenabled(self):
+        filename = self.book_fixture()
+        self.party.admin('configure', {'bookEnabled': False})
+        self.stamp += 106000
+        with patch.object(self.party, '_book_cards', wraps=self.party._book_cards) as cards:
+            with self.party.lock:
+                self.party._advance_show()
+            cards.assert_not_called()
+        self.assertIsNone(self.party.book_moment)
+        with self.assertRaisesRegex(ValueError, 'disabled'):
+            self.party.admin('book', {'filename': filename})
+        self.assertIsNone(self.party.book_moment)
+        self.assertFalse(self.party._show_book({'path': filename}))
+        self.assertIsNone(self.party.book_moment)
+        self.assertTrue(self.party.admin('configure', {'bookEnabled': True})['bookEnabled'])
+        self.assertTrue(self.party.setting('bookEnabled'))
+        manual = self.party.admin('book', {'filename': filename})
+        self.assertEqual(Path(manual['bookMoment']['imagePath']).name, filename)
+        self.stamp += 106000
+        with self.party.lock:
+            self.party._advance_show()
+        self.assertEqual(self.party.book_moment['createdAt'], self.stamp)
+        self.assertEqual(Path(self.party.book_moment['imagePath']).name, filename)
+
+    def test_invalid_book_enabled_leaves_book_and_other_configuration_unchanged(self):
+        filename = self.book_fixture()
+        self.party.admin('book', {'filename': filename})
+
+        def unchanged_state():
+            return (self.party.setting('bookEnabled'), self.party.snapshot()['bookEnabled'],
+                    copy.deepcopy(self.party.book_moment), self.party.setting('speechEnabled'),
+                    self.party.request_url, self.party.setting('requestUrl'), self.party.revision,
+                    (self.party.data / 'state.json').read_bytes())
+
+        before = unchanged_state()
+        with patch.object(self.party, '_write_qr') as write_qr:
+            for invalid in (None, 0, 1, 'false', 'true', [], {}):
+                with self.subTest(value=invalid):
+                    with self.assertRaisesRegex(ValueError, 'bookEnabled'):
+                        self.party.admin('configure', {'bookEnabled': invalid, 'speechEnabled': False,
+                                                      'requestUrl': 'https://fixture.invalid/changed'})
+                    self.assertEqual(unchanged_state(), before)
+            write_qr.assert_not_called()
 
     def test_ring_retains_geometry_controls_and_invalid_style_leaves_scene_intact(self):
         self.party.admin('scene', {'audioStyle': 'ring', 'effect': 6, 'mode': 'laser', 'palette': 'ice'})

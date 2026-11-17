@@ -30,7 +30,7 @@ MOODS = {'chill': ('Lagano', .22), 'groove': ('Groove', .48),
          'singalong': ('Pjevamo', .64)}
 TRACK = re.compile(r'^spotify:track:[A-Za-z0-9]{22}$')
 AUDIO_STYLES = ('ring', 'city', 'waterfall')
-AUDIO_ACT_MS = 45 * 60 * 1000
+AUDIO_ACT_MS = 10 * 60 * 1000
 PROCESSING_LEASE_MS = 15 * 60 * 1000
 PROCESSING_LIMIT = 50
 
@@ -95,6 +95,7 @@ class Party:
         self.last_seen = 0
         self.processing_messages = self.setting('processingMessages', {})
         self.last_track = ''
+        self._queue_signature = None
         self.missing_requests = {}
         self.next_dispatch_at = 0
         self.last_auto_caption = 0
@@ -103,6 +104,7 @@ class Party:
         self.last_book = 0
         self.book_index = -1
         self.book_moment = None
+        self.book_enabled = self.setting('bookEnabled', True)
         self.caption = None
         self.caption_queue = collections.deque()
         self.scene = self.setting('scene', {'mode': 'auto', 'energy': .65, 'palette': 'orange', 'effect': 5})
@@ -155,6 +157,8 @@ class Party:
         return raw.get('cards', []) if isinstance(raw, dict) else raw
 
     def _show_book(self, card, seconds=35):
+        if not self.book_enabled:
+            return False
         candidate = card.get('imagePath') or card.get('path') or card.get('image')
         if not candidate:
             return False
@@ -267,7 +271,8 @@ class Party:
                 'queue': queue, 'scene': self.scene.copy(), 'caption': self.caption,
                 'mood': self._mood(), 'guestCount': sum(now_ms() - t < 90000 for t in self.guests.values()),
                 'requestUrl': self.request_url, 'qrPath': str(self.data / 'request-qr.png'),
-                'spotify': self.spotify.copy(), 'dj': self._dj(), 'bookMoment': self.book_moment,
+                'spotify': self.spotify.copy(), 'dj': self._dj(),
+                'bookEnabled': self.book_enabled, 'bookMoment': self.book_moment,
                 'speech': self.audio.snapshot() if self.audio else {'available': False, 'enabled': False},
                 'karaoke': self.karaoke.snapshot(now_playing, self.spotify['connected'], now_ms()),
                 'title': 'LARICS / LYRICS'}
@@ -430,7 +435,7 @@ class Party:
             self.scene['effect'] = effects[self.scene_index % len(effects)]
             self.scene_index += 1
             self.last_auto_scene = stamp
-        if stamp - self.last_book > 105000:
+        if self.book_enabled and stamp - self.last_book > 105000:
             try:
                 cards = self._book_cards()
                 if cards:
@@ -452,6 +457,8 @@ class Party:
     def admin(self, action, body):
         with self.lock:
             processing = self._prepare_processing(body) if action == 'processing' else None
+            if action == 'configure' and 'bookEnabled' in body and not isinstance(body['bookEnabled'], bool):
+                raise ValueError('bookEnabled must be true or false.')
             read_through = body.get('readThrough')
             if read_through is not None:
                 read_through = int(read_through)
@@ -520,9 +527,16 @@ class Party:
                     self.request_url = url
                     self.set_setting('requestUrl', url)
                     self._write_qr()
-                result = {'requestUrl': self.request_url,
+                if 'bookEnabled' in body:
+                    self.set_setting('bookEnabled', body['bookEnabled'])
+                    self.book_enabled = body['bookEnabled']
+                    if not self.book_enabled:
+                        self.book_moment = None
+                result = {'requestUrl': self.request_url, 'bookEnabled': self.book_enabled,
                           'speech': self.audio.snapshot() if self.audio else {'available': False, 'enabled': False}}
             elif action == 'book':
+                if not self.book_enabled:
+                    raise ValueError('Book and photo visuals are disabled. Enable bookEnabled to display them.')
                 filename = clean(body.get('filename', ''), 200)
                 card = next((c for c in self._book_cards() if Path(c.get('imagePath') or c.get('path') or c.get('image') or '').name == filename), None)
                 if not card or not self._show_book(card, body.get('seconds', 35)):
@@ -633,6 +647,15 @@ class Party:
             self.audio.observe(self.snapshot().get('nowPlaying'), requests)
         if not connected_before:
             self._event('spotify', {'connected': True, 'mode': self.client.mode})
+        # Compare observed occurrences, including their order and duplicates.
+        # Keep this baseline across disconnects; clearing the public cache is
+        # not an observation that Spotify removed its queue.
+        occurrences = [{key: item.get(key) for key in ('uid', 'uri', 'source')}
+                       for item in queue]
+        signature = tuple((item['uid'], item['uri'], item['source']) for item in occurrences)
+        if self._queue_signature is not None and signature != self._queue_signature:
+            self._event('queue_changed', {'queue': occurrences})
+        self._queue_signature = signature
 
     def _refresh(self):
         with self.lock:
