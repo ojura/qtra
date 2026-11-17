@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import copy
+import ctypes
 import os
 from pathlib import Path
 import subprocess
@@ -47,7 +48,10 @@ class Service(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
         url = urlsplit(self.path)
@@ -77,28 +81,54 @@ class Service(BaseHTTPRequestHandler):
                 self.server.description_reply_gate.wait(10)
             return self.reply({"search": result})
         if url.path == "/api/search":
-            query = parse_qs(url.query)["q"][0]
+            values = parse_qs(url.query); query = values["q"][0]
+            identifier = values.get("searchId", [""])[0]
+            self.server.search_attempts.append((query, identifier))
             self.server.searches.append(query)
+            if query in self.server.search_gates:
+                self.server.search_gates[query].wait(10)
+            if identifier in self.server.search_cancelled:
+                return self.reply({"tracks": [], "cancelled": True, "searchId": identifier})
+            self.server.search_admitted.append((query, identifier))
+            def search_reply(value):
+                return self.reply({"searchId": self.server.search_reply_ids.get(query, identifier), "cancelled": False, **value})
+            if query in self.server.search_tracks:
+                return search_reply({"tracks": copy.deepcopy(self.server.search_tracks[query])})
+            if query == "http failure":
+                self.send_error(503, "Private catalogue outage")
+                return
             if query == "offline":
-                return self.reply({"error": "Search unavailable"})
+                return search_reply({"error": "Search unavailable"})
             if query == "slow":
                 time.sleep(.7)
             title = "Robot karaoke" if query == "robot" else f"Song {query}"
             if query == "long":
                 title = "A very long song title " * 25
-            return self.reply({"tracks": [{"id": "test", "uri": "spotify:track:test",
+            return search_reply({"tracks": [{"id": "test", "uri": "spotify:track:test",
                                            "title": title, "artist": "LARICS house band",
                                            "album": "After hours", "durationMs": 180000}]})
         if url.path == "/api/chat":
             after = int(parse_qs(url.query).get("after", [0])[0])
-            return self.reply({"messages": [m for m in self.server.messages if m["id"] > after and m["id"] not in self.server.withdrawn_ids],
+            self.server.chat_requests += 1
+            data = copy.deepcopy({"messages": [m for m in self.server.messages if m["id"] > after and m["id"] not in self.server.withdrawn_ids],
                                "withdrawnMessageIds": self.server.withdrawn_ids,
                                "dj": {"status": "listening", "lastSeen": int(time.time() * 1000),
+                                      "llm": self.server.llm,
                                       "processingMessageIds": self.server.processing_ids, "messageWork": self.server.message_work}})
+            if self.server.chat_reply_gate:
+                self.server.chat_reply_gate.wait(10)
+            self.reply(data); self.server.chat_last_llm_reply = data["dj"]["llm"]; self.server.chat_finished += 1
+            return
         self.send_error(404)
 
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/api/search/cancel":
+            self.server.search_cancels.append(data)
+            self.server.search_cancelled.add(data["searchId"])
+            if self.server.search_cancel_reply_gate:
+                self.server.search_cancel_reply_gate.wait(10)
+            return self.reply({"searchId": data["searchId"], "cancelRequested": True})
         if self.path == "/api/admin/playback":
             self.server.playback_requests.append(data)
             self.server.playback_operators.append(self.headers.get("X-DJ-Operator"))
@@ -222,6 +252,12 @@ class PartyStage(unittest.TestCase):
         self.assertNotEqual(self.server.server_port, 8787, "the fixture must not use the party service port")
         self.assertEqual(self.client.request("hello", {})["pid"], self.process.pid)
         self.server.searches, self.server.requests, self.server.posts = [], [], []
+        self.server.search_tracks = {}; self.server.llm = {}
+        self.server.search_attempts, self.server.search_admitted, self.server.search_cancels = [], [], []
+        self.server.search_gates, self.server.search_cancelled, self.server.search_reply_ids = {}, set(), {}
+        self.server.search_cancel_reply_gate = None
+        self.server.chat_requests = self.server.chat_finished = 0
+        self.server.chat_reply_gate = None
         self.server.request_attempts, self.server.message_attempts = [], []
         self.server.reject_requests = self.server.reject_messages = 0
         self.server.message_reply_gate = None
@@ -275,7 +311,7 @@ class PartyStage(unittest.TestCase):
     def run_stage(self, **request):
         # The explicit private URL must reach the constructor before any
         # visibility-triggered fetch, even when this test supplies invalid state.
-        request.setdefault("requestBaseUrl", f"http://127.0.0.1:{self.server.server_port}")
+        request.setdefault("requestBaseUrl", getattr(self, "request_base_url", f"http://127.0.0.1:{self.server.server_port}"))
         started = self.client.request("snippet.run", {"moduleId": self.module, "executor": "gui", "request": request})
         finished = self.client.wait_for_operation(started["operationId"], timeout=10)["data"]
         self.assertEqual(finished["outcome"], "completed", finished)
@@ -313,6 +349,187 @@ class PartyStage(unittest.TestCase):
         self.client.request("object.invoke", {"objectName": "partyMessage", "method": "setFocus"})
         subprocess.run(["xdotool", "key", "--clearmodifiers", combination], env=self.environment, check=True)
 
+    def cursor_image(self):
+        # Read the server's actual displayed ARGB cursor, not QWidget's cached
+        # cursor property. This connection is only to the fixture-owned Xvfb.
+        self.assertIsNotNone(self.display.server)
+        self.assertIsNone(self.display.server.poll())
+        self.assertEqual(self.environment["DISPLAY"], self.display.number)
+        class CursorImage(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short),
+                        ("width", ctypes.c_ushort), ("height", ctypes.c_ushort),
+                        ("xhot", ctypes.c_ushort), ("yhot", ctypes.c_ushort),
+                        ("serial", ctypes.c_ulong), ("pixels", ctypes.POINTER(ctypes.c_ulong)),
+                        ("atom", ctypes.c_ulong), ("name", ctypes.c_char_p)]
+        x11, fixes = ctypes.CDLL("libX11.so.6"), ctypes.CDLL("libXfixes.so.3")
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]; x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        x11.XFree.argtypes = [ctypes.c_void_p]
+        fixes.XFixesGetCursorImage.argtypes = [ctypes.c_void_p]
+        fixes.XFixesGetCursorImage.restype = ctypes.POINTER(CursorImage)
+        display = x11.XOpenDisplay(self.display.number.encode())
+        self.assertTrue(display)
+        try:
+            image = fixes.XFixesGetCursorImage(display)
+            self.assertTrue(image)
+            try:
+                item = image.contents
+                return {"width": item.width, "height": item.height,
+                        "opaque": sum((item.pixels[i] >> 24) & 255 > 0 for i in range(item.width * item.height))}
+            finally:
+                x11.XFree(image)
+        finally:
+            x11.XCloseDisplay(display)
+
+    def test_playback_feedback_cursor_and_shortcuts_preserve_editor_intent(self):
+        (self.folder / "admin-token").write_text("private-fixture-token")
+        stamp = int(time.time() * 1000)
+        self.state["spotify"] = {"connected": True, "observedAt": stamp}
+        self.state["playbackState"] = {"paused": False, "buffering": False, "device": {"id": "fixture-device"}}
+        self.state["nowPlaying"].update(uid="feedback-fixture", paused=False, playing=True, clockValid=True)
+        self.write_state(); self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        self.assertTrue(windows)
+        subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
+        control = lambda: self.run_stage()["playbackControl"]
+        self.eventually(lambda: control()["enabled"], "private playback control never became ready")
+        self.run_stage(composerDraft={"text": "Keep this exact draft and selection.", "cursor": 20, "anchor": 5})
+        draft, bounds = self.editor_draft(), self.magic_bounds()
+        button = control()["bounds"]
+        subprocess.run(["xdotool", "mousemove", "--sync", "--window", windows[-1],
+                        str(button[0] + button[2] // 2), str(button[1] + button[3] // 2)], env=self.environment, check=True)
+        self.eventually(lambda: self.cursor_image()["width"] == 48 and self.cursor_image()["opaque"] > 100,
+                        "the actual large DJ pointer was not visible over the button")
+        label = control()["label"]
+        self.server.playback_reply_gate = threading.Event()
+        subprocess.run(["xdotool", "click", "1"], env=self.environment, check=True)
+        try:
+            self.eventually(lambda: control()["busy"] and len(self.server.playback_requests) == 1, "pointer click did not start one command")
+            self.assertEqual(control()["label"], label, "verification replaced the observed play/pause label")
+            self.assertIn("Provjeravam", control()["verification"])
+            self.eventually(lambda: self.cursor_image()["width"] == 48 and self.cursor_image()["opaque"] > 100,
+                            "the stationary cursor was not restored after the disabled transition", seconds=2)
+            self.key("ctrl+p")
+            self.assertEqual(len(self.server.playback_requests), 1, "Ctrl+P duplicated an in-flight click")
+        finally:
+            self.server.playback_reply_gate.set()
+        self.eventually(lambda: control()["enabled"] and control()["paused"], "the confirmed pause did not arrive")
+        self.assertEqual(control()["verification"], "")
+        self.assertGreater(self.cursor_image()["opaque"], 100, "the stationary cursor stayed hidden after confirmation")
+        self.assertEqual(self.editor_draft(), draft)
+        self.client.request("object.invoke", {"objectName": "partyName", "method": "setFocus"})
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+k"], env=self.environment, check=True)
+        self.eventually(lambda: self.client.request("object.get", {"objectName": "partyMessage", "property": "focus"}), "Ctrl+K did not focus the Magic box")
+        self.key("ctrl+p")
+        self.eventually(lambda: len(self.server.playback_requests) == 2 and control()["enabled"] and not control()["paused"],
+                        "Ctrl+P did not use the guarded explicit resume action")
+        self.assertEqual(self.server.playback_commands, [True, False])
+        self.assertEqual(self.editor_draft(), draft)
+        self.assertEqual(self.magic_bounds(), bounds)
+        self.state = copy.deepcopy(self.server.state_snapshot); self.state["revision"] += 1
+        self.state["spotify"]["observedAt"] -= 11000; self.write_state()
+        self.eventually(lambda: not control()["enabled"], "stale playback remained actionable")
+        self.key("ctrl+p"); self.assertEqual(len(self.server.playback_requests), 2, "stale Ctrl+P reached transport")
+        self.assertGreater(self.cursor_image()["opaque"], 100, "the cursor disappeared over unavailable playback")
+
+    def test_llm_presence_expires_without_relying_on_watcher_or_new_json(self):
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        presence = lambda: self.run_stage()["djPresence"]
+        self.eventually(lambda: self.run_stage()["chatCount"] == 1, "fixture chat did not arrive")
+        self.assertEqual(presence()["status"], "unavailable", "legacy watcher listening was treated as LLM availability")
+        bounds = self.magic_bounds()
+        stamp = int(time.time() * 1000)
+        self.server.llm = {"status": "online", "lastSeen": stamp, "expiresAt": stamp + 30000, "remainingMs": 2600, "activeCount": 1}
+        self.eventually(lambda: presence()["status"] == "online", "valid explicit LLM lease was not shown")
+        self.assertIn("online", self.client.request("object.get", {"objectName": "partyDjOnlineBadge", "property": "text"}))
+        self.eventually(lambda: presence()["status"] == "offline", "unchanged lease did not expire locally", seconds=4)
+        time.sleep(1.6)
+        self.assertEqual(presence()["status"], "offline", "repeated identical JSON renewed an expired lease")
+        self.server.llm = {"status": "online", "lastSeen": stamp, "expiresAt": "later", "remainingMs": 10000, "activeCount": 1}
+        self.eventually(lambda: presence()["status"] == "unavailable", "invalid lease remained online")
+        stamp = int(time.time() * 1000)
+        self.server.llm = {"status": "online", "lastSeen": stamp, "expiresAt": stamp + 120000, "remainingMs": 120000, "activeCount": 256}
+        self.eventually(lambda: presence()["activeCount"] == 256, "the agreed maximum agent count was rejected")
+        self.server.llm = {"status": "online", "lastSeen": stamp, "expiresAt": stamp + 120001, "remainingMs": 10000, "activeCount": 1}
+        self.eventually(lambda: presence()["status"] == "unavailable", "an excessive lease horizon was accepted")
+        self.server.llm = {"status": "online", "lastSeen": stamp, "expiresAt": stamp + 120000, "remainingMs": 120000, "activeCount": 256}
+        self.eventually(lambda: presence()["activeCount"] == 256, "the agreed maximum agent count was rejected")
+        self.server.llm = {**self.server.llm, "activeCount": 257}
+        self.eventually(lambda: presence()["status"] == "unavailable", "an out-of-contract agent count was accepted")
+        self.server.llm = {"status": "offline", "lastSeen": int(time.time() * 1000), "expiresAt": 0, "remainingMs": 0, "activeCount": 0}
+        self.eventually(lambda: presence()["status"] == "offline", "explicit offline state was not rendered")
+        self.assertEqual(self.magic_bounds(), bounds, "presence changed the composer geometry")
+        self.assertFalse(self.server.playback_requests)
+
+    def test_presence_same_expiry_metadata_and_offline_replay_cannot_renew_the_monotonic_lease(self):
+        stamp = int(time.time() * 1000)
+        lease = {"status": "online", "lastSeen": stamp, "expiresAt": stamp + 60000, "remainingMs": 2400, "activeCount": 2}
+        self.server.llm = lease
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        presence = lambda: self.run_stage()["djPresence"]
+        self.eventually(lambda: presence()["status"] == "online", "short original lease was not accepted")
+        original_deadline = time.monotonic() + presence()["remainingMs"] / 1000
+        self.server.llm = {**lease, "activeCount": 1, "remainingMs": 50000}
+        self.eventually(lambda: presence()["activeCount"] == 1, "same-expiry metadata update was not read")
+        self.assertLessEqual(time.monotonic() + presence()["remainingMs"] / 1000, original_deadline + .15,
+                             "same-expiry metadata extended the earlier monotonic deadline")
+        offline = {"status": "offline", "lastSeen": stamp, "expiresAt": 0, "remainingMs": 0, "activeCount": 0}
+        self.server.llm = offline
+        self.eventually(lambda: getattr(self.server, "chat_last_llm_reply", None) == offline and presence()["status"] == "offline",
+                        "intervening explicit offline state was not observed")
+        replay = {**lease, "activeCount": 3, "remainingMs": 50000}
+        self.server.llm = replay
+        self.eventually(lambda: getattr(self.server, "chat_last_llm_reply", None) == replay, "same-expiry replay was not delivered")
+        time.sleep(.15)
+        self.assertEqual(presence()["status"], "offline", "offline reset the monotonic watermark and revived an expired lease")
+        self.assertFalse(self.server.playback_requests)
+
+    def test_search_artwork_is_bounded_cached_and_cancelled_with_stale_queries(self):
+        base = f"http://127.0.0.1:{self.server.server_port}"
+        def track(title, cover):
+            return {"uri": "spotify:track:" + title, "title": title, "artist": "Original private fixture band", "artUrl": base + cover}
+        self.server.search_tracks = {
+            "cover slow": [track("Old result", "/cover/slow.png")],
+            "cover current": [track("Current result", "/cover/current.png")],
+            "cover large": [track("Oversized result", "/cover/large.png")],
+            "cover preview": [track("Original first recording", "/cover/red.png"), track("Original second recording", "/cover/blue.png"),
+                              {**track("Explained recording", "/cover/green.png"), "match": {"basis": "semantic", "rationale": "Original fixture explanation", "sources": []}}],
+        }
+        self.server.covers.update({"/cover/red.png": cover_png((185, 65, 80)), "/cover/blue.png": cover_png((50, 115, 180)),
+                                  "/cover/green.png": cover_png((40, 155, 130)), "/cover/large.png": b"x" * (2 * 1024 * 1024 + 1)})
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
+        bounds = self.magic_bounds()
+        self.server.cover_reply_gate = threading.Event(); self.set_text("partyMessage", "cover slow")
+        self.eventually(lambda: any(path == "/cover/slow.png" for path, unused in self.server.cover_requests), "old artwork did not begin")
+        try:
+            self.set_text("partyMessage", "cover current")
+            self.eventually(lambda: self.run_stage()["searchArtwork"]["loaded"] == 1, "current result artwork did not load")
+        finally:
+            self.server.cover_reply_gate.set()
+        self.set_text("partyMessage", "Povećaj font u panelu.")
+        self.eventually(lambda: self.run_stage()["searchArtwork"]["active"] == 0, "chat intent retained stale image work")
+        self.set_text("partyMessage", "cover current")
+        self.eventually(lambda: self.run_stage()["searchArtwork"]["loaded"] == 1, "cached result artwork did not return")
+        self.assertEqual(sum(path == "/cover/current.png" for path, unused in self.server.cover_requests), 1)
+        self.set_text("partyMessage", "cover large")
+        self.eventually(lambda: any(path == "/cover/large.png" for path, unused in self.server.cover_requests), "oversized fixture was not requested")
+        self.eventually(lambda: self.run_stage()["searchArtwork"]["active"] == 0, "oversized image did not finish rejection")
+        self.assertEqual(self.run_stage()["searchArtwork"]["loaded"], 0)
+        self.set_text("partyMessage", "cover preview")
+        self.eventually(lambda: self.run_stage()["searchArtwork"]["loaded"] == 3, "the preview thumbnails did not load")
+        self.assertTrue(all(auth is None for unused, auth in self.server.cover_requests))
+        self.assertLessEqual(self.run_stage()["searchArtwork"]["active"], 2)
+        self.assertLessEqual(self.run_stage()["searchArtwork"]["cached"], 24)
+        self.assertEqual(self.magic_bounds(), bounds)
+        self.assertFalse(self.server.requests); self.assertFalse(self.server.posts); self.assertFalse(self.server.playback_requests)
+        capture = os.environ.get("PARTY_STAGE_CAPTURE")
+        if capture:
+            self.run_stage(capture=str(Path(capture).with_name("native269-search.png")))
+
     def test_initial_invalid_state_uses_only_the_explicit_private_service(self):
         self.state_file.write_text("")
         status = self.run_stage(stateFile=str(self.state_file), fullscreen=False)
@@ -324,6 +541,188 @@ class PartyStage(unittest.TestCase):
         self.write_state()
         self.eventually(lambda: self.run_stage().get("revision") == 1 and not self.run_stage()["fileError"],
                         "the private state did not recover")
+
+    def test_search_intent_is_local_exact_and_invalidated_by_editor_transitions(self):
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        phrase = "Molim povećaj font ovog gumba u panelu."
+        self.set_text("partyMessage", phrase)
+        time.sleep(.45)
+        self.assertEqual(self.run_stage()["searchIntent"], "chat")
+        self.assertFalse(self.server.searches, "ordinary UI prose reached the catalogue")
+        self.assertFalse(self.client.request("object.get", {"objectName": "partySuggestions", "property": "visible"}))
+        def cue(intent="music"):
+            draft = self.run_stage(getComposerDraft=True)["composerDraft"]
+            return {**{key: draft[key] for key in ("guestId", "composerId", "draftRevision", "text", "editorMode")}, "intent": intent}
+        current = cue()
+        for key, value in (("guestId", "another-guest"), ("composerId", "another-editor"),
+                           ("draftRevision", current["draftRevision"] + 1), ("text", phrase + " "), ("editorMode", "dedication")):
+            result = self.run_stage(setSearchIntent={**current, key: value})
+            self.assertFalse(result["searchIntentResult"]["applied"], f"mismatched {key} was accepted")
+        self.assertFalse(self.server.searches)
+        self.assertTrue(self.run_stage(setSearchIntent=current)["searchIntentResult"]["applied"])
+        self.eventually(lambda: phrase in self.server.searches and self.run_stage()["searchCount"] == 1,
+                        "exact music intent did not issue the current query")
+        self.assertFalse(self.server.requests); self.assertEqual(self.run_stage()["composerMode"], "message")
+        self.assertTrue(self.run_stage(setSearchIntent=cue("chat"))["searchIntentResult"]["applied"])
+        self.assertEqual(self.run_stage()["searchCount"], 0)
+        self.assertFalse(self.client.request("object.get", {"objectName": "partySuggestions", "property": "visible"}))
+        self.set_text("partyMessage", "slow")
+        self.eventually(lambda: "slow" in self.server.searches, "concise catalogue lookup was delayed by intent reasoning")
+        self.set_text("partyMessage", phrase)
+        time.sleep(.8)
+        self.assertEqual(self.run_stage()["searchCount"], 0, "late music results replaced a chat decision")
+        self.assertFalse(self.run_stage(setSearchIntent=current)["searchIntentResult"]["applied"], "A-B-A editing reused an old revision")
+        restored = cue()
+        self.run_stage(composerDraft={"text": phrase, "cursor": 8, "anchor": 2})
+        self.assertFalse(self.run_stage(setSearchIntent=restored)["searchIntentResult"]["applied"], "restore retained an old intent binding")
+        self.key("ctrl+k")
+        self.eventually(lambda: self.run_stage()["searchCount"] == 1, "explicit Ctrl+K could not search conversational-looking text")
+        selected_binding = cue()
+        self.client.request("object.set", {"objectName": "partyResults", "property": "currentRow", "value": 0})
+        self.assertEqual(self.run_stage()["composerMode"], "dedication")
+        self.assertFalse(self.run_stage(setSearchIntent=selected_binding)["searchIntentResult"]["applied"], "song selection retained a message-mode binding")
+        self.set_text("partyMessage", "For the fixture only.")
+        before = len(self.server.searches)
+        result = self.run_stage(setSearchIntent=cue())
+        self.assertEqual(result["searchIntentResult"]["effectiveIntent"], "chat")
+        time.sleep(.4); self.assertEqual(len(self.server.searches), before, "dedication text became a catalogue query")
+        self.client.request("widget.click", {"objectName": "partyCancelSong"})
+        self.assertTrue(self.run_stage(setSearchIntent=cue())["searchIntentResult"]["applied"])
+        self.eventually(lambda: self.run_stage()["searchCount"] == 1, "send fixture did not have visible catalogue rows")
+        send_binding = cue("chat")
+        self.server.message_reply_gate = threading.Event()
+        self.key("Return")
+        try:
+            self.eventually(lambda: bool(self.server.posts), "private chat send did not begin")
+            self.assertEqual(self.run_stage()["searchCount"], 0, "sending left obsolete selectable rows above the draft")
+            self.assertFalse(self.run_stage(setSearchIntent=send_binding)["searchIntentResult"]["applied"], "send retained an old intent binding")
+        finally:
+            self.server.message_reply_gate.set()
+        self.eventually(lambda: not self.composer_text(), "private chat acknowledgement did not clear its sent text")
+        self.set_text("partyMessage", phrase)
+        service_binding = cue()
+        changed = self.run_stage(requestBaseUrl=f"http://127.0.0.1:{self.server.server_port}/another-base", setSearchIntent=service_binding)
+        self.assertFalse(changed["searchIntentResult"]["applied"], "service change retained a prior intent binding")
+
+    def test_search_cancellation_is_exact_and_old_callbacks_cannot_replace_new_work(self):
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        old_gate, new_gate, cancel_gate = threading.Event(), threading.Event(), threading.Event()
+        self.server.search_gates.update({"old catalogue": old_gate, "new catalogue": new_gate})
+        self.server.search_cancel_reply_gate = cancel_gate
+        try:
+            self.set_text("partyMessage", "old catalogue")
+            self.eventually(lambda: bool(self.server.search_attempts), "old catalogue call did not dispatch")
+            old_id = self.server.search_attempts[-1][1]
+            self.assertRegex(old_id, r"^[a-f0-9-]{36}$")
+            self.set_text("partyMessage", "new catalogue")
+            self.eventually(lambda: old_id in self.server.search_cancelled and len(self.server.search_attempts) == 2,
+                            "editing did not cancel just the dispatched old request")
+            new_id = self.server.search_attempts[-1][1]
+            self.assertNotEqual(old_id, new_id)
+            self.assertEqual(self.server.search_cancels, [{"searchId": old_id}], "cancellation published more than an opaque ID")
+            old_gate.set(); time.sleep(.15)
+            self.assertEqual(self.run_stage()["suggestionState"], "loading")
+            self.assertEqual(self.client.request("object.get", {"objectName": "partySearchActivity", "property": "maximum"}), 0)
+            cancel_gate.set(); time.sleep(.15)
+            self.assertEqual(self.run_stage()["suggestionState"], "loading", "old cancellation changed the newer spinner")
+            new_gate.set()
+            self.eventually(lambda: self.run_stage()["searchCount"] == 1, "current search results did not arrive")
+            self.assertNotIn(("old catalogue", old_id), self.server.search_admitted, "cancel-before-admission still ran provider work")
+            self.assertIn(("new catalogue", new_id), self.server.search_admitted)
+            self.assertNotIn(new_id, self.server.search_cancelled)
+            self.server.search_reply_ids["mismatched result"] = "another-request-id"
+            self.set_text("partyMessage", "mismatched result")
+            self.eventually(lambda: self.run_stage()["suggestionState"] == "error", "mismatched response ID was accepted")
+            self.assertEqual(self.run_stage()["searchCount"], 0)
+            cancelled_gate = threading.Event(); self.server.search_gates["cancelled result"] = cancelled_gate
+            self.set_text("partyMessage", "cancelled result")
+            self.eventually(lambda: self.server.search_attempts[-1][0] == "cancelled result", "cancelled fixture did not dispatch")
+            self.server.search_cancelled.add(self.server.search_attempts[-1][1]); cancelled_gate.set()
+            self.eventually(lambda: self.run_stage()["suggestionState"] == "empty", "cancelled response was not quietly discarded")
+            release_gate = threading.Event(); self.server.search_gates["release catalogue"] = release_gate
+            self.set_text("partyMessage", "release catalogue")
+            self.eventually(lambda: self.server.search_attempts[-1][0] == "release catalogue", "release fixture did not dispatch")
+            release_id = self.server.search_attempts[-1][1]
+            self.run_stage(restore=True)
+            self.eventually(lambda: release_id in self.server.search_cancelled, "stage release lost its dispatched cancellation")
+            release_gate.set()
+        finally:
+            for gate in self.server.search_gates.values(): gate.set()
+            cancel_gate.set()
+
+    def test_released_generation_composer_rpcs_fail_without_recreating_the_stage(self):
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        self.set_text("partyMessage", "Original private draft")
+        draft = self.run_stage(getComposerDraft=True)["composerDraft"]
+        cue = {**{key: draft[key] for key in ("guestId", "composerId", "draftRevision", "text", "editorMode")}, "intent": "chat"}
+        self.run_stage(restore=True)
+        for request in ({"getComposerDraft": True}, {"setSearchIntent": cue}):
+            operation = self.client.request("snippet.run", {"moduleId": self.module, "executor": "gui", "request": request})
+            finished = self.client.wait_for_operation(operation["operationId"], timeout=10)["data"]
+            self.assertEqual(finished["outcome"], "failed", finished)
+            self.assertIn("inactive", str(finished))
+            names = {item.get("objectName") for item in self.client.request("object.list", {})}
+            self.assertNotIn("partyStage", names, "a composer RPC recreated the resident released stage")
+            self.assertNotIn("partyRequestPanel", names, "a composer RPC recreated its request panel")
+        self.assertFalse(self.server.posts); self.assertFalse(self.server.requests); self.assertFalse(self.server.playback_requests)
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        restored = self.run_stage(getComposerDraft=True)["composerDraft"]
+        self.assertNotEqual(restored["composerId"], draft["composerId"], "explicit installation did not create a fresh editor identity")
+
+    def test_http_search_failure_cancels_the_abandoned_id_without_retry(self):
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        self.set_text("partyMessage", "http failure")
+        self.eventually(lambda: self.run_stage()["suggestionState"] == "error" and bool(self.server.search_cancels),
+                        "HTTP failure discarded the request without cancelling provider work")
+        self.assertEqual(len(self.server.search_attempts), 1, "the failed GET was retried")
+        identifier = self.server.search_attempts[0][1]
+        self.assertEqual(self.server.search_cancels, [{"searchId": identifier}])
+        self.assertEqual(self.composer_text(), "http failure")
+        self.assertEqual(self.run_stage()["searchCount"], 0)
+        self.assertTrue(self.run_stage()["panelNotice"], "the request error presentation was lost")
+        self.assertFalse(self.server.posts); self.assertFalse(self.server.requests); self.assertFalse(self.server.playback_requests)
+
+    def test_service_change_ignores_old_chat_presence_and_cancels_at_the_old_base(self):
+        old_chat_gate, old_search_gate = threading.Event(), threading.Event()
+        self.server.chat_reply_gate = old_chat_gate
+        self.server.search_gates["old service catalogue"] = old_search_gate
+        stamp = int(time.time() * 1000)
+        self.server.llm = {"status": "online", "lastSeen": stamp, "expiresAt": stamp + 120000, "remainingMs": 120000, "activeCount": 1}
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        self.eventually(lambda: self.server.chat_requests == 1, "old chat call did not start")
+        self.set_text("partyMessage", "old service catalogue")
+        self.eventually(lambda: bool(self.server.search_attempts), "old service search did not dispatch")
+        old_id = self.server.search_attempts[-1][1]
+        other = ThreadingHTTPServer(("127.0.0.1", 0), Service)
+        self.assertNotEqual(other.server_port, 8787)
+        other.messages = [{"id": 901, "role": "assistant", "name": "DJ", "text": "New private service conversation", "createdAt": stamp}]
+        other.withdrawn_ids, other.processing_ids, other.message_work = [], [], {}
+        other.llm = {"status": "offline", "lastSeen": stamp, "expiresAt": 0, "remainingMs": 0, "activeCount": 0}
+        other.chat_requests = other.chat_finished = 0; other.chat_reply_gate = None
+        other.search_cancels, other.search_cancelled, other.search_cancel_reply_gate = [], set(), None
+        thread = threading.Thread(target=other.serve_forever, daemon=True); thread.start()
+        new_chat_gate = threading.Event()
+        try:
+            self.request_base_url = f"http://127.0.0.1:{other.server_port}"
+            self.run_stage()
+            self.eventually(lambda: self.run_stage()["chatCount"] == 1 and self.run_stage()["djPresence"]["status"] == "offline",
+                            "a busy old chat prevented the new service response")
+            self.assertIn("New private service conversation", self.client.request("object.get", {"objectName": "partyChat", "property": "plainText"}))
+            self.assertEqual(self.composer_text(), "old service catalogue")
+            self.assertEqual(self.run_stage()["searchCount"], 0)
+            self.eventually(lambda: old_id in self.server.search_cancelled, "service change did not cancel at the original base")
+            self.assertFalse(other.search_cancels, "old request cancellation was sent to the new service")
+            other.chat_reply_gate = new_chat_gate
+            self.eventually(lambda: other.chat_requests == 2, "new service incremental poll did not begin")
+            old_chat_gate.set(); old_search_gate.set()
+            self.eventually(lambda: self.server.chat_finished == 1, "delayed old chat response did not finish")
+            time.sleep(1.65)
+            self.assertEqual(other.chat_requests, 2, "old callback cleared the newer service's busy flag")
+            self.assertEqual(self.run_stage()["chatCount"], 1, "old service messages repopulated the new conversation")
+            self.assertEqual(self.run_stage()["djPresence"]["status"], "offline", "old service presence overrode the new lease")
+        finally:
+            old_chat_gate.set(); old_search_gate.set(); new_chat_gate.set()
+            other.shutdown(); other.server_close(); thread.join(3)
 
     def test_live_state_caption_dwell_requests_chat_and_release(self):
         first = self.run_stage(stateFile=str(self.state_file), fullscreen=True)
@@ -795,6 +1194,13 @@ class PartyStage(unittest.TestCase):
         self.assertEqual(self.run_stage()["artwork"]["url"], base + "/cover/current.png", "a late old cover replaced the new one")
         self.eventually(lambda: len(self.run_stage()["queuePreview"]) == 4, "the larger upcoming preview was not painted")
         self.assertEqual([track["uid"] for track in self.run_stage()["queuePreview"]], [f"next-{i}" for i in range(1, 5)])
+        rendered = self.run_stage()
+        self.assertTrue(all(track["detailFontPixels"] >= 24 and track["bounds"][3] >= 80 for track in rendered["queuePreview"]),
+                        "upcoming metadata fell below the shared readable native scale")
+        self.assertGreaterEqual(rendered["qrBounds"][2], 220, "the QR remained undersized at the laptop viewport")
+        self.assertEqual(rendered["requestCardBounds"][1], rendered["playingCardBounds"][1], "the two request/current headers are vertically misaligned")
+        self.assertGreater(rendered["requestCardBounds"][0], rendered["playingCardBounds"][0] + rendered["playingCardBounds"][2],
+                           "the enlarged QR card overlaps current-track metadata")
         bounds = self.magic_bounds()
         cover("/cover/other.png"); self.eventually(lambda: self.run_stage()["artwork"]["loaded"], "second cover did not arrive")
         cover("/cover/current.png"); self.eventually(lambda: self.run_stage()["artwork"]["loaded"], "cached cover did not return")

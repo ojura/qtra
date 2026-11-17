@@ -23,6 +23,7 @@
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QImageReader>
+#include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -47,6 +48,7 @@
 #include <QPropertyAnimation>
 #include <QQueue>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QSet>
 #include <QSettings>
@@ -63,11 +65,13 @@
 #include <QUrlQuery>
 #include <QUuid>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <functional>
+#include <memory>
 
 namespace {
 constexpr double pi = 3.14159265358979323846;
@@ -89,6 +93,37 @@ QFont stageFont(double pixels, bool bold = false)
     result.setPixelSize(std::max(10, qRound(pixels)));
     result.setWeight(bold ? QFont::DemiBold : QFont::Normal);
     return result;
+}
+// One readable native text scale for controls and painted metadata. The stage
+// reference matches the free pane beside the 600px desk on the target laptop.
+struct UiMetrics {
+    static constexpr int body = 29, secondary = 26, small = 24, icon = 34;
+    static constexpr double reference = 1.5;
+};
+QFont uiFont(double scale, int pixels = UiMetrics::body, bool bold = false)
+{
+    return stageFont(pixels * scale / UiMetrics::reference, bold);
+}
+QString coverUrl(const QJsonObject& track)
+{
+    QString wanted = text(track, "artUrl");
+    if (wanted.isEmpty()) wanted = text(track, "image");
+    if (wanted.isEmpty()) wanted = text(track.value(QStringLiteral("image")).toObject(), "url");
+    const QUrl url(wanted, QUrl::StrictMode);
+    return url.isValid() && !url.host().isEmpty() && url.userInfo().isEmpty() && wanted.size() <= 2048
+        && (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https")) ? wanted : QString();
+}
+QImage decodeCover(QByteArray& bytes, int side, QString& error)
+{
+    if (bytes.size() > 2 * 1024 * 1024) { error = QStringLiteral("Cover exceeds 2 MiB"); return {}; }
+    QBuffer buffer(&bytes); buffer.open(QIODevice::ReadOnly); QImageReader reader(&buffer);
+    const QSize size = reader.size(); const QByteArray format = reader.format().toLower();
+    if (!size.isValid() || size.width() > 4096 || size.height() > 4096 || (format != "jpeg" && format != "png" && format != "webp")) {
+        error = QStringLiteral("Unsupported cover size or format"); return {};
+    }
+    reader.setScaledSize(size.scaled(side, side, Qt::KeepAspectRatio)); reader.setAutoTransform(true);
+    QImage image = reader.read(); if (image.isNull()) error = reader.errorString();
+    return image;
 }
 QCursor djCursor(Qt::CursorShape shape = Qt::ArrowCursor)
 {
@@ -235,34 +270,44 @@ public:
         setFeatures(QDockWidget::NoDockWidgetFeatures);
         setFixedWidth(600);
         setStyleSheet(QStringLiteral(
-            "QDockWidget,QLabel,QLineEdit,QPlainTextEdit,QListWidget,QTextBrowser,QPushButton { font:29px 'DejaVu Sans'; }"
+            "QDockWidget,QLabel,QLineEdit,QPlainTextEdit,QListWidget,QTextBrowser,QPushButton { font:%1px 'DejaVu Sans'; }"
             "QDockWidget { color:#f7f2ea; background:#101727; }"
             "QDockWidget::title { background:#202a3c; padding:15px; }"
             "QWidget#partyDeskBody { background:#101727; }"
-            "QWidget#partySuggestions { background:#080f1d; border-radius:10px; }"
+            "QWidget#partySuggestions { background:#183e56; border:2px solid #85e8f2; border-radius:10px; }"
             "QLabel { color:#c1cce0; } QLabel#partyDeskHeading { color:#ff9a58; font-size:30px; font-weight:600; }"
             "QLineEdit,QPlainTextEdit,QListWidget,QTextBrowser,QLabel#partySuggestionHint,QWidget#partySelectedSong { background:#080f1d; color:#f7f2ea; border:1px solid #344158; border-radius:10px; padding:11px; }"
+            "QListWidget#partyResults,QLabel#partySuggestionHint,QWidget#partySelectedSong { background:#183e56; color:#f3fcff; border:0; }"
             "QLineEdit:focus,QPlainTextEdit:focus { border-color:#7de4ed; }"
-            "QListWidget::item { padding:10px 4px; border-bottom:1px solid #202d43; }"
-            "QListWidget::item:hover { background:#203b4b; color:#e5fcff; }"
-            "QListWidget::item:selected { background:#3b3040; color:#fff3e5; }"
+            "QListWidget::item { padding:10px 4px; border-bottom:1px solid #49758c; }"
+            "QListWidget::item:hover { background:#2c617a; color:#ffffff; }"
+            "QListWidget::item:selected { background:#a2ebf0; color:#092536; border-left:5px solid #ffbc75; }"
             "QScrollBar:vertical { background:#13243a; border:0; }"
             "QScrollBar::handle:vertical { background:#9bb5d1; border-radius:4px; }"
             "QScrollBar::handle:vertical:hover { background:#d4efff; }"
             "QPushButton { background:#ff8a42; color:#121725; border:0; border-radius:10px; padding:14px; font-weight:600; }"
-            "QPushButton#partyDescribeButton,QPushButton#partyDraftButton { background:#234250; color:#ddf8ff; font-size:27px; }"
+            "QPushButton#partyDescribeButton,QPushButton#partyDraftButton { background:#234250; color:#ddf8ff; font-size:%2px; }"
             "QPushButton:disabled { background:#364258; color:#9ba9be; }"
             "QPushButton#partyDescribeButton:disabled,QPushButton#partyDraftButton:disabled { background:#263545; color:#91a0b5; }"
-            "QPushButton:hover { background:#ffad72; }"));
+            "QPushButton:hover { background:#ffad72; }").arg(UiMetrics::body).arg(UiMetrics::secondary));
+        auto* titleBar = new QWidget(this); titleBar->setObjectName(QStringLiteral("partyDeskTitleBar"));
+        titleBar->setStyleSheet(QStringLiteral("QWidget#partyDeskTitleBar { background:#202a3c; }"));
+        auto* titleLayout = new QHBoxLayout(titleBar); titleLayout->setContentsMargins(21, 13, 21, 13);
+        auto* title = new QLabel(QStringLiteral("DJ · razgovor"), titleBar); titleLayout->addWidget(title, 1);
+        onlineBadge_ = new QLabel(titleBar); onlineBadge_->setObjectName(QStringLiteral("partyDjOnlineBadge"));
+        onlineBadge_->setAlignment(Qt::AlignRight | Qt::AlignVCenter); titleLayout->addWidget(onlineBadge_);
+        setTitleBarWidget(titleBar); presenceClock_.start(); updateDjPresence();
         auto* body = new QWidget(this); body->setObjectName(QStringLiteral("partyDeskBody"));
         auto* layout = new QVBoxLayout(body); layout->setContentsMargins(21, 19, 21, 10); layout->setSpacing(11);
-        auto* heading = new QLabel(QStringLiteral("Daj pjesmu. Reci DJ-u."), body);
-        heading->setObjectName(QStringLiteral("partyDeskHeading")); heading->setWordWrap(true); layout->addWidget(heading);
+        auto* heading = new QLabel(QStringLiteral("<b>Tab</b> Spotify ↔ DJ<br><b>Ctrl+P</b> Pauza &nbsp; <b>Ctrl+K</b> Traži"), body);
+        heading->setObjectName(QStringLiteral("partyDeskHeading")); heading->setTextFormat(Qt::RichText);
+        heading->setWordWrap(true); heading->setFixedHeight(84); layout->addWidget(heading);
         name_ = new QLineEdit(body); name_->setObjectName(QStringLiteral("partyName"));
         name_->setPlaceholderText(QStringLiteral("Tvoje ime (po želji)")); name_->setMaxLength(48);
         QSettings settings(QStringLiteral("qtra"), QStringLiteral("party"));
         guestId_ = settings.value(QStringLiteral("guestId")).toString();
         if (guestId_.isEmpty()) { guestId_ = uuid(); settings.setValue(QStringLiteral("guestId"), guestId_); }
+        composerId_ = uuid();
         name_->setText(settings.value(QStringLiteral("name"), QStringLiteral("Laptop")).toString());
         connect(name_, &QLineEdit::editingFinished, this, [this] {
             QSettings(QStringLiteral("qtra"), QStringLiteral("party")).setValue(QStringLiteral("name"), name_->text().trimmed());
@@ -289,7 +334,7 @@ public:
         suggestionArea_ = new QWidget(body); auto* suggestionArea = suggestionArea_;
         suggestionArea->setObjectName(QStringLiteral("partySuggestions"));
         suggestionArea->setFixedHeight(340); suggestionArea->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-        auto* suggestionLayout = new QVBoxLayout(suggestionArea); suggestionLayout->setContentsMargins(0, 0, 0, 0); suggestionLayout->setSpacing(0);
+        auto* suggestionLayout = new QVBoxLayout(suggestionArea); suggestionLayout->setContentsMargins(3, 3, 3, 3); suggestionLayout->setSpacing(0);
         searchActivity_ = new QProgressBar(suggestionArea); searchActivity_->setObjectName(QStringLiteral("partySearchActivity"));
         searchActivity_->setTextVisible(false); searchActivity_->setFixedHeight(5); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
         searchActivity_->setStyleSheet(QStringLiteral("QProgressBar { background:#162235; border:0; } QProgressBar::chunk { background:#7de4ed; }"));
@@ -297,6 +342,7 @@ public:
         suggestions_ = new QStackedWidget(suggestionArea); suggestions_->setObjectName(QStringLiteral("partySuggestionPages"));
         suggestions_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding); suggestionLayout->addWidget(suggestions_, 1);
         results_ = new QListWidget(suggestions_); results_->setObjectName(QStringLiteral("partyResults"));
+        results_->setIconSize(QSize(72, 72));
         results_->setWordWrap(false); results_->setTextElideMode(Qt::ElideRight);
         results_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         results_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
@@ -347,7 +393,7 @@ public:
         notice_ = new QLabel(body); notice_->setObjectName(QStringLiteral("partyNotice"));
         notice_->setWordWrap(true); notice_->setTextFormat(Qt::PlainText); notice_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         notice_->setAttribute(Qt::WA_TransparentForMouseEvents);
-        notice_->setStyleSheet(QStringLiteral("background:#1d3446; color:#e7f8ff; border:1px solid #6bafc6; border-radius:10px; padding:9px; font-size:26px;"));
+        notice_->setStyleSheet(QStringLiteral("background:#1d3446; color:#e7f8ff; border:1px solid #6bafc6; border-radius:10px; padding:9px; font-size:%1px;").arg(UiMetrics::secondary));
         notice_->hide(); noticeDismiss_.setSingleShot(true); noticeDismiss_.setInterval(6000);
         connect(&noticeDismiss_, &QTimer::timeout, notice_, &QWidget::hide);
         for (QWidget* control : std::array<QWidget*, 13>{name_, message_, message_->viewport(), chat_, chat_->viewport(),
@@ -358,7 +404,7 @@ public:
         }
         idleClock_.start(); idleReturn_.setInterval(250);
         connect(&idleReturn_, &QTimer::timeout, this, [this] {
-            refreshWorkBadges();
+            refreshWorkBadges(); updateDjPresence();
             if (isVisible() && idleClock_.elapsed() >= 120000 && QApplication::mouseButtons() == Qt::NoButton
                 && !chat_->verticalScrollBar()->isSliderDown()) {
                 animateChatToBottom(800); idleClock_.restart();
@@ -378,17 +424,24 @@ public:
         });
         window->addDockWidget(Qt::RightDockWidgetArea, this); hide();
     }
+    ~RequestDesk() override { cancelSearch(); cancelResultArtwork(); }
     void setBase(const QString& url)
     {
         const QUrl next(url);
         if (next == base_) return;
+        invalidateSearchIntent(); ++serviceGeneration_; chatBusy_ = false;
         base_ = next; cursor_.clear(); messages_ = {}; messageIds_.clear(); processingIds_.clear(); messageWork_ = {}; workPresentation_ = {}; chatFetches_ = 0;
+        presenceExpiryWatermark_ = 0; presenceWatermarkDeadline_ = 0;
+        observeDjPresence({});
         withdrawnIds_.clear(); lastSentId_ = 0; recallBusy_ = false; alternateDraft_ = {}; cancelDescription(); ++searchVersion_;
+        clearSearchResults();
         chatScroll_->stop(); followingBottom_ = false; chat_->clear();
         if (isVisible()) fetchChat();
     }
     QJsonObject status() const
     {
+        int thumbnails = 0;
+        for (int i = 0; i < results_->count(); ++i) if (results_->item(i)->data(Qt::UserRole + 1).toBool()) ++thumbnails;
         const auto rect = [](const QWidget* widget) {
             const QRect r = widget->geometry();
             return QJsonObject{{QStringLiteral("x"), r.x()}, {QStringLiteral("y"), r.y()},
@@ -405,6 +458,10 @@ public:
                 {QStringLiteral("lastSentMessageId"), lastSentId_}, {QStringLiteral("recallBusy"), recallBusy_},
                 {QStringLiteral("alternateDraftAvailable"), !alternateDraft_.isEmpty()},
                 {QStringLiteral("descriptionId"), descriptionId_}, {QStringLiteral("descriptionStatus"), descriptionStatus_},
+                {QStringLiteral("searchArtwork"), QJsonObject{{QStringLiteral("loaded"), thumbnails},
+                    {QStringLiteral("active"), resultArtReplies_.size()}, {QStringLiteral("cached"), resultArtCache_.size()}}},
+                {QStringLiteral("searchIntent"), searchIntent()}, {QStringLiteral("automaticSearchIntent"), automaticSearchIntent()},
+                {QStringLiteral("djPresence"), djPresence()},
                 {QStringLiteral("chatQuietMs"), idleClock_.elapsed()}, {QStringLiteral("chatIdleReturnMs"), 120000},
                 {QStringLiteral("composerCursorPixels"), message_->viewport()->cursor().pixmap().width()},
                 {QStringLiteral("searchCount"), results_->count()}, {QStringLiteral("panelNotice"), notice_->text()},
@@ -416,6 +473,10 @@ public:
     QJsonObject draft() const
     {
         auto result = editorDraft();
+        result.insert(QStringLiteral("guestId"), guestId_);
+        result.insert(QStringLiteral("composerId"), composerId_);
+        result.insert(QStringLiteral("draftRevision"), static_cast<qint64>(draftRevision_));
+        result.insert(QStringLiteral("editorMode"), selectedTrack_.isEmpty() ? QStringLiteral("message") : QStringLiteral("dedication"));
         result.insert(QStringLiteral("lastSentMessageId"), lastSentId_);
         result.insert(QStringLiteral("alternateDraft"), alternateDraft_);
         result.insert(QStringLiteral("alternateDraftLabel"), alternateLabel_);
@@ -446,6 +507,29 @@ public:
         }
     }
     void recallLatest() { recallMessage(); }
+    QJsonObject setSearchIntent(const QJsonObject& cue)
+    {
+        const QString intent = text(cue, "intent");
+        const auto revision = cue.value(QStringLiteral("draftRevision"));
+        const bool same = cue.size() == 6 && text(cue, "guestId") == guestId_ && text(cue, "composerId") == composerId_
+            && revision.isDouble() && revision.toDouble() == double(draftRevision_)
+            && cue.value(QStringLiteral("text")).isString() && text(cue, "text") == message_->toPlainText()
+            && text(cue, "editorMode") == (selectedTrack_.isEmpty() ? QStringLiteral("message") : QStringLiteral("dedication"));
+        if (!same || (intent != QStringLiteral("chat") && intent != QStringLiteral("music") && intent != QStringLiteral("auto")))
+            return {{QStringLiteral("applied"), false}, {QStringLiteral("error"), QStringLiteral("Composer identity, revision, text or mode changed.")}};
+        searchOverride_ = intent == QStringLiteral("auto") ? QString() : intent;
+        cancelSearch(); ++searchVersion_; searchDelay_.stop(); cancelDescription(); cancelResultArtwork(); scheduleSearch();
+        if (intent == QStringLiteral("music")) { searchDelay_.stop(); search(); }
+        return {{QStringLiteral("applied"), true}, {QStringLiteral("effectiveIntent"), searchIntent()}};
+    }
+    void focusSearch()
+    {
+        if (selectedTrack_.isEmpty() && message_->toPlainText().trimmed().size() >= 2) {
+            searchOverride_ = QStringLiteral("music"); cancelSearch(); ++searchVersion_; searchDelay_.stop(); cancelDescription(); scheduleSearch();
+            searchDelay_.stop(); search();
+        }
+        message_->setFocus();
+    }
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
     {
@@ -487,6 +571,73 @@ protected:
         return QDockWidget::eventFilter(watched, event);
     }
 private:
+    QJsonObject djPresence() const
+    {
+        const qint64 remaining = std::max<qint64>(0, presenceDeadline_ - presenceClock_.elapsed());
+        return {{QStringLiteral("status"), !presenceKnown_ ? QStringLiteral("unavailable") : remaining > 0 ? QStringLiteral("online") : QStringLiteral("offline")},
+                {QStringLiteral("remainingMs"), remaining}, {QStringLiteral("activeCount"), remaining > 0 ? presenceActiveCount_ : 0}};
+    }
+    void observeDjPresence(const QJsonObject& dj)
+    {
+        const auto llm = dj.value(QStringLiteral("llm")).toObject();
+        if (llm == observedPresence_ && presenceSeen_) { updateDjPresence(); return; }
+        observedPresence_ = llm; presenceSeen_ = true; presenceKnown_ = false; presenceDeadline_ = 0; presenceActiveCount_ = 0;
+        const QString status = text(llm, "status");
+        if (status == QStringLiteral("offline")) presenceKnown_ = true;
+        else if (status == QStringLiteral("online")) {
+            const auto last = llm.value(QStringLiteral("lastSeen")), expiry = llm.value(QStringLiteral("expiresAt"));
+            const auto remaining = llm.value(QStringLiteral("remainingMs")), count = llm.value(QStringLiteral("activeCount"));
+            const double now = QDateTime::currentMSecsSinceEpoch();
+            const bool valid = last.isDouble() && expiry.isDouble() && remaining.isDouble() && count.isDouble()
+                && std::isfinite(last.toDouble()) && last.toDouble() > 0 && last.toDouble() <= now
+                && std::isfinite(expiry.toDouble()) && expiry.toDouble() >= last.toDouble() + 30000 && expiry.toDouble() <= last.toDouble() + 120000
+                && std::isfinite(remaining.toDouble()) && remaining.toDouble() >= 0 && remaining.toDouble() <= expiry.toDouble() - last.toDouble()
+                && count.toDouble() >= 1 && count.toDouble() <= 256 && count.toDouble() == std::floor(count.toDouble());
+            if (valid) {
+                presenceKnown_ = true; presenceActiveCount_ = count.toInt();
+                const double lease = std::clamp(std::min(remaining.toDouble(), expiry.toDouble() - now), 0.0, 120000.0);
+                presenceDeadline_ = presenceClock_.elapsed() + static_cast<qint64>(lease);
+                // Metadata or wall-clock changes cannot renew an unchanged lease.
+                // Keep this watermark through an intervening unavailable/offline
+                // payload; a new service gets a separate watermark in setBase.
+                if (expiry.toDouble() == presenceExpiryWatermark_)
+                    presenceDeadline_ = std::min(presenceDeadline_, presenceWatermarkDeadline_);
+                presenceExpiryWatermark_ = expiry.toDouble(); presenceWatermarkDeadline_ = presenceDeadline_;
+            }
+        }
+        updateDjPresence();
+    }
+    void updateDjPresence()
+    {
+        if (!onlineBadge_) return;
+        const auto state = djPresence(); const QString status = text(state, "status");
+        const bool online = status == QStringLiteral("online");
+        onlineBadge_->setText(online ? QStringLiteral("● DJ online") : status == QStringLiteral("offline") ? QStringLiteral("○ DJ offline") : QStringLiteral("○ DJ nedostupan"));
+        onlineBadge_->setStyleSheet(QStringLiteral("font:%1px 'DejaVu Sans'; color:%2;").arg(UiMetrics::secondary).arg(online ? QStringLiteral("#98e7c8") : QStringLiteral("#b1bdcf")));
+        onlineBadge_->setToolTip(online ? QStringLiteral("LLM DJ je potvrdio dostupnost. Potvrda vrijedi još %1 s.").arg(static_cast<int>(std::ceil(number(state, "remainingMs", 0) / 1000)))
+            : QStringLiteral("Nema važeće potvrde dostupnosti LLM DJ-a."));
+    }
+    void invalidateSearchIntent() { cancelSearch(); ++draftRevision_; searchOverride_.clear(); }
+    QString automaticSearchIntent() const
+    {
+        const QString words = message_->toPlainText().simplified().toCaseFolded();
+        if (!selectedTrack_.isEmpty() || words.size() < 2) return QStringLiteral("chat");
+        if (words.startsWith(QStringLiteral("spotify:track:"))) return QStringLiteral("music");
+        // Fast local intent gating is deliberately cheap. Unknown concise titles
+        // still go straight to the catalogue; Ctrl+K can explicitly search any text.
+        static const QRegularExpression controls(QStringLiteral("\\b(?:gumb\\p{L}*|font\\p{L}*|dpi|scroll\\p{L}*|cursor\\p{L}*|kursor\\p{L}*|pokaziva\\p{L}*|popup\\p{L}*|pop.?up|sučelj\\p{L}*|sucelj\\p{L}*|layout|margin\\p{L}*|tipk\\p{L}*|shortcut\\p{L}*|ctrl|panel\\p{L}*|qtra|interface|button\\p{L}*|slova|poruk\\p{L}*|llm)\\b"), QRegularExpression::UseUnicodePropertiesOption);
+        if (controls.match(words).hasMatch()) return QStringLiteral("chat");
+        static const QRegularExpression music(QStringLiteral("\\b(?:pjesm\\p{L}*|song\\p{L}*|izvođa\\p{L}*|izvodja\\p{L}*|artist\\p{L}*|album\\p{L}*|refren\\p{L}*|stih\\p{L}*|lyrics|pusti|sviraj|play|karaoke)\\b"), QRegularExpression::UseUnicodePropertiesOption);
+        if (music.match(words).hasMatch()) return QStringLiteral("music");
+        static const QRegularExpression conversation(QStringLiteral("^(?:hvala|super|dobro|ok|zašto|zasto|kako|možeš|mozes|molim te|ovo je|ovo mi|nije mi|čini se|cini se|can you|please|why|thank)\\b"), QRegularExpression::UseUnicodePropertiesOption);
+        return conversation.match(words).hasMatch() || words.count(QChar(' ')) >= 8 || message_->toPlainText().contains(QChar('\n'))
+            ? QStringLiteral("chat") : QStringLiteral("music");
+    }
+    QString searchIntent() const
+    {
+        if (!selectedTrack_.isEmpty()) return QStringLiteral("chat");
+        return searchOverride_.isEmpty() ? automaticSearchIntent() : searchOverride_;
+    }
     void applyEditorDraft(const QJsonObject& draft)
     {
         selectedTrack_ = draft.value(QStringLiteral("selectedTrack")).toObject();
@@ -548,7 +699,7 @@ private:
     }
     void setComposerText(const QString& words, int position, int anchor)
     {
-        ++composerGeneration_;
+        ++composerGeneration_; invalidateSearchIntent();
         const QSignalBlocker block(message_);
         message_->setPlainText(words);
         auto cursor = message_->textCursor();
@@ -573,7 +724,7 @@ private:
         alternate_->setText(alternateLabel_);
         if (song) {
             searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
-            const QFontMetrics fm(stageFont(29));
+            const QFontMetrics fm(stageFont(UiMetrics::body));
             selectedTitle_->setText(fm.elidedText(text(selectedTrack_, "title"), Qt::ElideRight, 500));
             selectedTitle_->setToolTip(trackTooltip(selectedTrack_));
             selectedArtist_->setText(fm.elidedText(text(selectedTrack_, "artist"), Qt::ElideRight, 500));
@@ -584,13 +735,16 @@ private:
     }
     void composerChanged()
     {
-        ++composerGeneration_; ++searchVersion_; cancelDescription(); updateComposerMode();
+        ++composerGeneration_; invalidateSearchIntent(); ++searchVersion_; cancelDescription(); cancelResultArtwork(); updateComposerMode(); scheduleSearch();
+    }
+    void scheduleSearch()
+    {
         if (!selectedTrack_.isEmpty()) { searchDelay_.stop(); return; }
-        if (message_->toPlainText().trimmed().size() < 2) {
+        if (message_->toPlainText().trimmed().size() < 2 || searchIntent() == QStringLiteral("chat")) {
             { const QSignalBlocker block(results_); results_->clear(); }
             results_->setEnabled(true); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
             searchDelay_.stop();
-            suggestionHint(QStringLiteral("Ovdje se pojavljuju pjesme.\nPoruku možeš odmah poslati DJ-u."), QStringLiteral("empty"));
+            suggestionHint(QStringLiteral("Poruku možeš odmah poslati DJ-u. Ctrl+K traži pjesmu."), QStringLiteral("empty"));
         } else {
             // Keep the current page and rows still while the query changes.
             // Stale choices stay visible but cannot be selected until replaced.
@@ -601,6 +755,14 @@ private:
             searchDelay_.start();
         }
     }
+    void clearSearchResults()
+    {
+        searchDelay_.stop(); cancelResultArtwork();
+        { const QSignalBlocker block(results_); results_->clear(); }
+        results_->setEnabled(true); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
+        if (selectedTrack_.isEmpty()) suggestionHint(QString(), QStringLiteral("empty"));
+        else updateSuggestionOverlay();
+    }
     void chooseSong()
     {
         if (requestBusy_ || messageBusy_ || recallBusy_ || !selectedTrack_.isEmpty() || !results_->currentItem() || results_->selectedItems().isEmpty()) return;
@@ -609,6 +771,7 @@ private:
         savedQuery_ = message_->toPlainText();
         savedQueryCursor_ = message_->textCursor().position(); savedQueryAnchor_ = message_->textCursor().anchor();
         selectedTrack_ = track; ++searchVersion_; searchDelay_.stop(); cancelDescription(); setComposerText(QString(), 0, 0);
+        cancelResultArtwork();
         updateComposerMode(); setNotice(QStringLiteral("Pjesma je odabrana. Možeš dodati posvetu.")); message_->setFocus();
     }
     void cancelSong()
@@ -621,10 +784,11 @@ private:
     void sendMagic()
     {
         if (requestBusy_ || messageBusy_ || recallBusy_) return;
+        invalidateSearchIntent(); ++searchVersion_; cancelDescription(); clearSearchResults();
         selectedTrack_.isEmpty() ? sendMessage() : requestTrack();
     }
     using Done = std::function<void(QJsonObject, QString)>;
-    void call(const QString& path, const QJsonObject* data, Done done)
+    QNetworkReply* call(const QString& path, const QJsonObject* data, Done done)
     {
         const QUrl endpoint = base_.resolved(QUrl(path));
         QNetworkRequest request(endpoint); request.setTransferTimeout(12000);
@@ -638,17 +802,40 @@ private:
             if (error.isEmpty() && !document.isObject()) error = QStringLiteral("DJ service returned an unreadable response");
             done(object, error); reply->deleteLater();
         });
+        return reply;
+    }
+    void cancelSearch()
+    {
+        if (activeSearchId_.isEmpty()) return;
+        const QString id = activeSearchId_; const QUrl base = activeSearchBase_;
+        activeSearchId_.clear();
+        const auto reply = activeSearchReply_; activeSearchReply_.clear();
+        if (reply && reply->isRunning()) reply->abort();
+        // The cancellation outlives this desk during a stage-only hot reload.
+        // It carries only the already-dispatched opaque request ID, never a draft.
+        auto* cancellation = new QNetworkAccessManager(QCoreApplication::instance());
+        QNetworkRequest request(base.resolved(QUrl(QStringLiteral("/api/search/cancel"))));
+        request.setTransferTimeout(3000); request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        const QJsonObject data{{QStringLiteral("searchId"), id}};
+        auto* cancelled = cancellation->post(request, QJsonDocument(data).toJson(QJsonDocument::Compact));
+        connect(cancelled, &QNetworkReply::finished, cancellation, &QObject::deleteLater);
     }
     void search()
     {
-        if (!selectedTrack_.isEmpty()) return;
+        if (!selectedTrack_.isEmpty() || searchIntent() == QStringLiteral("chat")) return;
         const QString query = message_->toPlainText().simplified().left(160);
         if (query.size() < 2) return;
-        const quint64 version = searchVersion_;
-        QUrlQuery args; args.addQueryItem(QStringLiteral("q"), query);
-        call(QStringLiteral("/api/search?") + args.toString(QUrl::FullyEncoded), nullptr, [this, version](QJsonObject data, QString error) {
-            if (version != searchVersion_ || !selectedTrack_.isEmpty()) return;
+        cancelSearch();
+        const quint64 version = searchVersion_; const QString id = uuid();
+        activeSearchId_ = id; activeSearchBase_ = base_;
+        QUrlQuery args; args.addQueryItem(QStringLiteral("q"), query); args.addQueryItem(QStringLiteral("searchId"), id);
+        activeSearchReply_ = call(QStringLiteral("/api/search?") + args.toString(QUrl::FullyEncoded), nullptr, [this, version, id](QJsonObject data, QString error) {
+            if (id != activeSearchId_ || version != searchVersion_ || !selectedTrack_.isEmpty()) return;
+            if (error.isEmpty() && text(data, "searchId") != id) error = QStringLiteral("Odgovor pretrage ne pripada ovom upitu.");
+            if (!error.isEmpty()) cancelSearch();
+            else { activeSearchId_.clear(); activeSearchReply_.clear(); }
             results_->setEnabled(true); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
+            if (error.isEmpty() && data.value(QStringLiteral("cancelled")).toBool()) { clearSearchResults(); return; }
             if (!error.isEmpty()) {
                 { const QSignalBlocker block(results_); results_->clear(); }
                 suggestionHint(QStringLiteral("Pretraga trenutačno ne radi.\nPoruku i dalje možeš poslati DJ-u."), QStringLiteral("error"));
@@ -700,9 +887,13 @@ private:
     }
     void showTracks(const QJsonArray& tracks, const QString& note = {})
     {
+        cancelResultArtwork();
         const QSignalBlocker block(results_); results_->clear(); results_->setEnabled(true);
-        const QFontMetrics fm(stageFont(29)); const int width = std::max(150, suggestions_->width() - 58);
+        const QFontMetrics fm(stageFont(UiMetrics::body)); const int width = std::max(100, suggestions_->width() - 140);
+        QPixmap placeholder(72, 72); placeholder.fill(QColor("#2b566d"));
+        { QPainter p(&placeholder); p.setPen(QColor("#b7e7ef")); p.setFont(stageFont(UiMetrics::icon)); p.drawText(placeholder.rect(), Qt::AlignCenter, QStringLiteral("♪")); }
         for (const auto& value : tracks) {
+            if (results_->count() >= 20) break;
             const QJsonObject track = value.toObject();
             if (text(track, "uri").isEmpty()) continue;
             const QString basis = matchBasis(track);
@@ -710,9 +901,14 @@ private:
                 + QStringLiteral("\n") + fm.elidedText(text(track, "artist"), Qt::ElideRight, width);
             if (!basis.isEmpty()) label += QStringLiteral("\n") + basis;
             auto* item = new QListWidgetItem(label, results_);
+            const QString artwork = coverUrl(track);
+            const QImage* cached = resultArtCache_.object(artwork);
+            item->setIcon(QIcon(cached ? QPixmap::fromImage(*cached) : placeholder));
+            item->setData(Qt::UserRole + 1, cached != nullptr);
             item->setData(Qt::UserRole, track.toVariantMap());
             item->setToolTip(trackTooltip(track));
             item->setSizeHint(QSize(0, basis.isEmpty() ? 95 : 128));
+            if (!artwork.isEmpty() && !cached && !resultArtQueue_.contains(artwork)) resultArtQueue_.enqueue(artwork);
         }
         results_->setCurrentRow(-1);
         if (results_->count()) {
@@ -720,6 +916,47 @@ private:
         } else suggestionHint(note.isEmpty() ? QStringLiteral("Nema pjesama za taj upit.\nPoruku možeš poslati DJ-u.") : note,
                               QStringLiteral("empty"));
         if (!note.isEmpty()) setNotice(note);
+        fetchResultArtwork();
+    }
+    void cancelResultArtwork()
+    {
+        ++resultArtVersion_; resultArtQueue_.clear();
+        const auto pending = resultArtReplies_; resultArtReplies_.clear();
+        for (const auto& reply : pending) if (reply) reply->abort();
+    }
+    void fetchResultArtwork()
+    {
+        while (resultArtReplies_.size() < 2 && !resultArtQueue_.isEmpty()) {
+            const QString url = resultArtQueue_.dequeue(); const quint64 version = resultArtVersion_;
+            QNetworkRequest request{QUrl(url)}; request.setTransferTimeout(8000);
+            request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+            auto* reply = resultArtNetwork_.get(request); resultArtReplies_.insert(url, reply);
+            auto bytes = std::make_shared<QByteArray>(); auto oversized = std::make_shared<bool>(false);
+            const auto consume = [this, reply, version, bytes, oversized] {
+                if (version != resultArtVersion_ || *oversized) return;
+                constexpr qsizetype limit = 2 * 1024 * 1024;
+                *bytes += reply->read(std::max<qsizetype>(0, limit + 1 - bytes->size()));
+                if (bytes->size() > limit) { *oversized = true; reply->abort(); }
+            };
+            connect(reply, &QNetworkReply::readyRead, this, consume);
+            connect(reply, &QNetworkReply::finished, this, [this, reply, url, version, bytes, oversized, consume] {
+                if (version != resultArtVersion_) { reply->deleteLater(); return; }
+                consume(); resultArtReplies_.remove(url);
+                if (!*oversized && reply->error() == QNetworkReply::NoError) {
+                    QString error; const QImage image = decodeCover(*bytes, 144, error);
+                    if (!image.isNull()) {
+                        resultArtCache_.insert(url, new QImage(image));
+                        for (int i = 0; i < results_->count(); ++i) {
+                            auto* item = results_->item(i);
+                            if (coverUrl(QJsonObject::fromVariantMap(item->data(Qt::UserRole).toMap())) == url) {
+                                item->setIcon(QIcon(QPixmap::fromImage(image))); item->setData(Qt::UserRole + 1, true);
+                            }
+                        }
+                    }
+                }
+                reply->deleteLater(); fetchResultArtwork();
+            });
+        }
     }
     void cancelDescription()
     {
@@ -755,9 +992,10 @@ private:
     {
         const QString words = message_->toPlainText().trimmed();
         if (words.size() < 3 || words.size() > 1500 || !selectedTrack_.isEmpty() || requestBusy_ || messageBusy_ || recallBusy_ || descriptionBusy_) return;
+        searchOverride_ = QStringLiteral("music");
         if (!restoring && !(descriptionStatus_ == QStringLiteral("error") && descriptionText_ == words)) descriptionRequestId_ = uuid();
         if (descriptionRequestId_.isEmpty()) descriptionRequestId_ = uuid();
-        ++searchVersion_; searchDelay_.stop(); descriptionPoll_.stop();
+        cancelSearch(); cancelResultArtwork(); ++searchVersion_; searchDelay_.stop(); descriptionPoll_.stop();
         descriptionText_ = words; descriptionId_.clear(); descriptionStatus_ = QStringLiteral("pending");
         descriptionActive_ = true; descriptionBusy_ = true; results_->setEnabled(false);
         suggestionHint(QStringLiteral("DJ traži pjesmu po opisu…\nRezultati će se pojaviti ovdje."), QStringLiteral("description-pending"));
@@ -862,8 +1100,8 @@ private:
                     : QStringLiteral(" <span style='font-family:monospace;color:%1'>%2</span>").arg(colour, mark);
             }
             const QString recall = dj ? QString() : canRecall(message)
-                ? QStringLiteral(" <a href='recall:%1' style='color:#b3e1ee;font-family:monospace;font-size:24px;text-decoration:none'>×</a>").arg(lastSentId_)
-                : QStringLiteral(" <span style='font-family:monospace;font-size:24px'>&nbsp;</span>");
+                ? QStringLiteral(" <a href='recall:%1' style='color:#b3f4fa;font-family:monospace;font-size:%2px;font-weight:bold;text-decoration:none'>&nbsp;×&nbsp;</a>").arg(lastSentId_).arg(UiMetrics::icon)
+                : QStringLiteral(" <span style='font-family:monospace;font-size:%1px'>&nbsp;&nbsp;&nbsp;</span>").arg(UiMetrics::icon);
             html += QStringLiteral("<p style='margin:8px 0 13px'><b style='color:%1'>%2</b>%3%4%5<br><span style='color:#f0f2f7'>%6</span></p>")
                 .arg(dj ? QStringLiteral("#ff9a58") : QStringLiteral("#7de4ed"), author.toHtmlEscaped(), receipt,
                      work, recall,
@@ -876,15 +1114,18 @@ private:
     {
         if (chatBusy_) return;
         chatBusy_ = true;
+        const quint64 service = serviceGeneration_;
         QString path = QStringLiteral("/api/chat");
         const bool receipts = !cursor_.isEmpty() && (++chatFetches_ % 2 == 0);
         if (!cursor_.isEmpty() && !receipts) { QUrlQuery query; query.addQueryItem(QStringLiteral("after"), cursor_); path += QChar('?') + query.toString(QUrl::FullyEncoded); }
-        call(path, nullptr, [this, receipts](QJsonObject data, QString error) {
+        call(path, nullptr, [this, receipts, service](QJsonObject data, QString error) {
+            if (service != serviceGeneration_) return;
             chatBusy_ = false;
-            if (!error.isEmpty()) { presence_->setText(QStringLiteral("DJ veza: ") + error); return; }
+            if (!error.isEmpty()) { presence_->setText(QStringLiteral("DJ veza: ") + error); observeDjPresence({}); return; }
             const auto incoming = data.value(QStringLiteral("messages")).toArray();
             const bool withdrawn = withdrawMessages(data.value(QStringLiteral("withdrawnMessageIds")).toArray());
             const auto dj = data.value(QStringLiteral("dj")).toObject();
+            observeDjPresence(dj);
             const bool workChanged = mergeWork(incoming, dj.value(QStringLiteral("messageWork")).toObject());
             QSet<QString> processing;
             for (const auto& id : dj.value(QStringLiteral("processingMessageIds")).toArray()) processing.insert(id.toVariant().toString());
@@ -896,7 +1137,7 @@ private:
             // still need to arrive through the incremental history cursor.
             if (!receipts && !incoming.isEmpty()) cursor_ = incoming.last().toObject().value(QStringLiteral("id")).toVariant().toString();
             presence_->setText(activeWorkCount() == 0
-                ? QStringLiteral("Razgovor s DJ-em · ") + text(dj, "status", QStringLiteral("uživo"))
+                ? QStringLiteral("Poruke i zahtjevi DJ-u")
                 : QStringLiteral("DJ radi na poruci…"));
         });
     }
@@ -960,6 +1201,7 @@ private:
                 setNotice(QStringLiteral("DJ je već preuzeo tu poruku. Skica je sačuvana.")); return;
             }
         }
+        invalidateSearchIntent(); ++searchVersion_; cancelDescription(); clearSearchResults();
         const qint64 id = lastSentId_; const quint64 generation = composerGeneration_;
         const auto before = editorDraft(); const QUrl base = base_;
         const QPointer<QWidget> focus = QApplication::focusWidget();
@@ -1060,6 +1302,9 @@ private:
     QElapsedTimer idleClock_;
     QPropertyAnimation* chatScroll_;
     QUrl base_;
+    QUrl activeSearchBase_;
+    QString activeSearchId_;
+    QPointer<QNetworkReply> activeSearchReply_;
     QLineEdit* name_;
     QPlainTextEdit* message_;
     QListWidget* results_;
@@ -1067,20 +1312,32 @@ private:
     QProgressBar* searchActivity_;
     QWidget *selectedPage_, *suggestionArea_;
     QPushButton *send_, *cancelSong_, *describe_, *alternate_;
-    QLabel *presence_, *notice_, *suggestionHint_, *selectedTitle_, *selectedArtist_, *magicHelp_;
+    QLabel *presence_, *notice_, *suggestionHint_, *selectedTitle_, *selectedArtist_, *magicHelp_, *onlineBadge_ = nullptr;
     QTextBrowser* chat_;
-    QString guestId_, cursor_, requestId_, lastRequestSignature_, messageId_, lastMessage_;
+    QNetworkAccessManager resultArtNetwork_{this};
+    QCache<QString, QImage> resultArtCache_{24};
+    QHash<QString, QPointer<QNetworkReply>> resultArtReplies_;
+    QQueue<QString> resultArtQueue_;
+    quint64 resultArtVersion_ = 0;
+    QString guestId_, composerId_, searchOverride_, cursor_, requestId_, lastRequestSignature_, messageId_, lastMessage_;
     QString savedQuery_, suggestionState_;
     QString descriptionId_, descriptionText_, descriptionRequestId_, descriptionStatus_;
     QString alternateLabel_ = QStringLiteral("Vrati skicu");
     QJsonObject alternateDraft_, messageWork_, workPresentation_;
+    QJsonObject observedPresence_;
+    QElapsedTimer presenceClock_;
+    qint64 presenceDeadline_ = 0;
+    double presenceExpiryWatermark_ = 0;
+    qint64 presenceWatermarkDeadline_ = 0;
+    int presenceActiveCount_ = 0;
+    bool presenceKnown_ = false, presenceSeen_ = false;
     qint64 lastSentId_ = 0;
     int savedQueryCursor_ = 0, savedQueryAnchor_ = 0;
     QJsonObject selectedTrack_;
     QJsonArray messages_;
     QSet<QString> messageIds_, processingIds_, withdrawnIds_;
-    quint64 searchVersion_ = 0, composerGeneration_ = 0;
-    quint64 chatFetches_ = 0;
+    quint64 searchVersion_ = 0, composerGeneration_ = 0, draftRevision_ = 0;
+    quint64 chatFetches_ = 0, serviceGeneration_ = 0;
     bool chatBusy_ = false, requestBusy_ = false, messageBusy_ = false, followingBottom_ = false;
     bool recallBusy_ = false, descriptionActive_ = false, descriptionBusy_ = false;
 };
@@ -1106,17 +1363,31 @@ public:
         poll_.start();
         auto* window = cube->window();
         originalCursor_ = window->cursor(); cursorWasSet_ = window->testAttribute(Qt::WA_SetCursor);
+        if (window->windowHandle()) originalNativeCursor_ = window->windowHandle()->cursor();
         window->setCursor(djCursor());
+        // A disabled child uses the input surface's cursor, not its own cached
+        // bitmap. Give the GL surface an explicit cursor as well as the window.
+        originalCubeCursor_ = cube_->cursor(); cubeCursorWasSet_ = cube_->testAttribute(Qt::WA_SetCursor);
+        cube_->setCursor(djCursor());
         playbackButton_ = new QPushButton(cube_); playbackButton_->setObjectName(QStringLiteral("partyPlaybackButton"));
         playbackButton_->setFocusPolicy(Qt::NoFocus); playbackButton_->setCursor(djCursor());
+        playbackButton_->installEventFilter(this);
         connect(playbackButton_, &QPushButton::clicked, this, [this] { setPlaybackPaused(); });
+        playbackStatus_ = new QLabel(cube_); playbackStatus_->setObjectName(QStringLiteral("partyPlaybackStatus"));
+        playbackStatus_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        playbackStatus_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        playbackAction_ = new QAction(QStringLiteral("Reprodukcija · Ctrl+P"), this);
+        playbackAction_->setObjectName(QStringLiteral("partyPlaybackAction"));
+        playbackAction_->setShortcut(QKeySequence(QStringLiteral("Ctrl+P"))); playbackAction_->setAutoRepeat(false);
+        window->addAction(playbackAction_);
+        connect(playbackAction_, &QAction::triggered, this, [this] { setPlaybackPaused(); });
         if (auto* main = qobject_cast<QMainWindow*>(window)) {
             menuWasVisible_ = main->menuBar()->isVisible(); statusWasVisible_ = main->statusBar()->isVisible();
             main->menuBar()->hide(); main->statusBar()->hide();
         }
         requestAction_ = new QAction(QStringLiteral("Zatraži pjesmu"), this);
         requestAction_->setObjectName(QStringLiteral("partyRequestAction"));
-        requestAction_->setShortcut(QKeySequence(QStringLiteral("R")));
+        requestAction_->setShortcuts({QKeySequence(QStringLiteral("R")), QKeySequence(QStringLiteral("Ctrl+K"))});
         window->addAction(requestAction_);
         connect(requestAction_, &QAction::triggered, this, [this] { openRequests(); });
         fullAction_ = new QAction(QStringLiteral("Party fullscreen"), this);
@@ -1157,6 +1428,7 @@ public:
         for (auto* manager : {&artworkNetwork_, &controlNetwork_})
             for (auto* reply : manager->findChildren<QNetworkReply*>()) { disconnect(reply, nullptr, this, nullptr); reply->abort(); }
         delete playbackButton_;
+        delete playbackStatus_;
         delete desk_.data();
         if (cube_) {
             for (auto it = effectBefore_.begin(); it != effectBefore_.end(); ++it) {
@@ -1166,12 +1438,15 @@ public:
             }
             cube_->removeEventFilter(this);
             cube_->window()->setWindowTitle(originalTitle_);
+            if (cubeCursorWasSet_) cube_->setCursor(originalCubeCursor_);
+            else cube_->unsetCursor();
             if (cursorWasSet_) cube_->window()->setCursor(originalCursor_);
             else cube_->window()->unsetCursor();
+            if (cube_->window()->windowHandle()) cube_->window()->windowHandle()->setCursor(originalNativeCursor_);
             if (auto* main = qobject_cast<QMainWindow*>(cube_->window())) {
                 main->menuBar()->setVisible(menuWasVisible_); main->statusBar()->setVisible(statusWasVisible_);
             }
-            for (QAction* a : {requestAction_, fullAction_, escapeAction_, spotifyAction_, returnAction_}) cube_->window()->removeAction(a);
+            for (QAction* a : {requestAction_, fullAction_, escapeAction_, spotifyAction_, returnAction_, playbackAction_}) cube_->window()->removeAction(a);
         }
     }
     void setStateFile(const QString& file) { stateFile_ = file; bytes_.clear(); readState(); }
@@ -1264,8 +1539,14 @@ public:
         result.insert(QStringLiteral("playbackControl"), QJsonObject{{QStringLiteral("enabled"), control.enabled},
             {QStringLiteral("paused"), control.paused}, {QStringLiteral("known"), control.known},
             {QStringLiteral("busy"), playbackBusy_}, {QStringLiteral("reason"), control.reason},
+            {QStringLiteral("label"), playbackButton_->text()}, {QStringLiteral("verification"), playbackStatus_->text()},
+            {QStringLiteral("cursorPixels"), playbackButton_->cursor().pixmap().width()},
             {QStringLiteral("bounds"), QJsonArray{r.x(), r.y(), r.width(), r.height()}}});
         result.insert(QStringLiteral("queuePreview"), queuePreview_);
+        const auto bounds = [](const QRectF& r) { return QJsonArray{r.x(), r.y(), r.width(), r.height()}; };
+        result.insert(QStringLiteral("requestCardBounds"), bounds(requestRect_));
+        result.insert(QStringLiteral("qrBounds"), bounds(qrBounds_));
+        result.insert(QStringLiteral("playingCardBounds"), bounds(playingBounds_));
         result.insert(QStringLiteral("trackProgressMs"), trackProgress());
         result.insert(QStringLiteral("trackClockValid"), trackClockKnown_ && trackClockTrusted_
             && (!trackClockPlaying_ || QDateTime::currentMSecsSinceEpoch() <= trackClockStamp_ + 10000));
@@ -1312,6 +1593,10 @@ public:
         if (!desk_) showRequests(true);
         if (desk_) desk_->restoreDraft(draft);
     }
+    QJsonObject setSearchIntent(const QJsonObject& cue)
+    {
+        return desk_ ? desk_->setSearchIntent(cue) : QJsonObject{{QStringLiteral("applied"), false}, {QStringLiteral("error"), QStringLiteral("Request desk is unavailable.")}};
+    }
     void configureWindowToggle(const QJsonObject& config)
     {
         windowToggle_ = config;
@@ -1321,9 +1606,27 @@ public:
     }
 protected:
     void showEvent(QShowEvent* e) override { frame_.start(); QWidget::showEvent(e); updatePlaybackControl(); }
-    void hideEvent(QHideEvent* e) override { frame_.stop(); if (playbackButton_) playbackButton_->hide(); QWidget::hideEvent(e); }
+    void hideEvent(QHideEvent* e) override { frame_.stop(); if (playbackButton_) playbackButton_->hide(); if (playbackStatus_) playbackStatus_->hide(); QWidget::hideEvent(e); }
     bool eventFilter(QObject* o, QEvent* e) override
     {
+        if (o == playbackButton_ && (e->type() == QEvent::EnabledChange || e->type() == QEvent::MouseButtonRelease
+                                    || e->type() == QEvent::Enter || e->type() == QEvent::StyleChange)) {
+            if (!cursorRefreshQueued_) {
+                cursorRefreshQueued_ = true;
+                QTimer::singleShot(0, this, [this] {
+                    cursorRefreshQueued_ = false;
+                    if (!cube_ || !playbackButton_ || !playbackButton_->isVisible()) return;
+                    const QPoint pointer = QCursor::pos();
+                    if (!playbackButton_->rect().contains(playbackButton_->mapFromGlobal(pointer))) return;
+                    auto* hovered = QApplication::widgetAt(pointer);
+                    if (!hovered || hovered->window() != cube_->window()) return;
+                    // Qt may apply a system cursor when disabling the child,
+                    // without changing its cached QCursor. Refresh the actual
+                    // native surface after that transition has finished.
+                    if (auto* native = cube_->window()->windowHandle()) native->setCursor(djCursor());
+                });
+            }
+        }
         if (o == cube_) {
             if (e->type() == QEvent::Resize) { setGeometry(cube_->rect()); raise(); updatePlaybackControl(); }
             if (e->type() == QEvent::MouseButtonRelease) {
@@ -1380,10 +1683,10 @@ protected:
                 p.restore();
             }
 
-            p.setFont(stageFont(18 * u, true)); p.setPen(orange);
+            p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(orange);
             p.drawText(QRectF(margin, 22 * u, w * .55, 28 * u), Qt::AlignLeft | Qt::AlignVCenter,
                        QStringLiteral("LARICS / LYRICS"));
-            p.setFont(stageFont(12 * u)); p.setPen(QColor("#b7bfd1"));
+            p.setFont(uiFont(u, UiMetrics::small)); p.setPen(QColor("#b7bfd1"));
             p.drawText(QRectF(margin, 49 * u, w * .55, 21 * u), Qt::AlignLeft | Qt::AlignVCenter,
                        QStringLiteral("after hours   ·   robots have requests too"));
 
@@ -1392,6 +1695,7 @@ protected:
             const QString artist = text(now, "artist", QStringLiteral("Odaberi pjesmu. Roboti čekaju."));
             const double infoWidth = std::min(w * .53, 690 * u);
             const QRectF playing(margin, 89 * u, infoWidth, 105 * u);
+            playingBounds_ = playing;
             panel(p, playing, orange);
             const QRectF cover(playing.x() + 10 * u, playing.y() + 11 * u, 82 * u, 82 * u);
             p.setPen(QPen(alpha(orange, .35), 1)); p.setBrush(QColor("#142135")); p.drawRoundedRect(cover, 7 * u, 7 * u);
@@ -1403,13 +1707,13 @@ protected:
                 p.setPen(alpha(orange, .8)); p.setFont(stageFont(37 * u)); p.drawText(cover, Qt::AlignCenter, QStringLiteral("♪"));
             }
             const double textInset = 106 * u;
-            p.setPen(orange); p.setFont(stageFont(11 * u, true));
+            p.setPen(orange); p.setFont(uiFont(u, UiMetrics::body, true));
             p.drawText(playing.adjusted(textInset, 12 * u, -19 * u, 0), Qt::AlignTop,
                        now.value(QStringLiteral("playing")).toBool() ? QStringLiteral("Sada svira") : QStringLiteral("Na repertoaru"));
             p.setPen(white); p.setFont(stageFont(25 * u, true));
             p.drawText(playing.adjusted(textInset, 33 * u, -19 * u, -30 * u), Qt::AlignLeft | Qt::AlignVCenter,
                        QFontMetrics(p.font()).elidedText(title, Qt::ElideRight, qRound(infoWidth - textInset - 19 * u)));
-            p.setPen(QColor("#b9c7db")); p.setFont(stageFont(14 * u));
+            p.setPen(QColor("#b9c7db")); p.setFont(uiFont(u, UiMetrics::secondary));
             p.drawText(playing.adjusted(textInset, 71 * u, -19 * u, 0), Qt::AlignTop,
                        QFontMetrics(p.font()).elidedText(artist, Qt::ElideRight, qRound(infoWidth - textInset - 19 * u)));
             const double duration = number(now, "durationMs", 0);
@@ -1419,32 +1723,44 @@ protected:
                 p.setBrush(orange); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, (infoWidth - 34 * u) * progress, 3 * u), 1.5, 1.5);
             }
 
-            const double qrSide = 102 * u;
-            requestRect_ = QRectF(w - margin - 240 * u, 24 * u, 240 * u, 190 * u);
+            const double requestWidth = std::min(400 * u, std::max(120 * u, w - infoWidth - 3 * margin));
+            requestRect_ = QRectF(w - margin - requestWidth, playing.y(), requestWidth, 180 * u);
+            const bool wideQr = requestWidth >= 300 * u;
+            const double qrSide = std::min((wideQr ? 152 : 116) * u, requestWidth - 28 * u);
             panel(p, requestRect_, cyan);
-            p.setFont(stageFont(16 * u, true)); p.setPen(white);
-            p.drawText(requestRect_.adjusted(16 * u, 12 * u, -8 * u, 0), Qt::AlignTop, QStringLiteral("Daj pjesmu."));
-            p.setFont(stageFont(11 * u)); p.setPen(QColor("#b9c7db"));
-            p.drawText(QRectF(requestRect_.x() + 16 * u, 60 * u, 94 * u, 80 * u),
-                       Qt::AlignLeft | Qt::TextWordWrap, QStringLiteral("Skeniraj, pronađi,\npošalji DJ-u."));
+            p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(white);
+            const QRectF requestHeading(requestRect_.x() + 16 * u, requestRect_.y() + 12 * u,
+                                        requestWidth - (wideQr ? qrSide + 48 * u : 32 * u), 27 * u);
+            p.drawText(requestHeading, (wideQr ? Qt::AlignLeft : Qt::AlignHCenter) | Qt::AlignTop,
+                       QFontMetrics(p.font()).elidedText(QStringLiteral("Daj pjesmu."), Qt::ElideRight, qRound(requestHeading.width())));
+            const QRectF qrRect(wideQr ? requestRect_.right() - qrSide - 14 * u : requestRect_.center().x() - qrSide / 2,
+                                requestRect_.y() + (wideQr ? 14 : 42) * u, qrSide, qrSide);
+            qrBounds_ = qrRect;
             if (!qr_.isNull()) {
-                const QRectF qrRect(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide);
                 p.fillRect(qrRect.adjusted(-4 * u, -4 * u, 4 * u, 4 * u), Qt::white);
                 p.setRenderHint(QPainter::SmoothPixmapTransform, false);
                 p.drawImage(qrRect, qr_);
             } else {
                 p.setPen(alpha(cyan, .45)); p.setBrush(Qt::NoBrush);
-                p.drawRoundedRect(QRectF(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide), 12, 12);
+                p.drawRoundedRect(qrRect, 12, 12);
                 p.setFont(stageFont(28 * u, true)); p.setPen(cyan);
-                p.drawText(QRectF(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide), Qt::AlignCenter, QStringLiteral("♪"));
+                p.drawText(qrRect, Qt::AlignCenter, QStringLiteral("♪"));
             }
-            p.setFont(stageFont(11 * u, true)); p.setPen(cyan);
-            p.drawText(requestRect_.adjusted(16 * u, 148 * u, -4 * u, -4 * u), Qt::AlignTop, QStringLiteral("Zatraži pjesmu · R"));
+            p.setFont(uiFont(u, UiMetrics::secondary, true)); p.setPen(cyan);
+            const double labelWidth = wideQr ? requestHeading.width() : requestWidth - 16 * u;
+            if (wideQr) {
+                p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#c1d1e5"));
+                p.drawText(QRectF(requestHeading.x(), requestRect_.y() + 49 * u, labelWidth, 61 * u), Qt::AlignLeft | Qt::TextWordWrap,
+                           QStringLiteral("Skeniraj i pošalji pjesmu DJ-u."));
+            }
+            p.setFont(uiFont(u, UiMetrics::secondary, true)); p.setPen(cyan);
+            p.drawText(QRectF(requestRect_.x() + (wideQr ? 16 : 8) * u, requestRect_.y() + (wideQr ? 123 : 158) * u, labelWidth, 24 * u),
+                       wideQr ? Qt::AlignLeft | Qt::AlignVCenter : Qt::AlignCenter, wideQr ? QStringLiteral("Ctrl+K · zatraži") : QStringLiteral("Ctrl+K"));
             const QString guestUrl = text(state_, "requestUrl");
-            if (!guestUrl.isEmpty()) {
-                p.setFont(stageFont(10 * u)); p.setPen(QColor("#95a5bf"));
-                p.drawText(requestRect_.adjusted(16 * u, 170 * u, -10 * u, 0), Qt::AlignTop,
-                           QFontMetrics(p.font()).elidedText(guestUrl, Qt::ElideMiddle, qRound(210 * u)));
+            if (!guestUrl.isEmpty() && wideQr) {
+                p.setFont(uiFont(u, UiMetrics::small)); p.setPen(QColor("#b2c5df"));
+                p.drawText(QRectF(requestHeading.x(), requestRect_.y() + 151 * u, labelWidth, 22 * u), Qt::AlignLeft | Qt::AlignVCenter,
+                           QFontMetrics(p.font()).elidedText(guestUrl, Qt::ElideMiddle, qRound(labelWidth)));
             }
 
             const double mission = t - missionStart_;
@@ -1470,23 +1786,25 @@ protected:
             const double gap = 8 * u, cell = (w - 2 * margin - gap * (count - 1)) / count;
             for (int i = 0; i < count; ++i) {
                 const auto track = queue[i].toObject();
-                const QRectF box(margin + i * (cell + gap), h - 35 * u, cell, 31 * u);
+                const QRectF box(margin + i * (cell + gap), h - 70 * u, cell, 62 * u);
                 panel(p, box, orange, .92);
-                p.setFont(stageFont(15 * u, true)); p.setPen(orange);
-                p.drawText(QRectF(box.x() + 5 * u, box.y(), 21 * u, box.height()), Qt::AlignVCenter, QString::number(i + 1));
-                p.setFont(stageFont(13 * u, true)); p.setPen(white);
-                p.drawText(box.adjusted(28 * u, 1 * u, -6 * u, -13 * u), Qt::AlignVCenter,
-                    QFontMetrics(p.font()).elidedText(text(track, "title"), Qt::ElideRight, qRound(cell - 34 * u)));
+                p.setFont(uiFont(u, UiMetrics::icon, true)); p.setPen(orange);
+                p.drawText(QRectF(box.x() + 8 * u, box.y(), 25 * u, box.height()), Qt::AlignVCenter, QString::number(i + 1));
+                p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(white);
+                p.drawText(QRectF(box.x() + 38 * u, box.y() + 5 * u, cell - 46 * u, 28 * u), Qt::AlignVCenter,
+                    QFontMetrics(p.font()).elidedText(text(track, "title"), Qt::ElideRight, qRound(cell - 46 * u)));
                 const QString detail = text(track, "status") == QStringLiteral("pending") ? QStringLiteral("Zahtjev čeka DJ-a") : text(track, "artist");
-                p.setFont(stageFont(9 * u)); p.setPen(QColor("#b9c7db"));
-                p.drawText(box.adjusted(28 * u, 17 * u, -6 * u, -1 * u), Qt::AlignVCenter,
-                    QFontMetrics(p.font()).elidedText(detail, Qt::ElideRight, qRound(cell - 34 * u)));
+                p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#c3d1e3"));
+                p.drawText(QRectF(box.x() + 38 * u, box.y() + 34 * u, cell - 46 * u, 23 * u), Qt::AlignVCenter,
+                    QFontMetrics(p.font()).elidedText(detail, Qt::ElideRight, qRound(cell - 46 * u)));
                 queuePreview_.append(QJsonObject{{QStringLiteral("title"), text(track, "title")},
+                    {QStringLiteral("titleFontPixels"), uiFont(u, UiMetrics::body, true).pixelSize()},
+                    {QStringLiteral("detailFontPixels"), p.font().pixelSize()},
                     {QStringLiteral("uid"), text(track, "uid")}, {QStringLiteral("bounds"), QJsonArray{box.x(), box.y(), box.width(), box.height()}}});
             }
             return;
         }
-        p.setFont(stageFont(11 * u)); p.setPen(QColor("#a3b3c9"));
+        p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#a3b3c9"));
         const auto mood = state_.value(QStringLiteral("mood")).toObject();
         QString moodLabel = text(mood, "label", QStringLiteral("Dobra frekvencija"));
         QString next;
@@ -1571,13 +1889,20 @@ private:
         const double u = std::clamp(std::min(width() / 1280.0, height() / 800.0), .65, 2.0);
         const double infoWidth = std::min(width() * .53, 690 * u);
         playbackButton_->setGeometry(qRound(34 * u + infoWidth - 190 * u), qRound(27 * u), qRound(190 * u), qRound(43 * u));
+        playbackStatus_->setGeometry(qRound(34 * u + infoWidth - 240 * u), qRound(70 * u), qRound(240 * u), qRound(19 * u));
         const auto control = playbackView();
         playbackButton_->setEnabled(control.enabled);
-        playbackButton_->setText(playbackBusy_ ? QStringLiteral("Provjeravam…") : !control.enabled ? QStringLiteral("Status nedostupan")
+        playbackAction_->setEnabled(control.enabled);
+        playbackButton_->setText(!control.known ? QStringLiteral("Reprodukcija")
             : control.paused ? QStringLiteral("Pauzirano  ▶") : QStringLiteral("Svira  Ⅱ"));
-        playbackButton_->setToolTip(control.enabled ? control.paused ? QStringLiteral("Nastavi ovu pjesmu na istom uređaju.")
-            : QStringLiteral("Pauziraj ovu pjesmu na istom uređaju.") : control.reason);
-        playbackButton_->setStyleSheet(QStringLiteral("QPushButton { font:600 %1px 'DejaVu Sans'; color:#ddfff4; background:#1b4a44; border:1px solid #6bc6ab; border-radius:9px; padding:4px; } QPushButton:disabled { color:#aab5c5; background:#263141; border-color:#536174; } QPushButton:hover:enabled { background:#276258; }").arg(qRound(17 * u)));
+        playbackButton_->setToolTip(control.enabled ? (control.paused ? QStringLiteral("Nastavi ovu pjesmu na istom uređaju.")
+            : QStringLiteral("Pauziraj ovu pjesmu na istom uređaju.")) + QStringLiteral("  Ctrl+P") : control.reason);
+        playbackButton_->setStyleSheet(QStringLiteral("QPushButton { font:600 %1px 'DejaVu Sans'; color:#ddfff4; background:#1b4a44; border:1px solid #6bc6ab; border-radius:9px; padding:4px; } QPushButton:disabled { color:#aab5c5; background:#263141; border-color:#536174; } QPushButton:hover:enabled { background:#276258; }").arg(uiFont(u).pixelSize()));
+        playbackStatus_->setFont(uiFont(u, UiMetrics::small));
+        playbackStatus_->setStyleSheet(QStringLiteral("color:#9eafc2; background:transparent;"));
+        playbackStatus_->setText(playbackBusy_ ? QStringLiteral("Provjeravam…") : control.enabled ? QString() : QStringLiteral("Čekam potvrđeno stanje"));
+        playbackStatus_->setToolTip(control.reason);
+        playbackStatus_->setVisible(isVisible()); playbackStatus_->raise();
         playbackButton_->setVisible(isVisible()); playbackButton_->raise();
     }
     void refreshPlaybackState()
@@ -1638,12 +1963,7 @@ private:
     }
     void loadArtwork(const QJsonObject& track)
     {
-        QString wanted = text(track, "artUrl");
-        if (wanted.isEmpty()) wanted = text(track, "image");
-        if (wanted.isEmpty()) wanted = text(track.value(QStringLiteral("image")).toObject(), "url");
-        const QUrl url(wanted, QUrl::StrictMode);
-        if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() || wanted.size() > 2048
-            || (url.scheme() != QStringLiteral("http") && url.scheme() != QStringLiteral("https"))) wanted.clear();
+        const QString wanted = coverUrl(track);
         if (wanted == artworkUrl_ && (!artwork_.isNull() || !artworkReply_.isNull() || QDateTime::currentMSecsSinceEpoch() < artworkRetryAt_)) return;
         const quint64 version = ++artworkVersion_;
         if (artworkReply_) artworkReply_->abort();
@@ -1664,15 +1984,8 @@ private:
             if (version != artworkVersion_) { reply->deleteLater(); return; }
             consume(); artworkReply_ = nullptr;
             if (reply->error() == QNetworkReply::NoError && artworkError_.isEmpty()) {
-                QBuffer buffer(&artworkBytes_); buffer.open(QIODevice::ReadOnly); QImageReader reader(&buffer);
-                const QSize size = reader.size(); const QByteArray format = reader.format().toLower();
-                if (size.isValid() && size.width() <= 4096 && size.height() <= 4096
-                    && (format == "jpeg" || format == "png" || format == "webp")) {
-                    reader.setScaledSize(size.scaled(320, 320, Qt::KeepAspectRatio)); reader.setAutoTransform(true);
-                    artwork_ = reader.read();
-                    if (!artwork_.isNull()) artworkCache_.insert(wanted, new QImage(artwork_));
-                    else artworkError_ = reader.errorString();
-                } else artworkError_ = QStringLiteral("Unsupported cover size or format");
+                artwork_ = decodeCover(artworkBytes_, 320, artworkError_);
+                if (!artwork_.isNull()) artworkCache_.insert(wanted, new QImage(artwork_));
             } else if (artworkError_.isEmpty()) artworkError_ = reply->errorString();
             artworkBytes_.clear(); artworkRetryAt_ = QDateTime::currentMSecsSinceEpoch() + 30000;
             reply->deleteLater(); update();
@@ -1772,14 +2085,14 @@ private:
         karaokeGeometry_ = {};
         const auto frame = karaokeFrame();
         if (!frame.visible) return;
-        const QRectF card(34 * u, 240 * u, w - 68 * u,
-                          std::min(390 * u, graphicsBottom(w, h, u) - 258 * u));
+        const QRectF card(34 * u, 292 * u, w - 68 * u,
+                          std::min(390 * u, graphicsBottom(w, h, u) - 310 * u));
         if (card.height() < 230 * u || card.width() < 240 * u) return;
         const double v = card.height() / 390;
         const QRectF current = card.adjusted(28 * u, 92 * v, -28 * u, -124 * v);
         const QRectF next(card.x() + 28 * u, card.y() + 308 * v, card.width() - 56 * u, 62 * v);
         p.save(); p.setClipRect(card); panel(p, card, QColor("#7de4ed"), .95);
-        p.setFont(stageFont(16 * u, true)); p.setPen(QColor("#7de4ed"));
+        p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(QColor("#7de4ed"));
         const QRectF titleRect = card.adjusted(24 * u, 18 * v, -24 * u, -330 * v);
         p.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
                    QFontMetrics(p.font()).elidedText(QStringLiteral("KARAOKE · ") + text(frame.sheet, "title"), Qt::ElideRight, qRound(titleRect.width() * .68)));
@@ -1790,7 +2103,7 @@ private:
         else if (frame.phase == QStringLiteral("finished")) stateLabel = QStringLiteral("Bravo, ekipa!");
         else if (frame.countIn > 0) stateLabel = QStringLiteral("Za %1 s").arg(static_cast<int>(std::ceil(frame.countIn / 1000)));
         else if (frame.phase == QStringLiteral("outro")) stateLabel = QStringLiteral("Završni taktovi");
-        p.setFont(stageFont(13 * u)); p.setPen(QColor("#b6c5dc"));
+        p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#b6c5dc"));
         p.drawText(titleRect, Qt::AlignRight | Qt::AlignVCenter, stateLabel);
 
         const QString words = text(frame.line, "text");
@@ -1834,7 +2147,7 @@ private:
         }
         line(p, QPointF(card.left() + 28 * u, card.top() + 282 * v), QPointF(card.right() - 28 * u, card.top() + 282 * v), QColor("#34475f"), u);
         if (!frame.next.isEmpty()) {
-            p.setFont(stageFont(11 * u, true)); p.setPen(QColor("#8496b0"));
+            p.setFont(uiFont(u, UiMetrics::small, true)); p.setPen(QColor("#a8bad2"));
             p.drawText(QRectF(next.x(), card.top() + 286 * v, next.width(), 19 * v), Qt::AlignCenter, QStringLiteral("SLJEDEĆE"));
             QFont nextFont = stageFont(30 * u);
             QTextLayout nextLayout(text(frame.next, "text"), nextFont);
@@ -1877,7 +2190,7 @@ private:
     void openRequests()
     {
         showRequests(true);
-        if (desk_) if (auto* composer = desk_->findChild<QPlainTextEdit*>(QStringLiteral("partyMessage"))) composer->setFocus();
+        if (desk_) desk_->focusSearch();
     }
     void showSpotify()
     {
@@ -1962,14 +2275,14 @@ private:
         const QRectF bounds = fm.boundingRect(QRectF(0, 0, widest - 54 * u, h * .32), Qt::TextWordWrap | Qt::AlignCenter, cue_.text);
         const double width = std::min(widest, std::max(360 * u, bounds.width() + 54 * u));
         const double height = std::min(128 * u, bounds.height() + 36 * u);
-        return QRectF((w - width) / 2, h - 102 * u - height, width, height);
+        return QRectF((w - width) / 2, h - 134 * u - height, width, height);
     }
     double graphicsBottom(double w, double h, double u) const
     {
         Q_UNUSED(w);
         // Robot paths retain a fixed caption clearance. Photographs extend
         // underneath the captions and have their own bottom-anchored bounds.
-        return h - (102 + 128 + 14) * u;
+        return h - (134 + 128 + 14) * u;
     }
     void drawCaption(QPainter& p, double w, double h, double u, QColor white, QColor orange)
     {
@@ -1994,7 +2307,7 @@ private:
         const bool air = missionKind_ == 0 || missionKind_ == 3;
         const double approach = smooth(age / 5.5);
         const double leaving = smooth((age - 11.0) / 5.5);
-        const double top = 230 * u, bottom = graphicsBottom(w, h, u);
+        const double top = 292 * u, bottom = graphicsBottom(w, h, u);
         const double robotScale = std::min((missionKind_ == 3 ? 3.3 : 1.45) * u * graphicsScale(),
                                           std::max(.65, (bottom - top - 36) / (air ? 112 : 90)));
         const double offscreen = 78 * robotScale;
@@ -2019,7 +2332,7 @@ private:
             panel(p, bubble, orange, .94);
             const QPointF anchor(std::clamp(x, bubble.left() + 12, bubble.right() - 12), bubble.bottom());
             line(p, anchor, QPointF(x, y - 28 * robotScale), alpha(orange, .55), 1.2);
-            p.setFont(stageFont(14 * u, true)); p.setPen(QColor("#ffe4cc"));
+            p.setFont(uiFont(u, UiMetrics::secondary, true)); p.setPen(QColor("#ffe4cc"));
             const QString words = age < 7.5 ? missionText_ : QStringLiteral("Na tri!  Jedan, dva... refren.");
             p.drawText(bubble.adjusted(14 * u, 5 * u, -14 * u, -5 * u),
                        Qt::AlignCenter, QFontMetrics(p.font()).elidedText(words, Qt::ElideRight, qRound(bubble.width() - 28 * u)));
@@ -2036,15 +2349,15 @@ private:
         p.save();
         Q_UNUSED(orange);
         p.setRenderHint(QPainter::SmoothPixmapTransform); p.drawImage(destination, book_);
-        QLinearGradient labelShade(0, h - 108 * u, 0, h);
+        QLinearGradient labelShade(0, h - 150 * u, 0, h);
         labelShade.setColorAt(0, QColor(6, 10, 22, 0)); labelShade.setColorAt(1, QColor(6, 10, 22, 245));
-        p.fillRect(QRectF(0, h - 108 * u, w, 108 * u), labelShade);
-        p.setPen(QColor("#f9e6d5")); p.setFont(stageFont(14 * u, true));
-        p.drawText(QRectF(16 * u, h - 80 * u, w - 32 * u, 23 * u),
+        p.fillRect(QRectF(0, h - 150 * u, w, 150 * u), labelShade);
+        p.setPen(QColor("#f9e6d5")); p.setFont(uiFont(u, UiMetrics::secondary, true));
+        p.drawText(QRectF(16 * u, h - 126 * u, w - 32 * u, 25 * u),
                    Qt::AlignCenter, QFontMetrics(p.font()).elidedText(text(book, "title"), Qt::ElideRight, qRound(w - 32 * u)));
-        p.setFont(stageFont(10 * u)); p.setPen(QColor("#a6b6ca"));
+        p.setFont(uiFont(u, UiMetrics::small)); p.setPen(QColor("#a6b6ca"));
         const QString page = book.value(QStringLiteral("page")).toVariant().toString();
-        p.drawText(QRectF(0, h - 54 * u, w, 17 * u), Qt::AlignCenter,
+        p.drawText(QRectF(0, h - 98 * u, w, 21 * u), Qt::AlignCenter,
                    QStringLiteral("30 godina LARICS-a") + (page.isEmpty() ? QString() : QStringLiteral(" · str. ") + page));
         p.restore();
         return card;
@@ -2054,6 +2367,7 @@ private:
     QPointer<QWidget> returnFocus_;
     QPointer<QProcess> toggleProcess_;
     QPointer<QPushButton> playbackButton_;
+    QPointer<QLabel> playbackStatus_;
     QNetworkAccessManager artworkNetwork_{this}, controlNetwork_{this};
     QPointer<QNetworkReply> artworkReply_;
     QCache<QString, QImage> artworkCache_{8};
@@ -2067,7 +2381,7 @@ private:
     QString trackClockKey_;
     double trackClockPosition_ = 0, trackClockStamp_ = 0, trackClockDuration_ = 0;
     bool trackClockKnown_ = false, trackClockPlaying_ = false, trackClockTrusted_ = false;
-    QCursor originalCursor_;
+    QCursor originalCursor_, originalCubeCursor_, originalNativeCursor_;
     QString originalTitle_, stateFile_, fileError_, qrPath_, bookPath_, lastTrack_, lastRequest_, missionText_, effectError_;
     QHash<QString, bool> effectBefore_;
     QJsonObject state_, karaokeGeometry_, windowToggle_;
@@ -2076,8 +2390,8 @@ private:
     QImage qr_, book_;
     QElapsedTimer clock_;
     QTimer frame_, poll_;
-    QAction *requestAction_ = nullptr, *fullAction_ = nullptr, *escapeAction_ = nullptr, *spotifyAction_ = nullptr, *returnAction_ = nullptr;
-    QRectF requestRect_;
+    QAction *requestAction_ = nullptr, *fullAction_ = nullptr, *escapeAction_ = nullptr, *spotifyAction_ = nullptr, *returnAction_ = nullptr, *playbackAction_ = nullptr;
+    QRectF requestRect_, qrBounds_, playingBounds_;
     QSet<QString> seenCues_;
     QQueue<Cue> pending_;
     Cue cue_;
@@ -2087,7 +2401,7 @@ private:
     double nextEffectCheck_ = 0;
     std::size_t aside_ = 0;
     quint64 paints_ = 0;
-    bool menuWasVisible_ = true, statusWasVisible_ = true, cursorWasSet_ = false;
+    bool menuWasVisible_ = true, statusWasVisible_ = true, cursorWasSet_ = false, cubeCursorWasSet_ = false, cursorRefreshQueued_ = false;
 };
 
 QPointer<PartyStage> stage;
@@ -2102,6 +2416,11 @@ void run(const RuntimeAgentHost* host)
     if (!host || host->abi_version != RUNTIME_AGENT_ABI) return;
     const QJsonObject request = QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
     if (request.value(QStringLiteral("restore")).toBool()) { release(host); return; }
+    const bool composerRpc = request.value(QStringLiteral("getComposerDraft")).toBool() || request.contains(QStringLiteral("setSearchIntent"));
+    if (composerRpc && (!stage || stage->composerDraft().isEmpty())) {
+        host->fail(host->invocation_context, "Party stage editor is inactive; configure the stage before composer control.");
+        return;
+    }
     auto* cube = static_cast<CubeWidget*>(host->find_qobject(host->agent_context, "cubeView"));
     if (!cube) { host->fail(host->invocation_context, "cubeView was not found"); return; }
     if (!stage) stage = new PartyStage(cube,
@@ -2120,7 +2439,10 @@ void run(const RuntimeAgentHost* host)
         const QString filename = text(request, "capture");
         if (!cube->window()->grab().save(filename)) { host->fail(host->invocation_context, "Could not save the party window capture"); return; }
     }
+    QJsonObject intentResult;
+    if (request.contains(QStringLiteral("setSearchIntent"))) intentResult = stage->setSearchIntent(request.value(QStringLiteral("setSearchIntent")).toObject());
     QJsonObject result = stage->status();
+    if (!intentResult.isEmpty()) result.insert(QStringLiteral("searchIntentResult"), intentResult);
     if (request.value(QStringLiteral("getComposerDraft")).toBool()) result.insert(QStringLiteral("composerDraft"), stage->composerDraft());
     host->complete_json(host->invocation_context, QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
 }

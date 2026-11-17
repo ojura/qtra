@@ -87,6 +87,34 @@ as `composerDraft` to restore the active Magic box intent during a hot reload.
 The name field remains `partyName`; the composer is `partyMessage` and exposes
 Qt's `plainText` property.
 
+The draft response also exposes `guestId`, a fresh per-editor `composerId`,
+`draftRevision`, exact untrimmed `text`, and `editorMode` (`message` or `dedication`).
+An operator may send a GUI request with `setSearchIntent` containing those exact
+five fields plus `intent:chat|music|auto`. The result is `searchIntentResult` with
+`applied` and either `effectiveIntent` or an error. Editing, restoration, recall,
+send, song selection/cancellation and service changes invalidate old bindings;
+reloading creates a new composer identity. A chat cue immediately hides and
+invalidates automatic results; a music cue searches the current text without
+selecting or submitting a song. Reading the complete draft is explicit. Draft
+identity and revision remain local; text classified as music can be sent as a
+normalized catalogue query (up to 160 characters) before submission. There is no
+separate backend draft feed or draft record.
+Composer read/intent RPCs require an already active stage and editor. A resident
+but released module fails these calls before construction; install/configure the
+stage in a separate request first. This closes a stale module-metadata race at the
+GUI invocation itself.
+
+Each dispatched catalogue request carries a fresh opaque UUID as `searchId` on
+`GET /api/search`. Invalidating that request aborts its reply and sends
+`POST /api/search/cancel {searchId}` to the service that received it. This includes
+edits, intent changes, selection, send, recall, a service change and module release.
+The cancellation outlives the old desk during a hot reload. Replies must match the
+current request ID and revision; cancelled replies are quiet, and old replies
+cannot clear a newer request's activity indicator. Sending or recalling also
+removes any already displayed obsolete choices while preserving the editor draft.
+A failed or mismatched catalogue response cancels the abandoned request ID before
+showing its error; the client never retries that GET automatically.
+
 ## Guest controls
 
 - **Tab** switches qtra to fullscreen native Spotify, and **Tab** in Spotify
@@ -94,14 +122,17 @@ Qt's `plainText` property.
   Spotify's managed windows; other applications retain their own Tab behavior.
   Closing or relaunching Spotify refreshes those bindings. Switching windows
   leaves the track, queue and volume alone.
-  A permanent cyan **Tab: qtra ↔ Spotify** hint appears below the Magic box in
-  its fixed help row, including while a song is selected.
+  A permanent shortcut strip near the top shows **Tab**, **Ctrl+P** and **Ctrl+K**.
+  The lower Magic box help also retains its Tab reminder.
 - The native request and chat panel stays open. Click **Zatraži pjesmu · R**, or
-  press **R**, to focus its bottom **Magic box**, which accepts a song, artist, or a
+  press **R** or **Ctrl+K**, to focus its bottom **Magic box**, which accepts a song, artist, or a
   message to the DJ. Typing shows debounced results above it; **Pošalji poruku (Enter)** always
   sends chat until a song is explicitly selected.
 - Exact song or artist queries use the direct catalogue search after a 330ms
-  typing debounce. **Traži po opisu** explicitly asks the DJ to resolve a remembered
+  typing debounce. Cheap local intent gating suppresses obvious conversation and
+  UI instructions before a catalogue call; unfamiliar concise titles still use
+  the direct path. **Ctrl+K** explicitly searches the current text, including text
+  that the local gate treated as conversation. **Traži po opisu** explicitly asks the DJ to resolve a remembered
   description. The panel shows that work as pending and polls its result while
   the same query remains active. Editing cancels that view and immediately returns
   to the ordinary catalogue path; a late descriptive reply cannot replace it.
@@ -122,6 +153,16 @@ Qt's `plainText` property.
 - A grey check beside a guest message means the DJ has marked it read. Receipt
   refreshes update existing messages without adding duplicates or verbose send
   confirmations beneath the composer.
+- The top-right **DJ online/offline** badge follows only the service's explicit
+  `dj.llm` lease. Missing or malformed data is unavailable. The badge expires on
+  a local monotonic timer even when the last JSON is unchanged; a running event
+  watcher or old work mark never renews it.
+  Online leases require a finite receipt/expiry horizon of 30–120 seconds
+  and an integer active-session count from 1 to 256. Chat callbacks are scoped to
+  the service generation, so a late response from a previous URL cannot replace
+  the current conversation or presence.
+  An unchanged expiry retains the earlier monotonic deadline even when agent count
+  or reported remaining time changes, including across unavailable/offline replies.
 - **Escape**, or the small **×** beside the latest pending own message, recalls it
   only before the DJ has accepted it for processing. A read receipt alone keeps
   recall available; an acceptance timestamp, durable work record or legacy active
@@ -131,6 +172,7 @@ Qt's `plainText` property.
   the new draft stays in place and **Uredi povučenu** opens the recovered text.
   A failed recall preserves the draft. Escape never closes the panel or changes
   fullscreen.
+  The recall icon uses the shared 34px icon size and a padded clickable span.
 - Work marks are separate from the grey read check: orange **●** means active
   work, **◷** means waiting, **◇** means blocked, **?** means an active lease expired
   without confirmation, green **◆** means completed, and **–** means cancelled.
@@ -154,20 +196,34 @@ Qt's `plainText` property.
   pixel scrolling make the list easier to scan. The popup is up to 340 pixels high,
   clamped to the available transcript. Long titles are elided with full text in
   tooltips. Scrollbars retain their thin width with a lighter, contrasting thumb.
+  A blue search surface, cyan border and light selected row distinguish the popup
+  from the conversation. Supplied Spotify covers appear beside the song metadata;
+  a missing or failed image retains a musical placeholder. At most two image
+  downloads run together, with a 24-image cache and the same URL/decode bounds as
+  current-track covers. Changing the query cancels and invalidates old thumbnails.
 - Send sits ten pixels above the panel bottom. Short outcome/error notices appear
   for six seconds over the transcript, without reserving an empty footer or
   moving the composer, button or results.
 - The DJ window and its controls use a 48-pixel cursor. Releasing the stage restores
   the previous window cursor; the desktop cursor setting and other apps retain
   their own size.
+  Playback enable/disable transitions refresh the actual native cursor after Qt
+  finishes the transition, including while the pointer stays over the button.
+  The private Xvfb regression checks the displayed XFixes cursor's size and alpha,
+  rather than relying only on Qt's cached cursor property.
 - **F11** toggles qtra fullscreen. In native Spotify, plain **F11** toggles only its
   focused window; Caps/Num Lock variants work too. Modified F11 and other apps
   retain their own behavior. This does not switch to qtra or affect playback.
 - The current-track card includes its supplied album cover. Up to four upcoming
-  titles/artists appear in the existing bottom strip, without moving captions or
-  the guest controls. Pending requests are labelled as waiting for the DJ.
+  titles/artists appear in a larger fixed bottom strip. Native typography is
+  centralized in `UiMetrics`: 29px body, 26px secondary, 24px small text and 34px
+  icons at the target desktop size; painted elements follow the free pane's scale.
+  The larger QR and request heading align with the current-track heading. Caption,
+  photo-label and queue bands remain separate and fixed; guest controls do not
+  move. Pending requests are labelled as waiting for the DJ.
 - The visible playback button reports the observed state and accepts one explicit
-  pause/resume click. It is disabled for a disconnected, stale, buffering or invalid
+  pause/resume click or **Ctrl+P**. Its observed play/pause label stays visible while
+  a smaller separate line reports verification. It is disabled for a disconnected, stale, buffering or invalid
   clock, missing occurrence/device, unavailable private local control, or an
   in-flight request. The client does not retry or toggle an uncertain command.
   The current-track progress bar also holds its last accepted position on an
@@ -212,9 +268,9 @@ The service alternates `scene.audioStyle` between `city` and `waterfall` every
 ten minutes. Palette and energy changes retain the current act's timer. Book
 photos rotate independently about every 105 seconds; curated visual refreshes
 follow the guests' mood and requests.
-The current party mode has `bookEnabled:false`, following the guests' request
-for procedural visuals without photographs. Photo rotation remains available
-when the service setting is explicitly enabled again.
+`bookEnabled:false` suppresses photographs for a procedural-only act. The morning
+direction allows occasional curated photographs again; the runtime switch and
+current audience request govern that choice rather than a fixed taste in code.
 
 `scene.graphicsScale` defaults to 1. It scales the robot fleet and delivered
 records immediately; 1.5 makes them fifty percent larger. The stage reports the
@@ -325,6 +381,9 @@ It also writes `native-artwork-queue.png` from the cover/control fixture. The
 private tests cover stale artwork, cache/response bounds, separate durable/read
 marks, explicit attributed playback, no retry after uncertain dispatch, and a
 delayed canonical HTTP reply racing a newer state file.
+The follow-up fixtures also read actual XFixes cursor pixels through a stationary
+click/busy/disabled transition, exercise Ctrl+P/Ctrl+K, reject stale exact-draft
+intent cues, expire unchanged LLM leases and cancel stale result thumbnails.
 `python3 -m unittest discover -s tests -p test_window_toggle.py -v` runs the
 separate private Tab/F11 lifecycle fixture.
 
