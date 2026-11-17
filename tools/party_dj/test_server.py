@@ -135,6 +135,71 @@ class PartyTests(unittest.TestCase):
         self.party._refresh()
         self.assertEqual(self.row()['status'], 'queued')
 
+    def removed_request(self):
+        self.queued_request()
+        occurrence = self.client.queue[0].copy()
+        self.client.queue = []
+        self.party._refresh()
+        self.stamp += 60000
+        self.party._refresh()
+        self.assertEqual(self.row()['status'], 'removed')
+        return occurrence
+
+    def test_exact_queue_occurrence_restores_a_removed_request_without_resending(self):
+        occurrence = self.removed_request()
+        self.client.queue = [occurrence]
+        self.party._refresh()
+        self.assertEqual(self.row()['status'], 'queued')
+        queued = next(item for item in self.party.snapshot()['queue'] if item.get('uid') == occurrence['uid'])
+        self.assertEqual(queued['id'], 'request-a')
+        self.assertEqual(queued['requestedBy'], 'Test guest')
+        self.party._refresh()
+        self.party._dispatch()
+        self.assertEqual(len(self.client.enqueue_calls), 1)
+        restored = self.party.db.execute("SELECT payload FROM events WHERE kind='queue_restored'").fetchall()
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(json.loads(restored[0][0])['uid'], occurrence['uid'])
+
+    def test_removed_request_recovers_when_its_relinked_occurrence_is_now_playing(self):
+        occurrence = self.removed_request()
+        self.finish_relinked_request(occurrence['uid'])
+        self.assertEqual(len(self.client.enqueue_calls), 1)
+
+    def test_removed_request_is_not_restored_by_uri_without_its_exact_uid(self):
+        self.removed_request()
+        for candidate in ({**track(TRACK_A), 'uid': 'new-occurrence'}, track(TRACK_A)):
+            self.client.queue = [candidate]
+            self.party._refresh()
+            self.assertEqual(self.row()['status'], 'removed')
+            self.assertNotEqual(self.party.snapshot()['queue'][0]['id'], 'request-a')
+        self.assertEqual(self.party.db.execute("SELECT COUNT(*) FROM events WHERE kind='queue_restored'").fetchone()[0], 0)
+
+    def test_restored_queue_uid_does_not_claim_an_untagged_current_repeat(self):
+        occurrence = self.removed_request()
+        self.client.queue = [occurrence]
+        self.client.current = {**track(TRACK_A), 'playing': True}
+        for unused in range(2):
+            self.party._refresh()
+            self.assertEqual(self.row()['status'], 'queued')
+            self.assertNotIn('requestId', self.party.snapshot()['nowPlaying'])
+            self.assertEqual(self.party.snapshot()['queue'][0]['id'], 'request-a')
+
+    def test_restored_and_rerequested_occurrences_keep_separate_queue_metadata(self):
+        first = self.removed_request()
+        self.request('request-repeat')
+        self.party._dispatch()
+        self.party._refresh()
+        second = self.client.queue[0].copy()
+        self.assertNotEqual(first['uid'], second['uid'])
+        self.client.queue = [first, second]
+        self.party._refresh()
+        queue = self.party.snapshot()['queue']
+        self.assertEqual([(item['uid'], item['id']) for item in queue],
+                         [(first['uid'], 'request-a'), (second['uid'], 'request-repeat')])
+        self.assertTrue(all(item['requestedBy'] == 'Test guest' for item in queue))
+        self.party._dispatch()
+        self.assertEqual(len(self.client.enqueue_calls), 2)
+
     def test_incomplete_queue_observations_do_not_remove_a_request(self):
         self.queued_request()
         self.client.queue = []

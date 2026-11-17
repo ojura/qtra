@@ -18,13 +18,14 @@ The command reuses the running service and qtra host. Its JSON result gives the
 guest URL, service status and native module IDs. Phones must be on a network that
 can reach the laptop. Scan the QR on the display, or open the printed URL.
 
-On the laptop, press **R** or click **Zatraži pjesmu** for the native search and
-chat panel. The bottom Magic box accepts song searches or messages. Selecting a
-song turns that same box into an optional dedication; Cancel restores the search.
-Enter sends, and Shift+Enter adds a line. The labelled button also sends. The panel uses
-23-pixel text and keeps its result area and composer at fixed sizes.
-**Escape** closes that panel, then leaves fullscreen on the next
-press. **F11** toggles fullscreen. A name and song dedication are optional.
+The laptop keeps its 600-pixel search and chat sidebar open, with 29-pixel text.
+Press **R** to focus the bottom Magic box, which accepts song searches or messages.
+Suggestions float over the conversation without moving it or the composer.
+Selecting a song turns that same box into an optional dedication; Cancel restores
+the search. Enter sends, and Shift+Enter adds a line. The labelled button also
+sends. **Escape** leaves the panel and fullscreen unchanged; **F11** toggles
+fullscreen. A name and song dedication are optional. Read receipts use a grey
+check, and an orange dot identifies a message the DJ is actively handling.
 
 A nonempty dedication is also spoken briefly in Croatian as its requested song
 starts. The local robot voice is prepared in advance; Spotify keeps playing and
@@ -262,7 +263,10 @@ the original requested URI. A failure known to occur before dispatch returns the
 `pending`. A connection loss during a write produces `uncertain`; the service
 reconciles it against the actual Spotify queue instead of dispatching it twice.
 An item removed in Spotify is released after repeated complete queue observations
-and a ten-second grace period. It can then be requested again.
+and a ten-second grace period. It can then be requested again. If Spotify later
+shows that exact stored queue UID again, the original request returns to `queued`
+or `playing` and emits `queue_restored`; no new copy is dispatched. A matching song
+URI with a different or missing UID does not restore a removed request.
 
 If an uncertain item remains absent, inspect the native Spotify queue and the
 service log. The interface keeps its checking status so the DJ can resolve the

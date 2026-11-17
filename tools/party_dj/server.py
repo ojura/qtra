@@ -241,8 +241,9 @@ class Party:
     def snapshot(self):
         with self.lock:
             rows = self.db.execute("SELECT * FROM requests WHERE status NOT IN ('played','removed') ORDER BY created_at LIMIT 100").fetchall()
-            own = {r['uri']: self._request_dict(r) for r in rows}
-            own_by_uid = {item['uid']: item for item in own.values() if item.get('uid')}
+            requests = [self._request_dict(r) for r in rows]
+            own = {item['uri']: item for item in requests}
+            own_by_uid = {item['uid']: item for item in requests if item.get('uid')}
             queue = []
             seen = set()
             for item in self.playback.get('queue', []):
@@ -567,10 +568,16 @@ class Party:
                 if uri and current_key != self.last_track:
                     self.last_track = current_key
                     self._event('track', current)
-                for pending in self.db.execute("SELECT * FROM requests WHERE status IN ('queued','uncertain','playing')").fetchall():
+                for pending in self.db.execute("SELECT * FROM requests WHERE status IN ('queued','uncertain','playing','removed')").fetchall():
                     rid = pending['id']
                     track = json.loads(pending['track'])
                     uid = track.get('uid')
+                    restoring = pending['status'] == 'removed'
+                    # A temporary Connect queue omission can outlast the removal
+                    # grace. Positive evidence of the exact same occurrence
+                    # restores its request without dispatching another copy.
+                    if restoring and not (uid and (uid in by_uid or (uri and uid == current.get('uid')))):
+                        continue
                     # Spotify may relink a catalogue URI when a track starts.
                     # Its queue UID identifies the same requested occurrence.
                     observed = by_uid.get(uid) if uid else by_uri.get(pending['uri'])
@@ -581,7 +588,13 @@ class Party:
                     if not uid and observed and observed.get('uid'):
                         uid = track['uid'] = observed['uid']
                         self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), rid))
-                    is_current = bool(uri) and (uid == current.get('uid') if uid and current.get('uid') else pending['uri'] == uri)
+                    if uid and current.get('uid'):
+                        is_current = bool(uri) and uid == current['uid']
+                    else:
+                        # An exact occurrence still in the queue outranks a
+                        # URI-only current-track observation of the same song.
+                        is_current = (bool(uri) and pending['uri'] == uri and not restoring
+                                      and not (uid and uid in by_uid))
                     if is_current:
                         if not uid and current.get('uid'):
                             track['uid'] = current['uid']
@@ -592,7 +605,7 @@ class Party:
                     elif pending['status'] == 'playing' and uri:
                         self.db.execute("UPDATE requests SET status='played',updated_at=? WHERE id=?", (now_ms(), rid))
                     elif observed:
-                        if pending['status'] == 'uncertain':
+                        if pending['status'] in ('uncertain', 'removed'):
                             self.db.execute("UPDATE requests SET status='queued',error=NULL,updated_at=? WHERE id=?", (now_ms(), rid))
                         self.missing_requests.pop(rid, None)
                     elif pending['status'] == 'queued' and status.get('explicitQueueComplete'):
@@ -602,6 +615,9 @@ class Party:
                             self.db.execute("UPDATE requests SET status='removed',updated_at=? WHERE id=?", (now_ms(), rid))
                             self.missing_requests.pop(rid, None)
                             self._event('removed', {'id': rid, 'uri': pending['uri']})
+                    if restoring:
+                        self._event('queue_restored', {'id': rid, 'uri': pending['uri'], 'uid': uid,
+                                                      'status': 'playing' if is_current else 'queued'})
                 self.db.commit()
                 if self.audio:
                     requests = [self._request_dict(r) for r in self.db.execute(
