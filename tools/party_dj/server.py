@@ -413,6 +413,8 @@ class Party:
                     'palette': clean(body.get('palette', self.scene['palette']), 30)})
                 if 'effect' in body:
                     self.scene['effect'] = int(body['effect'])
+                if 'graphicsScale' in body:
+                    self.scene['graphicsScale'] = max(.75, min(2, float(body['graphicsScale'])))
                 self.scene_manual_until = now_ms() + int(body.get('holdSeconds', 600)) * 1000
                 self.set_setting('scene', self.scene)
                 self._event('scene', self.scene)
