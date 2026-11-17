@@ -104,6 +104,30 @@ QFont uiFont(double scale, int pixels = UiMetrics::body, bool bold = false)
 {
     return stageFont(pixels * scale / UiMetrics::reference, bold);
 }
+enum class GuestShortcut : std::size_t { Spotify, Playback, Search, Previous, Next, Count };
+struct ShortcutSpec { const char* objectName; const char* key; const char* label; const char* alias; };
+constexpr std::array<ShortcutSpec, static_cast<std::size_t>(GuestShortcut::Count)> guestShortcuts{{
+    {"partySpotifyAction", "Tab", "Spotify", ""},
+    {"partyPlaybackAction", "Ctrl+P", "Pauza", ""},
+    {"partyRequestAction", "Ctrl+K", "Traži", "R"},
+    {"partyPreviousAction", "Ctrl+B", "Natrag", ""},
+    {"partyNextAction", "Ctrl+N", "Dalje", ""}
+}};
+const ShortcutSpec& shortcutSpec(GuestShortcut kind) { return guestShortcuts[static_cast<std::size_t>(kind)]; }
+QString shortcutKey(GuestShortcut kind)
+{
+    return QKeySequence(QString::fromUtf8(shortcutSpec(kind).key)).toString(QKeySequence::NativeText);
+}
+QString controlStyle(double scale, int pixels = UiMetrics::body)
+{
+    return QStringLiteral("QPushButton { font:600 %1px 'DejaVu Sans'; color:#ddfff4; background:#1b4a44; border:1px solid #6bc6ab; border-radius:%2px; padding:%3px; } QPushButton:disabled { color:#aab5c5; background:#263141; border-color:#536174; } QPushButton:hover:enabled { background:#276258; }")
+        .arg(uiFont(scale, pixels).pixelSize()).arg(std::max(3, qRound(6 * scale))).arg(std::max(1, qRound(2 * scale)));
+}
+double requestCardWidth(double width, double scale)
+{
+    const double infoWidth = std::min(width * .53, 690 * scale);
+    return std::min(400 * scale, std::max(120 * scale, width - infoWidth - 102 * scale));
+}
 QString coverUrl(const QJsonObject& track)
 {
     QString wanted = text(track, "artUrl");
@@ -275,7 +299,7 @@ public:
             "QDockWidget::title { background:#202a3c; padding:15px; }"
             "QWidget#partyDeskBody { background:#101727; }"
             "QWidget#partySuggestions { background:#183e56; border:2px solid #85e8f2; border-radius:10px; }"
-            "QLabel { color:#c1cce0; } QLabel#partyDeskHeading { color:#ff9a58; font-size:30px; font-weight:600; }"
+            "QLabel { color:#c1cce0; }"
             "QLineEdit,QPlainTextEdit,QListWidget,QTextBrowser,QLabel#partySuggestionHint,QWidget#partySelectedSong { background:#080f1d; color:#f7f2ea; border:1px solid #344158; border-radius:10px; padding:11px; }"
             "QListWidget#partyResults,QLabel#partySuggestionHint,QWidget#partySelectedSong { background:#183e56; color:#f3fcff; border:0; }"
             "QLineEdit:focus,QPlainTextEdit:focus { border-color:#7de4ed; }"
@@ -299,9 +323,6 @@ public:
         setTitleBarWidget(titleBar); presenceClock_.start(); updateDjPresence();
         auto* body = new QWidget(this); body->setObjectName(QStringLiteral("partyDeskBody"));
         auto* layout = new QVBoxLayout(body); layout->setContentsMargins(21, 19, 21, 10); layout->setSpacing(11);
-        auto* heading = new QLabel(QStringLiteral("<b>Tab</b> Spotify ↔ DJ<br><b>Ctrl+P</b> Pauza &nbsp; <b>Ctrl+K</b> Traži"), body);
-        heading->setObjectName(QStringLiteral("partyDeskHeading")); heading->setTextFormat(Qt::RichText);
-        heading->setWordWrap(true); heading->setFixedHeight(84); layout->addWidget(heading);
         name_ = new QLineEdit(body); name_->setObjectName(QStringLiteral("partyName"));
         name_->setPlaceholderText(QStringLiteral("Tvoje ime (po želji)")); name_->setMaxLength(48);
         QSettings settings(QStringLiteral("qtra"), QStringLiteral("party"));
@@ -556,7 +577,7 @@ protected:
         if (event->type() == QEvent::KeyPress) {
             auto* key = static_cast<QKeyEvent*>(event);
             auto* toggle = window()->findChild<QAction*>(QStringLiteral("partySpotifyAction"));
-            if (key->key() == Qt::Key_Tab && key->modifiers() == Qt::NoModifier && toggle && toggle->isEnabled()) {
+            if (toggle && toggle->isEnabled() && toggle->shortcut().matches(QKeySequence(key->keyCombination())) == QKeySequence::ExactMatch) {
                 if (!key->isAutoRepeat()) toggle->trigger();
                 return true;
             }
@@ -712,7 +733,8 @@ private:
         const bool song = !selectedTrack_.isEmpty();
         message_->setPlaceholderText(song ? QStringLiteral("Posveta uz pjesmu (po želji)…")
                                          : QStringLiteral("Magic box: pjesma, izvođač ili poruka DJ-u…"));
-        magicHelp_->setText(QStringLiteral("<b style=\"color:#7de4ed\">Tab: qtra ↔ Spotify</b><br>Shift+Enter: novi red · Esc: vrati"));
+        magicHelp_->setText(QStringLiteral("<b style=\"color:#7de4ed\">%1: qtra ↔ Spotify</b><br>Shift+Enter: novi red · Esc: vrati")
+                           .arg(shortcutKey(GuestShortcut::Spotify).toHtmlEscaped()));
         send_->setText(song ? QStringLiteral("Pošalji pjesmu (Enter)") : QStringLiteral("Pošalji poruku (Enter)"));
         const bool busy = requestBusy_ || messageBusy_ || recallBusy_;
         send_->setEnabled(!busy && (song || !message_->toPlainText().trimmed().isEmpty()));
@@ -744,7 +766,7 @@ private:
             { const QSignalBlocker block(results_); results_->clear(); }
             results_->setEnabled(true); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
             searchDelay_.stop();
-            suggestionHint(QStringLiteral("Poruku možeš odmah poslati DJ-u. Ctrl+K traži pjesmu."), QStringLiteral("empty"));
+            suggestionHint(QStringLiteral("Poruku možeš odmah poslati DJ-u. %1 traži pjesmu.").arg(shortcutKey(GuestShortcut::Search)), QStringLiteral("empty"));
         } else {
             // Keep the current page and rows still while the query changes.
             // Stale choices stay visible but cannot be selected until replaced.
@@ -1376,20 +1398,14 @@ public:
         playbackStatus_ = new QLabel(cube_); playbackStatus_->setObjectName(QStringLiteral("partyPlaybackStatus"));
         playbackStatus_->setAttribute(Qt::WA_TransparentForMouseEvents);
         playbackStatus_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        playbackAction_ = new QAction(QStringLiteral("Reprodukcija · Ctrl+P"), this);
-        playbackAction_->setObjectName(QStringLiteral("partyPlaybackAction"));
-        playbackAction_->setShortcut(QKeySequence(QStringLiteral("Ctrl+P"))); playbackAction_->setAutoRepeat(false);
-        window->addAction(playbackAction_);
-        connect(playbackAction_, &QAction::triggered, this, [this] { setPlaybackPaused(); });
+        playbackAction_ = createShortcut(GuestShortcut::Playback, [this] { setPlaybackPaused(); });
+        previousAction_ = createShortcut(GuestShortcut::Previous, [this] { navigatePlayback(QStringLiteral("previous")); });
+        nextAction_ = createShortcut(GuestShortcut::Next, [this] { navigatePlayback(QStringLiteral("next")); });
         if (auto* main = qobject_cast<QMainWindow*>(window)) {
             menuWasVisible_ = main->menuBar()->isVisible(); statusWasVisible_ = main->statusBar()->isVisible();
             main->menuBar()->hide(); main->statusBar()->hide();
         }
-        requestAction_ = new QAction(QStringLiteral("Zatraži pjesmu"), this);
-        requestAction_->setObjectName(QStringLiteral("partyRequestAction"));
-        requestAction_->setShortcuts({QKeySequence(QStringLiteral("R")), QKeySequence(QStringLiteral("Ctrl+K"))});
-        window->addAction(requestAction_);
-        connect(requestAction_, &QAction::triggered, this, [this] { openRequests(); });
+        requestAction_ = createShortcut(GuestShortcut::Search, [this] { openRequests(); });
         fullAction_ = new QAction(QStringLiteral("Party fullscreen"), this);
         fullAction_->setObjectName(QStringLiteral("partyFullscreenAction"));
         fullAction_->setShortcut(QKeySequence(QStringLiteral("F11")));
@@ -1403,11 +1419,7 @@ public:
         escapeAction_->setShortcut(QKeySequence(Qt::Key_Escape));
         window->addAction(escapeAction_);
         connect(escapeAction_, &QAction::triggered, this, [this] { if (desk_) desk_->recallLatest(); });
-        spotifyAction_ = new QAction(QStringLiteral("Spotify · Tab"), this);
-        spotifyAction_->setObjectName(QStringLiteral("partySpotifyAction"));
-        spotifyAction_->setShortcut(QKeySequence(Qt::Key_Tab)); spotifyAction_->setAutoRepeat(false);
-        window->addAction(spotifyAction_);
-        connect(spotifyAction_, &QAction::triggered, this, [this] { showSpotify(); });
+        spotifyAction_ = createShortcut(GuestShortcut::Spotify, [this] { showSpotify(); });
         returnAction_ = new QAction(this); returnAction_->setObjectName(QStringLiteral("partyReturnAction"));
         window->addAction(returnAction_);
         connect(returnAction_, &QAction::triggered, this, [this] {
@@ -1417,6 +1429,13 @@ public:
                 else if (desk_) if (auto* composer = desk_->findChild<QPlainTextEdit*>(QStringLiteral("partyMessage"))) composer->setFocus();
             });
         });
+        for (std::size_t i = 0; i < guestShortcuts.size(); ++i) {
+            auto* action = shortcutAction(static_cast<GuestShortcut>(i));
+            auto* button = new QPushButton(cube_); shortcutButtons_[i] = button;
+            button->setObjectName(QString::fromUtf8(guestShortcuts[i].objectName).replace(QStringLiteral("Action"), QStringLiteral("ShortcutButton")));
+            button->setFocusPolicy(Qt::NoFocus); button->setCursor(djCursor()); button->installEventFilter(this);
+            connect(button, &QPushButton::clicked, action, &QAction::trigger);
+        }
         configureWindowToggle(QJsonObject::fromVariantMap(window->property("partyWindowToggleConfig").toMap()));
         window->setWindowTitle(QStringLiteral("LARICS / LYRICS · after hours"));
         setStateFile(stateFile);
@@ -1429,6 +1448,7 @@ public:
             for (auto* reply : manager->findChildren<QNetworkReply*>()) { disconnect(reply, nullptr, this, nullptr); reply->abort(); }
         delete playbackButton_;
         delete playbackStatus_;
+        for (const auto& button : shortcutButtons_) delete button.data();
         delete desk_.data();
         if (cube_) {
             for (auto it = effectBefore_.begin(); it != effectBefore_.end(); ++it) {
@@ -1446,7 +1466,7 @@ public:
             if (auto* main = qobject_cast<QMainWindow*>(cube_->window())) {
                 main->menuBar()->setVisible(menuWasVisible_); main->statusBar()->setVisible(statusWasVisible_);
             }
-            for (QAction* a : {requestAction_, fullAction_, escapeAction_, spotifyAction_, returnAction_, playbackAction_}) cube_->window()->removeAction(a);
+            for (QAction* a : {requestAction_, fullAction_, escapeAction_, spotifyAction_, returnAction_, playbackAction_, previousAction_, nextAction_}) cube_->window()->removeAction(a);
         }
     }
     void setStateFile(const QString& file) { stateFile_ = file; bytes_.clear(); readState(); }
@@ -1542,6 +1562,17 @@ public:
             {QStringLiteral("label"), playbackButton_->text()}, {QStringLiteral("verification"), playbackStatus_->text()},
             {QStringLiteral("cursorPixels"), playbackButton_->cursor().pixmap().width()},
             {QStringLiteral("bounds"), QJsonArray{r.x(), r.y(), r.width(), r.height()}}});
+        QJsonArray shortcutStatus;
+        for (std::size_t i = 0; i < guestShortcuts.size(); ++i) {
+            const auto kind = static_cast<GuestShortcut>(i); const auto* action = shortcutAction(kind);
+            const auto* button = shortcutButtons_[i].data(); const QRect bounds = button ? button->geometry() : QRect();
+            shortcutStatus.append(QJsonObject{{QStringLiteral("action"), action->objectName()},
+                {QStringLiteral("key"), action->shortcut().toString(QKeySequence::NativeText)},
+                {QStringLiteral("label"), button ? button->text() : QString()}, {QStringLiteral("enabled"), action->isEnabled()},
+                {QStringLiteral("autoRepeat"), action->autoRepeat()},
+                {QStringLiteral("bounds"), QJsonArray{bounds.x(), bounds.y(), bounds.width(), bounds.height()}}});
+        }
+        result.insert(QStringLiteral("shortcutControls"), shortcutStatus);
         result.insert(QStringLiteral("queuePreview"), queuePreview_);
         const auto bounds = [](const QRectF& r) { return QJsonArray{r.x(), r.y(), r.width(), r.height()}; };
         result.insert(QStringLiteral("requestCardBounds"), bounds(requestRect_));
@@ -1606,18 +1637,26 @@ public:
     }
 protected:
     void showEvent(QShowEvent* e) override { frame_.start(); QWidget::showEvent(e); updatePlaybackControl(); }
-    void hideEvent(QHideEvent* e) override { frame_.stop(); if (playbackButton_) playbackButton_->hide(); if (playbackStatus_) playbackStatus_->hide(); QWidget::hideEvent(e); }
+    void hideEvent(QHideEvent* e) override {
+        frame_.stop(); if (playbackButton_) playbackButton_->hide(); if (playbackStatus_) playbackStatus_->hide();
+        for (const auto& button : shortcutButtons_) if (button) button->hide();
+        QWidget::hideEvent(e);
+    }
     bool eventFilter(QObject* o, QEvent* e) override
     {
-        if (o == playbackButton_ && (e->type() == QEvent::EnabledChange || e->type() == QEvent::MouseButtonRelease
+        const bool controlEvent = o == playbackButton_ || std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), [o](const auto& button) { return o == button.data(); });
+        if (controlEvent && (e->type() == QEvent::EnabledChange || e->type() == QEvent::MouseButtonRelease
                                     || e->type() == QEvent::Enter || e->type() == QEvent::StyleChange)) {
             if (!cursorRefreshQueued_) {
                 cursorRefreshQueued_ = true;
                 QTimer::singleShot(0, this, [this] {
                     cursorRefreshQueued_ = false;
-                    if (!cube_ || !playbackButton_ || !playbackButton_->isVisible()) return;
+                    if (!cube_) return;
                     const QPoint pointer = QCursor::pos();
-                    if (!playbackButton_->rect().contains(playbackButton_->mapFromGlobal(pointer))) return;
+                    const auto underPointer = [&pointer](const auto& button) {
+                        return button && button->isVisible() && button->rect().contains(button->mapFromGlobal(pointer));
+                    };
+                    if (!underPointer(playbackButton_) && !std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), underPointer)) return;
                     auto* hovered = QApplication::widgetAt(pointer);
                     if (!hovered || hovered->window() != cube_->window()) return;
                     // Qt may apply a system cursor when disabling the child,
@@ -1723,7 +1762,7 @@ protected:
                 p.setBrush(orange); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, (infoWidth - 34 * u) * progress, 3 * u), 1.5, 1.5);
             }
 
-            const double requestWidth = std::min(400 * u, std::max(120 * u, w - infoWidth - 3 * margin));
+            const double requestWidth = requestCardWidth(w, u);
             requestRect_ = QRectF(w - margin - requestWidth, playing.y(), requestWidth, 180 * u);
             const bool wideQr = requestWidth >= 300 * u;
             const double qrSide = std::min((wideQr ? 152 : 116) * u, requestWidth - 28 * u);
@@ -1755,7 +1794,8 @@ protected:
             }
             p.setFont(uiFont(u, UiMetrics::secondary, true)); p.setPen(cyan);
             p.drawText(QRectF(requestRect_.x() + (wideQr ? 16 : 8) * u, requestRect_.y() + (wideQr ? 123 : 158) * u, labelWidth, 24 * u),
-                       wideQr ? Qt::AlignLeft | Qt::AlignVCenter : Qt::AlignCenter, wideQr ? QStringLiteral("Ctrl+K · zatraži") : QStringLiteral("Ctrl+K"));
+                       wideQr ? Qt::AlignLeft | Qt::AlignVCenter : Qt::AlignCenter,
+                       shortcutKey(GuestShortcut::Search) + (wideQr ? QStringLiteral(" · zatraži") : QString()));
             const QString guestUrl = text(state_, "requestUrl");
             if (!guestUrl.isEmpty() && wideQr) {
                 p.setFont(uiFont(u, UiMetrics::small)); p.setPen(QColor("#b2c5df"));
@@ -1820,6 +1860,28 @@ protected:
                    moodLabel + QStringLiteral("  ·  F11"));
     }
 private:
+    QAction* createShortcut(GuestShortcut kind, std::function<void()> triggered)
+    {
+        const auto& spec = shortcutSpec(kind);
+        auto* action = new QAction(QString::fromUtf8(spec.label), this);
+        action->setObjectName(QString::fromUtf8(spec.objectName)); action->setAutoRepeat(false);
+        QList<QKeySequence> bindings{QKeySequence(QString::fromUtf8(spec.key))};
+        if (*spec.alias) bindings.append(QKeySequence(QString::fromUtf8(spec.alias)));
+        action->setShortcuts(bindings); cube_->window()->addAction(action);
+        connect(action, &QAction::triggered, this, std::move(triggered));
+        return action;
+    }
+    QAction* shortcutAction(GuestShortcut kind) const
+    {
+        switch (kind) {
+        case GuestShortcut::Spotify: return spotifyAction_;
+        case GuestShortcut::Playback: return playbackAction_;
+        case GuestShortcut::Search: return requestAction_;
+        case GuestShortcut::Previous: return previousAction_;
+        case GuestShortcut::Next: return nextAction_;
+        default: return nullptr;
+        }
+    }
     double trackProgress() const
     {
         if (!trackClockKnown_) return 0;
@@ -1893,17 +1955,30 @@ private:
         const auto control = playbackView();
         playbackButton_->setEnabled(control.enabled);
         playbackAction_->setEnabled(control.enabled);
+        playbackAction_->setText(control.known && control.paused ? QStringLiteral("Nastavi") : QString::fromUtf8(shortcutSpec(GuestShortcut::Playback).label));
+        previousAction_->setEnabled(control.enabled); nextAction_->setEnabled(control.enabled);
         playbackButton_->setText(!control.known ? QStringLiteral("Reprodukcija")
             : control.paused ? QStringLiteral("Pauzirano  ▶") : QStringLiteral("Svira  Ⅱ"));
         playbackButton_->setToolTip(control.enabled ? (control.paused ? QStringLiteral("Nastavi ovu pjesmu na istom uređaju.")
-            : QStringLiteral("Pauziraj ovu pjesmu na istom uređaju.")) + QStringLiteral("  Ctrl+P") : control.reason);
-        playbackButton_->setStyleSheet(QStringLiteral("QPushButton { font:600 %1px 'DejaVu Sans'; color:#ddfff4; background:#1b4a44; border:1px solid #6bc6ab; border-radius:9px; padding:4px; } QPushButton:disabled { color:#aab5c5; background:#263141; border-color:#536174; } QPushButton:hover:enabled { background:#276258; }").arg(uiFont(u).pixelSize()));
+            : QStringLiteral("Pauziraj ovu pjesmu na istom uređaju.")) + QStringLiteral("  ") + shortcutKey(GuestShortcut::Playback) : control.reason);
+        playbackButton_->setStyleSheet(controlStyle(u));
         playbackStatus_->setFont(uiFont(u, UiMetrics::small));
         playbackStatus_->setStyleSheet(QStringLiteral("color:#9eafc2; background:transparent;"));
         playbackStatus_->setText(playbackBusy_ ? QStringLiteral("Provjeravam…") : control.enabled ? QString() : QStringLiteral("Čekam potvrđeno stanje"));
         playbackStatus_->setToolTip(control.reason);
         playbackStatus_->setVisible(isVisible()); playbackStatus_->raise();
         playbackButton_->setVisible(isVisible()); playbackButton_->raise();
+        const double rowWidth = requestCardWidth(width(), u), rowX = width() - 34 * u - rowWidth;
+        const double gap = 6 * u, cell = (rowWidth - gap * (guestShortcuts.size() - 1)) / guestShortcuts.size();
+        for (std::size_t i = 0; i < guestShortcuts.size(); ++i) {
+            auto* button = shortcutButtons_[i].data(); if (!button) continue;
+            const auto kind = static_cast<GuestShortcut>(i); auto* action = shortcutAction(kind);
+            const QString label = action->text();
+            button->setText(shortcutKey(kind) + QChar('\n') + label); button->setEnabled(action->isEnabled());
+            button->setToolTip(action->isEnabled() ? action->text() + QStringLiteral(" · ") + shortcutKey(kind) : control.reason);
+            button->setGeometry(qRound(rowX + i * (cell + gap)), qRound(27 * u), qRound(cell), qRound(43 * u));
+            button->setStyleSheet(controlStyle(u, UiMetrics::small)); button->setVisible(isVisible()); button->raise();
+        }
     }
     void refreshPlaybackState()
     {
@@ -1924,6 +1999,15 @@ private:
     }
     void setPlaybackPaused()
     {
+        dispatchPlayback(QString());
+    }
+    void navigatePlayback(const QString& direction)
+    {
+        if (direction != QStringLiteral("next") && direction != QStringLiteral("previous")) return;
+        dispatchPlayback(direction);
+    }
+    void dispatchPlayback(const QString& direction)
+    {
         const auto control = playbackView(); if (!control.enabled) return;
         QFile file(QFileInfo(stateFile_).dir().filePath(QStringLiteral("admin-token")));
         if (!file.open(QIODevice::ReadOnly)) { if (desk_) desk_->showNotice(QStringLiteral("Privatna DJ kontrola nije dostupna.")); return; }
@@ -1931,29 +2015,66 @@ private:
         if (token.isEmpty() || token.size() > 4096 || token.contains('\n') || token.contains('\r')) {
             if (desk_) desk_->showNotice(QStringLiteral("Privatna DJ kontrola nije dostupna.")); return;
         }
-        const QJsonObject data{{QStringLiteral("paused"), !control.paused}, {QStringLiteral("expectedCurrentUid"), control.uid},
-                              {QStringLiteral("expectedDeviceId"), control.device}, {QStringLiteral("source"), QStringLiteral("native")}};
-        QNetworkRequest request(QUrl(requestUrl()).resolved(QUrl(QStringLiteral("/api/admin/playback"))));
+        QJsonObject data{{QStringLiteral("expectedCurrentUid"), control.uid}, {QStringLiteral("expectedDeviceId"), control.device},
+                         {QStringLiteral("source"), QStringLiteral("native")}};
+        const bool navigation = !direction.isEmpty();
+        if (navigation) data.insert(QStringLiteral("direction"), direction);
+        else data.insert(QStringLiteral("paused"), !control.paused);
+        QNetworkRequest request(QUrl(requestUrl()).resolved(QUrl(navigation ? QStringLiteral("/api/admin/skip") : QStringLiteral("/api/admin/playback"))));
         request.setRawHeader("Authorization", "Bearer " + token); request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
         request.setRawHeader("X-DJ-Operator", "qtra-native");
         request.setTransferTimeout(12000); request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
         playbackBusy_ = true; const qint64 started = QDateTime::currentMSecsSinceEpoch(); updatePlaybackControl();
         auto* reply = controlNetwork_.post(request, QJsonDocument(data).toJson(QJsonDocument::Compact));
-        connect(reply, &QNetworkReply::finished, this, [this, reply, started, desired = !control.paused, uid = control.uid, device = control.device] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, started, direction, desired = !control.paused, uid = control.uid, device = control.device] {
             const auto document = QJsonDocument::fromJson(reply->readAll()); const auto result = document.object();
             const auto observed = result.value(QStringLiteral("status")).toObject();
             const auto actual = observed.value(QStringLiteral("playbackState")).toObject();
             const auto current = observed.value(QStringLiteral("nowPlaying")).toObject();
-            const bool confirmed = reply->error() == QNetworkReply::NoError && result.value(QStringLiteral("ok")).toBool()
-                && text(result, "action") == QStringLiteral("setPaused") && actual.value(QStringLiteral("paused")).isBool()
-                && actual.value(QStringLiteral("paused")).toBool() == desired && text(current, "uid") == uid
-                && text(actual.value(QStringLiteral("device")).toObject(), "id") == device
-                && number(observed, "observedAt", 0) >= started;
+            const bool freshDevice = text(actual.value(QStringLiteral("device")).toObject(), "id") == device
+                && number(observed, "observedAt", 0) >= started && number(observed, "observedAt", 0) <= QDateTime::currentMSecsSinceEpoch();
+            bool confirmed = reply->error() == QNetworkReply::NoError && result.value(QStringLiteral("ok")).toBool() && freshDevice;
+            QString notice;
+            if (direction.isEmpty()) {
+                confirmed = confirmed && text(result, "action") == QStringLiteral("setPaused") && actual.value(QStringLiteral("paused")).isBool()
+                    && actual.value(QStringLiteral("paused")).toBool() == desired && text(current, "uid") == uid;
+                notice = desired ? QStringLiteral("Spotify potvrđuje pauzu.") : QStringLiteral("Spotify potvrđuje reprodukciju.");
+            } else {
+                const QString outcome = text(result, "outcome"), toUid = text(current, "uid");
+                const auto position = current.value(QStringLiteral("progressMs"));
+                const auto before = result.value(QStringLiteral("before")).toObject();
+                const auto beforePosition = before.value(QStringLiteral("positionMs"));
+                const auto beforeBuffering = before.value(QStringLiteral("buffering")), nowBuffering = current.value(QStringLiteral("buffering"));
+                const auto actualBuffering = actual.value(QStringLiteral("buffering"));
+                const double dispatchedAt = number(result, "dispatchedAt", -1), observedAt = number(observed, "observedAt", -1);
+                const bool moved = (outcome == direction) && !toUid.isEmpty() && toUid != uid;
+                const bool restarted = direction == QStringLiteral("previous") && outcome == QStringLiteral("restarted") && toUid == uid
+                    && current.value(QStringLiteral("clockValid")).isBool() && current.value(QStringLiteral("clockValid")).toBool()
+                    && before.value(QStringLiteral("clockValid")).isBool() && before.value(QStringLiteral("clockValid")).toBool()
+                    && text(before, "currentUid") == uid && text(before, "deviceId") == device
+                    && !text(before, "uri").isEmpty() && text(before, "uri") == text(current, "uri")
+                    && number(before, "observedAt", -1) >= started && number(before, "observedAt", -1) <= dispatchedAt
+                    && dispatchedAt >= started && observedAt >= dispatchedAt
+                    && beforeBuffering.isBool() && !beforeBuffering.toBool() && nowBuffering.isBool() && !nowBuffering.toBool()
+                    && actualBuffering.isBool() && !actualBuffering.toBool()
+                    && beforePosition.isDouble() && std::isfinite(beforePosition.toDouble())
+                    && position.isDouble() && std::isfinite(position.toDouble()) && position.toDouble() >= 0
+                    && beforePosition.toDouble() - position.toDouble() >= 1000
+                    && position.toDouble() <= std::max(0.0, observedAt - dispatchedAt) + 1000;
+                confirmed = confirmed && text(result, "action") == QStringLiteral("skip") && text(result, "direction") == direction
+                    && result.value(QStringLiteral("changed")).isBool() && result.value(QStringLiteral("changed")).toBool()
+                    && text(result, "fromUid") == uid && text(result, "toUid") == toUid
+                    && text(result.value(QStringLiteral("device")).toObject(), "id") == device && (moved || restarted);
+                notice = restarted ? QStringLiteral("Spotify je vratio pjesmu na početak.")
+                    : direction == QStringLiteral("next") ? QStringLiteral("Spotify je prešao na sljedeću pjesmu.")
+                    : QStringLiteral("Spotify je vratio prethodnu pjesmu.");
+            }
             if (confirmed) {
                 if (desk_ && number(observed, "observedAt", 0) >= number(state_.value(QStringLiteral("spotify")).toObject(), "observedAt", 0))
-                    desk_->showNotice(desired ? QStringLiteral("Spotify potvrđuje pauzu.") : QStringLiteral("Spotify potvrđuje reprodukciju."));
+                    desk_->showNotice(notice);
             } else {
-                const QString error = text(result, "error", reply->errorString());
+                const QString error = text(result, "error", reply->error() == QNetworkReply::NoError
+                    ? QStringLiteral("Spotify još nije potvrdio rezultat.") : reply->errorString());
                 const bool untouched = result.value(QStringLiteral("dispatched")).isBool() && !result.value(QStringLiteral("dispatched")).toBool();
                 if (desk_) desk_->showNotice((untouched ? QStringLiteral("Nije promijenjeno: ") : QStringLiteral("Ishod provjeravam: ")) + error);
             }
@@ -2368,6 +2489,7 @@ private:
     QPointer<QProcess> toggleProcess_;
     QPointer<QPushButton> playbackButton_;
     QPointer<QLabel> playbackStatus_;
+    std::array<QPointer<QPushButton>, static_cast<std::size_t>(GuestShortcut::Count)> shortcutButtons_;
     QNetworkAccessManager artworkNetwork_{this}, controlNetwork_{this};
     QPointer<QNetworkReply> artworkReply_;
     QCache<QString, QImage> artworkCache_{8};
@@ -2391,6 +2513,7 @@ private:
     QElapsedTimer clock_;
     QTimer frame_, poll_;
     QAction *requestAction_ = nullptr, *fullAction_ = nullptr, *escapeAction_ = nullptr, *spotifyAction_ = nullptr, *returnAction_ = nullptr, *playbackAction_ = nullptr;
+    QAction *previousAction_ = nullptr, *nextAction_ = nullptr;
     QRectF requestRect_, qrBounds_, playingBounds_;
     QSet<QString> seenCues_;
     QQueue<Cue> pending_;

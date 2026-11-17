@@ -122,8 +122,12 @@ showing its error; the client never retries that GET automatically.
   Spotify's managed windows; other applications retain their own Tab behavior.
   Closing or relaunching Spotify refreshes those bindings. Switching windows
   leaves the track, queue and volume alone.
-  A permanent shortcut strip near the top shows **Tab**, **Ctrl+P** and **Ctrl+K**.
-  The lower Magic box help also retains its Tab reminder.
+  Matching clickable shortcut controls sit in the main-stage header beside the
+  observed playback button and directly above **Daj pjesmu**. They show **Tab**,
+  **Ctrl+P**, **Ctrl+K**, **Ctrl+B** and **Ctrl+N**. One `guestShortcuts`
+  specification supplies the visible keys, labels and QAction bindings; the
+  header controls share the playback button's style and scale. The lower Magic
+  box help retains its Tab reminder; the sidebar has no separate shortcut block.
 - The native request and chat panel stays open. Click **Zatraži pjesmu · R**, or
   press **R** or **Ctrl+K**, to focus its bottom **Magic box**, which accepts a song, artist, or a
   message to the DJ. Typing shows debounced results above it; **Pošalji poruku (Enter)** always
@@ -229,6 +233,17 @@ showing its error; the client never retries that GET automatically.
   The current-track progress bar also holds its last accepted position on an
   invalid/future clock and caps interpolation at the ten-second observation
   deadline; an invalid compatibility value cannot reset it to zero.
+- **Ctrl+N** selects the next song; **Ctrl+B** uses Spotify's previous action.
+  Depending on the current position and native restrictions, previous either
+  returns to the preceding occurrence or restarts the current song. The matching
+  header buttons invoke the same actions. Playback, next and previous share one
+  fresh-state/UID/device guard and one pending state; keys suppress autorepeat.
+  An uncertain or lost response is refreshed from canonical service state and is
+  never retried. A restart notice requires the returned same-URI/UID/device and
+  valid nonbuffering before/after clocks to demonstrate a rewind near the start.
+  Native navigation posts to `/api/admin/skip` with `direction`, the expected
+  current occurrence/device, `source:native` and the existing private operator
+  header. It changes the display only from the subsequent canonical observation.
 - The QR opens the separate guest page on phones. The native panel uses the
   loopback service URL, independently of the phone-facing address.
 

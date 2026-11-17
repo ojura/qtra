@@ -129,6 +129,41 @@ class Service(BaseHTTPRequestHandler):
             if self.server.search_cancel_reply_gate:
                 self.server.search_cancel_reply_gate.wait(10)
             return self.reply({"searchId": data["searchId"], "cancelRequested": True})
+        if self.path == "/api/admin/skip":
+            self.server.skip_requests.append(data)
+            self.server.skip_operators.append(self.headers.get("X-DJ-Operator"))
+            if self.headers.get("Authorization") != "Bearer private-fixture-token":
+                return self.reply({"error": "Private fixture authentication failed", "dispatched": False})
+            state = copy.deepcopy(self.server.state_snapshot)
+            now, actual = state["nowPlaying"], state["playbackState"]
+            stamp = int(time.time() * 1000)
+            if data.get("expectedCurrentUid") != now.get("uid") or data.get("expectedDeviceId") != actual.get("device", {}).get("id"):
+                return self.reply({"error": "Observed target changed", "dispatched": False})
+            before = {"currentUid": now["uid"], "uri": now.get("uri"), "deviceId": actual["device"]["id"],
+                      "positionMs": now["progressMs"], "observedAt": stamp, "clockValid": True, "buffering": False}
+            # Model the next normal service observation after a rejected command;
+            # the native guard requires post-attempt freshness before reopening.
+            state["spotify"]["observedAt"] = stamp; now["observedAt"] = stamp
+            self.server.state_snapshot = state
+            direction = data["direction"]
+            outcome = "restarted" if direction == "previous" and now["progressMs"] >= 3000 else direction
+            error = self.server.skip_error
+            if not error or error.get("dispatched") is True:
+                self.server.skip_commands.append(direction)
+                if outcome != "restarted":
+                    now.update(uid=f"fixture-{direction}-{len(self.server.skip_commands)}", uri=f"spotify:track:{direction}-{len(self.server.skip_commands)}",
+                               title=f"Original {direction} recording")
+                now.update(progressMs=0, observedAt=stamp, clockValid=True, buffering=False)
+                state["revision"] += 1; state["spotify"]["observedAt"] = stamp
+                self.server.state_snapshot = state
+            result = {"ok": True, "action": "skip", "direction": direction, "changed": True, "outcome": outcome,
+                      "fromUid": before["currentUid"], "toUid": now["uid"], "device": actual["device"], "before": before,
+                      "dispatchedAt": stamp, "status": {"nowPlaying": now, "playbackState": actual, "observedAt": stamp}}
+            if self.server.skip_reply_mutator:
+                self.server.skip_reply_mutator(result)
+            if self.server.skip_reply_gate:
+                self.server.skip_reply_gate.wait(10)
+            return self.reply(error if error else result)
         if self.path == "/api/admin/playback":
             self.server.playback_requests.append(data)
             self.server.playback_operators.append(self.headers.get("X-DJ-Operator"))
@@ -270,6 +305,8 @@ class PartyStage(unittest.TestCase):
         self.server.cover_reply_gate = self.server.playback_reply_gate = None
         self.server.state_reply_gate = None
         self.server.playback_error = None
+        self.server.skip_requests, self.server.skip_commands, self.server.skip_operators = [], [], []
+        self.server.skip_error = self.server.skip_reply_mutator = self.server.skip_reply_gate = None
         self.server.withdrawn_ids, self.server.recall_attempts, self.server.description_posts, self.server.description_polls = [], [], [], []
         self.server.recalled, self.server.descriptions = {}, {}
         self.server.reject_recalls = self.server.lose_recall_replies = 0
@@ -432,6 +469,102 @@ class PartyStage(unittest.TestCase):
         self.eventually(lambda: not control()["enabled"], "stale playback remained actionable")
         self.key("ctrl+p"); self.assertEqual(len(self.server.playback_requests), 2, "stale Ctrl+P reached transport")
         self.assertGreater(self.cursor_image()["opaque"], 100, "the cursor disappeared over unavailable playback")
+
+    def test_header_shortcuts_share_bindings_and_navigation_preserves_editor(self):
+        (self.folder / "admin-token").write_text("private-fixture-token")
+        stamp = int(time.time() * 1000)
+        self.state["spotify"] = {"connected": True, "observedAt": stamp}
+        self.state["playbackState"] = {"paused": False, "buffering": False, "device": {"id": "fixture-device"}}
+        self.state["nowPlaying"].update(uid="fixture-current", uri="spotify:track:current", paused=False, playing=True, clockValid=True)
+        self.write_state(); self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
+        self.run_stage(composerDraft={"text": "Poruka DJ-u: sačuvaj ovu skicu.", "cursor": 20, "anchor": 5})
+        draft, bounds = self.editor_draft(), self.magic_bounds()
+        self.eventually(lambda: self.run_stage()["requestCardBounds"][2] > 0, "private header geometry was not painted")
+        rendered = self.run_stage(); controls = rendered["shortcutControls"]
+        self.assertEqual([item["key"] for item in controls], ["Tab", "Ctrl+P", "Ctrl+K", "Ctrl+B", "Ctrl+N"])
+        self.assertTrue(all(item["key"] in item["label"] and not item["autoRepeat"] for item in controls))
+        playback, request = rendered["playbackControl"]["bounds"], rendered["requestCardBounds"]
+        for index, item in enumerate(controls):
+            x, y, width, height = item["bounds"]
+            self.assertGreater(x, playback[0] + playback[2], "a shortcut overlaps observed playback")
+            self.assertEqual(y, playback[1], "shortcut controls are not at playback header height")
+            self.assertEqual(height, playback[3], "neighboring controls use different shapes/heights")
+            self.assertGreaterEqual(width, 100, "the laptop shortcut control is too narrow")
+            self.assertLess(y + height, request[1], "shortcuts overlap the request/QR card")
+            if index:
+                previous = controls[index - 1]["bounds"]
+                self.assertGreater(x, previous[0] + previous[2], "shortcut controls overlap")
+        self.assertAlmostEqual(controls[0]["bounds"][0], request[0], delta=1)
+        self.assertAlmostEqual(controls[-1]["bounds"][0] + controls[-1]["bounds"][2], request[0] + request[2], delta=1)
+        self.assertNotIn("partyDeskHeading", {item.get("objectName") for item in self.client.request("object.list", {})})
+        capture = os.environ.get("PARTY_SHORTCUT_CAPTURE")
+        if capture:
+            self.run_stage(capture=capture)
+        control = lambda: self.run_stage()["playbackControl"]
+        self.server.skip_reply_gate = threading.Event(); self.key("ctrl+n")
+        try:
+            self.eventually(lambda: len(self.server.skip_requests) == 1 and control()["busy"], "Ctrl+N did not dispatch one guarded next")
+            self.assertEqual(self.server.skip_requests[0], {"direction": "next", "expectedCurrentUid": "fixture-current",
+                             "expectedDeviceId": "fixture-device", "source": "native"})
+            self.assertEqual(self.server.skip_operators, ["qtra-native"])
+            self.assertEqual(self.run_stage()["trackTitle"], "Atomic Song", "next optimistically replaced canonical current metadata")
+            self.key("ctrl+b"); self.key("ctrl+p")
+            self.client.request("widget.click", {"objectName": "partyNextShortcutButton"})
+            self.assertEqual(len(self.server.skip_requests), 1, "pending navigation admitted another next/previous")
+            self.assertFalse(self.server.playback_requests, "pending navigation admitted a pause command")
+            locked = {item["action"]: item["enabled"] for item in self.run_stage()["shortcutControls"]}
+            for action in ("partyPlaybackAction", "partyPreviousAction", "partyNextAction"):
+                self.assertFalse(locked[action])
+        finally:
+            self.server.skip_reply_gate.set()
+        self.eventually(lambda: control()["enabled"] and self.server.state_reads == 1 and self.run_stage()["trackTitle"] == "Original next recording",
+                        "next did not refresh verified canonical state")
+        self.assertIn("sljedeću", self.run_stage()["panelNotice"])
+        self.key("ctrl+b")
+        self.eventually(lambda: control()["enabled"] and self.server.state_reads == 2 and self.run_stage()["trackTitle"] == "Original previous recording",
+                        "Ctrl+B did not preserve native previous-track behavior near the start")
+        self.assertIn("prethodnu", self.run_stage()["panelNotice"])
+        self.state = copy.deepcopy(self.server.state_snapshot)
+        self.state["revision"] += 1; self.state["spotify"]["observedAt"] = int(time.time() * 1000)
+        self.state["nowPlaying"].update(progressMs=30000, observedAt=self.state["spotify"]["observedAt"])
+        self.write_state(); self.eventually(lambda: self.run_stage()["revision"] == self.state["revision"], "restart fixture observation did not arrive")
+        self.client.request("widget.click", {"objectName": "partyPreviousShortcutButton"})
+        self.eventually(lambda: control()["enabled"] and self.server.state_reads == 3 and "početak" in self.run_stage()["panelNotice"],
+                        "the clickable previous control did not report the verified same-occurrence restart")
+        self.assertEqual(self.server.skip_commands, ["next", "previous", "previous"])
+        self.assertEqual(self.editor_draft(), draft); self.assertEqual(self.magic_bounds(), bounds)
+
+    def test_navigation_uncertainty_does_not_retry_or_claim_an_unproved_restart(self):
+        (self.folder / "admin-token").write_text("private-fixture-token")
+        stamp = int(time.time() * 1000)
+        self.state["spotify"] = {"connected": True, "observedAt": stamp}
+        self.state["playbackState"] = {"paused": False, "buffering": False, "device": {"id": "fixture-device"}}
+        self.state["nowPlaying"].update(uid="fixture-current", uri="spotify:track:current", paused=False, playing=True, clockValid=True)
+        self.write_state(); self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        control = lambda: self.run_stage()["playbackControl"]
+        self.server.skip_reply_mutator = lambda result: result["before"].update(positionMs=result["status"]["nowPlaying"]["progressMs"])
+        self.key("ctrl+b")
+        self.eventually(lambda: control()["enabled"] and self.server.state_reads == 1, "unproved restart did not finish canonical refresh")
+        self.assertIn("Ishod provjeravam", self.run_stage()["panelNotice"])
+        self.assertNotIn("početak", self.run_stage()["panelNotice"], "ok:true alone claimed a restart without a clock rewind")
+        self.assertEqual(len(self.server.skip_requests), 1)
+        self.server.skip_reply_mutator = None
+        self.server.skip_error = {"error": "Reply lost after dispatch", "dispatched": True}
+        self.key("ctrl+n")
+        self.eventually(lambda: control()["enabled"] and self.server.state_reads == 2 and self.run_stage()["trackTitle"] == "Original next recording",
+                        "uncertain next did not refresh the actual resulting occurrence")
+        self.assertIn("Ishod provjeravam", self.run_stage()["panelNotice"])
+        self.assertEqual(len(self.server.skip_requests), 2, "uncertain navigation was retried")
+        self.server.skip_error = {"error": "Native playback restriction", "dispatched": False}
+        self.key("ctrl+b")
+        self.eventually(lambda: control()["enabled"] and self.server.state_reads == 3, "undispatched restriction did not finish refresh")
+        self.assertIn("Nije promijenjeno", self.run_stage()["panelNotice"])
+        self.assertEqual(len(self.server.skip_requests), 3)
+        self.assertEqual(self.server.skip_commands, ["previous", "next"])
+        self.assertFalse(self.server.playback_requests)
 
     def test_llm_presence_expires_without_relying_on_watcher_or_new_json(self):
         self.run_stage(stateFile=str(self.state_file), fullscreen=False)
@@ -1291,6 +1424,8 @@ class PartyStage(unittest.TestCase):
             self.write_state()
             self.eventually(lambda: self.run_stage()["revision"] == self.state["revision"] and not control()["enabled"], f"{mode} control stayed enabled")
             click(); self.assertEqual(len(self.server.playback_requests), attempts, f"{mode} click reached transport")
+            self.key("ctrl+n"); self.key("ctrl+b")
+            self.assertFalse(self.server.skip_requests, f"{mode} next/previous reached transport")
 
     def test_track_progress_holds_invalid_future_and_stale_actual_clocks(self):
         stamp = int(time.time() * 1000)
