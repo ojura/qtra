@@ -6,6 +6,7 @@ import argparse
 import collections
 import hmac
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -33,6 +34,13 @@ AUDIO_STYLES = ('ring', 'city', 'waterfall')
 AUDIO_ACT_MS = 10 * 60 * 1000
 PROCESSING_LEASE_MS = 15 * 60 * 1000
 PROCESSING_LIMIT = 50
+OBSERVATION_TTL_MS = 10000
+MESSAGE_SOURCES = ('native', 'web', 'api', 'test')
+MATCH_BASES = ('title', 'literal_lyrics', 'semantic')
+COMMAND_ACTIONS = ('next', 'pause', 'resume', 'move', 'reorder', 'playback')
+WORK_STATES = ('active', 'waiting', 'blocked', 'completed', 'cancelled')
+SONG_THEMES = ('record', 'speaker', 'headphones', 'microphone', 'bottles',
+               'cocktail', 'compass', 'dandelion', 'embers')
 
 
 def now_ms():
@@ -43,6 +51,61 @@ def clean(value, maximum=500):
     if not isinstance(value, str):
         raise ValueError('Expected text.')
     return ''.join(c for c in value if c in '\n\t' or ord(c) >= 32).strip()[:maximum]
+
+
+def bounded_text(value, field, maximum, *, required=False):
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ValueError(f'{field} must be text of at most {maximum} characters.')
+    result = clean(value, maximum)
+    if required and not result:
+        raise ValueError(f'{field} must not be empty.')
+    return result
+
+
+def prepare_matches(body, uris):
+    """Validate supplied evidence without fetching or independently verifying links."""
+    if 'matches' not in body:
+        return {}
+    matches = body['matches']
+    if not isinstance(matches, list) or len(matches) > 8:
+        raise ValueError('matches must contain at most eight candidate descriptions.')
+    prepared = {}
+    for match in matches:
+        if (not isinstance(match, dict)
+                or set(match) - {'uri', 'basis', 'rationale', 'confidence', 'sources'}):
+            raise ValueError('Each match must contain uri, basis, rationale and optional confidence/sources.')
+        uri, basis = match.get('uri'), match.get('basis')
+        if not isinstance(uri, str) or uri not in uris or uri in prepared:
+            raise ValueError('Each match URI must occur once in the selected uris.')
+        if basis not in MATCH_BASES:
+            raise ValueError('Match basis must be title, literal_lyrics or semantic.')
+        evidence = {'basis': basis,
+                    'rationale': bounded_text(match.get('rationale'), 'rationale', 500, required=True)}
+        if 'confidence' in match:
+            confidence = match['confidence']
+            if (type(confidence) not in (int, float) or not 0 <= confidence <= 1
+                    or not math.isfinite(confidence)):
+                raise ValueError('confidence must be a finite number from 0 to 1.')
+            evidence['confidence'] = confidence
+        sources = match.get('sources', [])
+        if not isinstance(sources, list) or len(sources) > 8:
+            raise ValueError('sources must contain at most eight HTTP(S) links.')
+        evidence['sources'] = []
+        for source in sources:
+            if not isinstance(source, dict) or set(source) != {'url', 'label'}:
+                raise ValueError('Each source must contain url and label.')
+            url = bounded_text(source['url'], 'source URL', 2048, required=True)
+            parsed = urlsplit(url)
+            if (parsed.scheme not in ('http', 'https') or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or any(c.isspace() or ord(c) < 32 for c in url)):
+                raise ValueError('Source links must be HTTP(S) URLs with a host and no credentials.')
+            # Accessing port validates a supplied port without opening the link.
+            parsed.port
+            evidence['sources'].append({'url': url,
+                'label': bounded_text(source['label'], 'source label', 120, required=True)})
+        prepared[uri] = evidence
+    return prepared
 
 
 def atomic_json(filename, value):
@@ -77,7 +140,27 @@ class Party:
               id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
               payload TEXT NOT NULL, created_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS search_descriptions(
+              id TEXT PRIMARY KEY, guest_id TEXT NOT NULL, text TEXT NOT NULL,
+              status TEXT NOT NULL, tracks TEXT NOT NULL, note TEXT NOT NULL,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS message_work(
+              message_id INTEGER PRIMARY KEY, state TEXT NOT NULL, summary TEXT NOT NULL,
+              outcome TEXT NOT NULL, evidence TEXT NOT NULL, updated_at INTEGER NOT NULL,
+              active_until INTEGER);
         ''')
+        chat_columns = {row[1] for row in self.db.execute('PRAGMA table_info(chat)')}
+        if 'guest_id' not in chat_columns:
+            self.db.execute("ALTER TABLE chat ADD COLUMN guest_id TEXT NOT NULL DEFAULT ''")
+        if 'withdrawn_at' not in chat_columns:
+            self.db.execute('ALTER TABLE chat ADD COLUMN withdrawn_at INTEGER')
+        if 'accepted_at' not in chat_columns:
+            self.db.execute('ALTER TABLE chat ADD COLUMN accepted_at INTEGER')
+        if 'origin' not in chat_columns:
+            self.db.execute('ALTER TABLE chat ADD COLUMN origin TEXT')
+        request_columns = {row[1] for row in self.db.execute('PRAGMA table_info(requests)')}
+        if 'origin' not in request_columns:
+            self.db.execute('ALTER TABLE requests ADD COLUMN origin TEXT')
         self.db.commit()
         token_file = self.data / 'admin-token'
         if not token_file.exists():
@@ -123,8 +206,9 @@ class Party:
         self.db.commit()
         self.request_url = self.setting('requestUrl', self._lan_url())
         if self.audio:
-            self.audio.set_enabled(self.setting('speechEnabled', True))
+            self.audio.set_enabled(self.setting('speechEnabled', False))
         self._write_qr()
+        self._migrate_work()
         self._publish()
 
     def _lan_url(self):
@@ -194,36 +278,190 @@ class Party:
                 'dedication': row['dedication'], 'status': row['status'],
                 'createdAt': row['created_at'], 'error': row['error']}
 
+    def _origin(self, body, context=None):
+        """HTTP context is supplied by Handler; all labels remain caller declarations."""
+        declared = 'source' in body
+        source = body.get('source', 'unknown')
+        if declared and source not in MESSAGE_SOURCES:
+            raise ValueError('source must be native, web, api or test.')
+        context = context or {}
+        return {'guestId': clean(body.get('guestId', ''), 100) or None,
+                'source': source, 'sourceDeclared': declared,
+                'operatorLabel': bounded_text(context.get('operatorLabel', ''), 'operator label', 120) or None,
+                'httpPeer': dict(context['httpPeer']) if context.get('httpPeer') else None}
+
+    def _stored_origin(self, row):
+        if row['origin']:
+            return json.loads(row['origin'])
+        return {'guestId': (row['guest_id'] or None) if 'guest_id' in row.keys() else None,
+                'source': 'unknown', 'sourceDeclared': False, 'operatorLabel': None, 'httpPeer': None}
+
     def _chat_dict(self, row):
+        origin = self._stored_origin(row)
         return {'id': row['id'], 'role': row['role'], 'name': row['name'],
                 'text': row['text'], 'createdAt': row['created_at'],
-                'status': 'read' if row['read_at'] else 'delivered'}
+                'acceptedAt': row['accepted_at'], 'readAt': row['read_at'],
+                'source': origin['source'], 'sourceDeclared': origin['sourceDeclared'],
+                'isTest': row['role'] == 'test',
+                'work': self._message_work(row['id']),
+                'status': 'withdrawn' if row['withdrawn_at'] else 'read' if row['read_at'] else 'delivered'}
+
+    def message_info(self, identifier):
+        if type(identifier) is not int or not 0 < identifier <= 2**53 - 1:
+            raise ValueError('Choose a positive message ID.')
+        with self.lock:
+            row = self.db.execute('SELECT * FROM chat WHERE id=?', (identifier,)).fetchone()
+            if not row:
+                raise ValueError('Unknown message ID.')
+            return {'message': self._chat_dict(row), 'attribution': self._stored_origin(row),
+                    'requestId': row['request_id'], 'withdrawnAt': row['withdrawn_at']}
+
+    def _withdrawn_ids(self):
+        return [row[0] for row in self.db.execute(
+            'SELECT id FROM chat WHERE withdrawn_at IS NOT NULL ORDER BY id DESC LIMIT 500')]
 
     def _dj(self):
         stamp = now_ms()
         age = stamp - self.last_seen
         return {'status': 'listening' if age < 90000 else 'away', 'lastSeen': self.last_seen,
-                'processingMessageIds': sorted(int(key) for key in self._active_processing(stamp))}
+                'processingMessageIds': sorted(int(key) for key in self._active_processing(stamp)),
+                'messageWork': self._work_map(stamp)}
+
+    def _work_dict(self, row, stamp=None):
+        stamp = now_ms() if stamp is None else stamp
+        effective = row['state']
+        if effective == 'active' and (row['active_until'] is None or stamp >= row['active_until']):
+            effective = 'unconfirmed'
+        return {'state': row['state'], 'effectiveState': effective, 'summary': row['summary'],
+                'outcome': row['outcome'], 'evidence': json.loads(row['evidence']),
+                'updatedAt': row['updated_at'], 'activeUntil': row['active_until']}
+
+    def _message_work(self, identifier):
+        row = self.db.execute('SELECT * FROM message_work WHERE message_id=?', (identifier,)).fetchone()
+        return self._work_dict(row) if row else None
+
+    def _work_map(self, stamp=None):
+        return {str(row['message_id']): self._work_dict(row, stamp) for row in self.db.execute(
+            "SELECT w.* FROM message_work w JOIN chat c ON c.id=w.message_id WHERE c.role='user' AND c.withdrawn_at IS NULL")}
+
+    def _sync_processing_work(self, stamp):
+        self.processing_messages = {str(row[0]): row[1] for row in self.db.execute(
+            "SELECT message_id,active_until FROM message_work WHERE state='active' AND active_until>?", (stamp,))}
+        self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                        ('processingMessages', json.dumps(self.processing_messages)))
+
+    def _migrate_work(self):
+        with self.lock:
+            stamp = now_ms()
+            changed = []
+            if not self.setting('messageWorkMigrated', False):
+                legacy = self.processing_messages if isinstance(self.processing_messages, dict) else {}
+                for key in legacy:
+                    if not isinstance(key, str) or not key.isdecimal() or not 0 < int(key) <= 2**53 - 1:
+                        continue
+                    identifier = int(key)
+                    if not self.db.execute("SELECT 1 FROM chat WHERE id=? AND role='user' AND withdrawn_at IS NULL", (identifier,)).fetchone():
+                        continue
+                    cursor = self.db.execute('INSERT OR IGNORE INTO message_work VALUES(?,?,?,?,?,?,?)',
+                        (identifier, 'waiting', 'Raniji rad čeka zabilježen ishod', '', '[]', stamp, None))
+                    if cursor.rowcount:
+                        changed.append(identifier)
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)', ('messageWorkMigrated', 'true'))
+            self._sync_processing_work(stamp)
+            self.db.commit()
+            if changed:
+                self._event('work_changed', {'messageIds': changed,
+                    'messageWork': {str(identifier): self._message_work(identifier) for identifier in changed}})
+
+    def _guest_message_ids(self, identifiers):
+        if not isinstance(identifiers, list) or not 1 <= len(identifiers) <= PROCESSING_LIMIT:
+            raise ValueError(f'messageIds must contain 1 to {PROCESSING_LIMIT} guest message IDs.')
+        if any(type(value) is not int or not 0 < value <= 2**53 - 1 for value in identifiers):
+            raise ValueError('messageIds must contain positive integer guest message IDs.')
+        identifiers = sorted(set(identifiers))
+        placeholders = ','.join('?' for unused in identifiers)
+        found = {row[0] for row in self.db.execute(
+            f"SELECT id FROM chat WHERE role='user' AND withdrawn_at IS NULL AND id IN ({placeholders})", identifiers)}
+        if found != set(identifiers):
+            raise ValueError('Choose existing guest message IDs; replies, tests and withdrawn messages cannot accept work.')
+        return identifiers
+
+    def _prepare_work(self, body):
+        identifiers = self._guest_message_ids(body.get('messageIds'))
+        state = body.get('state')
+        if state not in WORK_STATES:
+            raise ValueError('Work state must be active, waiting, blocked, completed or cancelled.')
+        summary = bounded_text(body.get('summary', ''), 'summary', 500)
+        outcome = bounded_text(body.get('outcome', ''), 'outcome', 1000)
+        if state in ('active', 'waiting', 'blocked') and (len(summary) < 3 or not any(c.isalnum() for c in summary)):
+            raise ValueError('Active, waiting and blocked work need a useful summary.')
+        evidence = body.get('evidence', [])
+        if not isinstance(evidence, list) or len(evidence) > 8:
+            raise ValueError('evidence must contain at most eight text entries.')
+        evidence = [bounded_text(value, 'evidence entry', 500, required=True) for value in evidence]
+        if state == 'completed' and (not outcome or not evidence):
+            raise ValueError('Completed work needs a nonempty outcome and evidence.')
+        if state == 'cancelled' and not outcome:
+            raise ValueError('Cancelled work needs an outcome explaining the cancellation.')
+        lease = body.get('leaseSeconds', 300)
+        if type(lease) is not int or not 30 <= lease <= 900:
+            raise ValueError('leaseSeconds must be an integer from 30 to 900.')
+        stamp = now_ms()
+        if state == 'active' and len(set(self._active_processing(stamp)) | {str(value) for value in identifiers}) > PROCESSING_LIMIT:
+            raise ValueError(f'At most {PROCESSING_LIMIT} guest messages can be active at once.')
+        return {'messageIds': identifiers, 'state': state, 'summary': summary, 'outcome': outcome,
+                'evidence': evidence, 'updatedAt': stamp,
+                'activeUntil': stamp + lease * 1000 if state == 'active' else None}
+
+    def _save_work(self, identifiers, work, *, accept=True):
+        for identifier in identifiers:
+            self.db.execute('''INSERT INTO message_work VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(message_id) DO UPDATE SET state=excluded.state,summary=excluded.summary,
+                outcome=excluded.outcome,evidence=excluded.evidence,updated_at=excluded.updated_at,
+                active_until=excluded.active_until''',
+                (identifier, work['state'], work['summary'], work['outcome'], json.dumps(work['evidence'], ensure_ascii=False),
+                 work['updatedAt'], work['activeUntil']))
+            if accept:
+                self.db.execute('UPDATE chat SET accepted_at=COALESCE(accepted_at,?) WHERE id=?', (work['updatedAt'], identifier))
+
+    def _work_changed(self, identifiers):
+        self._sync_processing_work(now_ms())
+        self._event('work_changed', {'messageIds': identifiers,
+            'messageWork': {str(identifier): self._message_work(identifier) for identifier in identifiers}})
+
+    def _legacy_processing_work(self, body):
+        stamp = now_ms()
+        changed = []
+        for identifier in sorted(set(body['messageIds'])):
+            previous = self._message_work(identifier)
+            if body['active']:
+                work = {'state': 'active', 'summary': (previous or {}).get('summary') or 'DJ obrađuje poruku; ishod još nije zabilježen.',
+                        'outcome': (previous or {}).get('outcome', ''), 'evidence': (previous or {}).get('evidence', []),
+                        'updatedAt': stamp, 'activeUntil': stamp + PROCESSING_LEASE_MS}
+            elif previous and previous['state'] == 'active':
+                work = {**previous, 'state': 'waiting', 'outcome': 'Ishod rada još nije potvrđen.',
+                        'updatedAt': stamp, 'activeUntil': None}
+            else:
+                continue
+            self._save_work([identifier], work)
+            changed.append(identifier)
+        if changed:
+            self._work_changed(changed)
+        else:
+            self._sync_processing_work(stamp)
+            self.db.commit()
 
     def _active_processing(self, stamp):
         return {key: expires for key, expires in self.processing_messages.items() if expires > stamp}
 
     def _prepare_processing(self, body):
         """Validate the complete batch before any admin side effect."""
-        identifiers = body.get('messageIds')
-        if not isinstance(identifiers, list) or not 1 <= len(identifiers) <= PROCESSING_LIMIT:
-            raise ValueError(f'messageIds must contain 1 to {PROCESSING_LIMIT} guest message IDs.')
-        if any(type(value) is not int or not 0 < value <= 2**53 - 1 for value in identifiers):
-            raise ValueError('messageIds must contain positive integer guest message IDs.')
+        identifiers = self._guest_message_ids(body.get('messageIds'))
         active = body.get('active')
         if type(active) is not bool:
             raise ValueError('active must be true or false.')
-        identifiers = sorted(set(identifiers))
-        placeholders = ','.join('?' for unused in identifiers)
-        found = {row[0] for row in self.db.execute(
-            f"SELECT id FROM chat WHERE role='user' AND id IN ({placeholders})", identifiers)}
-        if found != set(identifiers):
-            raise ValueError('Choose existing guest message IDs; DJ replies cannot be marked processing.')
+        if active and any((self._message_work(identifier) or {}).get('state') in ('completed', 'cancelled') for identifier in identifiers):
+            raise ValueError('Terminal work can be reopened only through the explicit work action.')
         stamp = now_ms()
         updated = self._active_processing(stamp)
         for identifier in identifiers:
@@ -267,11 +505,18 @@ class Party:
                 now_playing = {**now_playing, 'requestedUri': playing['uri'],
                     'requestId': playing['id'], 'requestedBy': playing['requested_by'],
                     'dedication': playing['dedication']}
+            spotify = self.spotify.copy()
+            observed = spotify.get('observedAt')
+            valid_stamp = type(observed) in (int, float) and math.isfinite(observed)
+            spotify['ageMs'] = max(0, now_ms() - observed) if valid_stamp else None
+            spotify['stale'] = (not spotify.get('connected') or not valid_stamp
+                                or observed > now_ms() + 1000 or spotify['ageMs'] > OBSERVATION_TTL_MS)
             result = {'revision': self.revision, 'nowPlaying': now_playing,
                 'queue': queue, 'scene': self.scene.copy(), 'caption': self.caption,
                 'mood': self._mood(), 'guestCount': sum(now_ms() - t < 90000 for t in self.guests.values()),
                 'requestUrl': self.request_url, 'qrPath': str(self.data / 'request-qr.png'),
-                'spotify': self.spotify.copy(), 'dj': self._dj(),
+                'spotify': spotify, 'playbackState': self.playback.get('playbackState'), 'dj': self._dj(),
+                'withdrawnMessageIds': self._withdrawn_ids(),
                 'bookEnabled': self.book_enabled, 'bookMoment': self.book_moment,
                 'speech': self.audio.snapshot() if self.audio else {'available': False, 'enabled': False},
                 'karaoke': self.karaoke.snapshot(now_playing, self.spotify['connected'], now_ms()),
@@ -317,7 +562,21 @@ class Party:
                 self.search_cache.pop(next(iter(self.search_cache)))
         return {'tracks': tracks}
 
-    def request(self, body):
+    def lookup_track(self, uri):
+        if not isinstance(uri, str) or not TRACK.fullmatch(uri):
+            raise ValueError('Choose an exact Spotify track URI.')
+        with self.lock:
+            track = self.track_cache.get(uri)
+        if track is None:
+            track = self.client.track(uri)
+            with self.lock:
+                self.track_cache[uri] = track
+        return {'track': track}
+
+    def request(self, body, *, context=None):
+        origin = self._origin(body, context)
+        if origin['source'] == 'test':
+            raise ValueError('Test submissions are messages; use an isolated fixture for music requests.')
         rid = clean(body.get('requestId', ''), 100)
         uri = clean(body.get('uri', ''), 100)
         if len(rid) < 8 or not TRACK.fullmatch(uri):
@@ -347,8 +606,9 @@ class Party:
             if row:
                 return {'request': self._request_dict(row), 'status': row['status'], 'alreadyQueued': True}
             stamp = now_ms()
-            self.db.execute('INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?)',
-                (rid, uri, name, dedication, json.dumps(track, ensure_ascii=False), 'pending', stamp, stamp, None))
+            self.db.execute('INSERT INTO requests(id,uri,requested_by,dedication,track,status,created_at,updated_at,error,origin) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (rid, uri, name, dedication, json.dumps(track, ensure_ascii=False), 'pending', stamp, stamp, None,
+                 json.dumps(origin, ensure_ascii=False)))
             self._event('request', {**track, 'id': rid, 'requestedBy': name, 'dedication': dedication})
             self._publish()
             return {'request': self._request_dict(self.db.execute('SELECT * FROM requests WHERE id=?', (rid,)).fetchone()), 'status': 'pending'}
@@ -356,12 +616,14 @@ class Party:
     def chat(self, after=0):
         with self.lock:
             if after:
-                rows = self.db.execute('SELECT * FROM chat WHERE id>? ORDER BY id LIMIT 100', (after,)).fetchall()
+                rows = self.db.execute('SELECT * FROM chat WHERE id>? AND withdrawn_at IS NULL ORDER BY id LIMIT 100', (after,)).fetchall()
             else:
-                rows = self.db.execute('SELECT * FROM (SELECT * FROM chat ORDER BY id DESC LIMIT 80) ORDER BY id').fetchall()
-            return {'messages': [self._chat_dict(r) for r in rows], 'dj': self._dj()}
+                rows = self.db.execute('SELECT * FROM (SELECT * FROM chat WHERE withdrawn_at IS NULL ORDER BY id DESC LIMIT 80) ORDER BY id').fetchall()
+            return {'messages': [self._chat_dict(r) for r in rows], 'dj': self._dj(),
+                    'withdrawnMessageIds': self._withdrawn_ids()}
 
-    def message(self, body, role='user'):
+    def message(self, body, role='user', *, context=None):
+        origin = self._origin(body, context)
         text = clean(body.get('text', ''), 1501)
         if len(text) > 1500:
             raise ValueError('A message can contain at most 1500 characters.')
@@ -369,19 +631,103 @@ class Party:
             raise ValueError('Write a message first.')
         rid = clean(body.get('requestId', '') or secrets.token_hex(16), 100)
         name = 'DJ' if role == 'assistant' else clean(body.get('name', ''), 60) or 'Gost'
+        if origin['source'] == 'test':
+            role, name, text = 'test', 'TEST / ' + name, '[TEST] ' + text
         with self.lock:
             row = self.db.execute('SELECT * FROM chat WHERE request_id=?', (rid,)).fetchone()
             if row:
-                if row['role'] != role or row['text'] != text:
+                previous = self._stored_origin(row)
+                if (row['role'] != role or row['text'] != text
+                        or previous['guestId'] != origin['guestId']
+                        or previous['source'] != origin['source']):
                     raise ValueError('This message ID was already used.')
                 return {'message': self._chat_dict(row)}
-            self.db.execute('INSERT INTO chat(request_id,role,name,text,created_at) VALUES(?,?,?,?,?)',
-                (rid, role, name, text, now_ms()))
+            self.db.execute('INSERT INTO chat(request_id,role,name,text,created_at,guest_id,origin) VALUES(?,?,?,?,?,?,?)',
+                (rid, role, name, text, now_ms(), origin['guestId'] or '', json.dumps(origin, ensure_ascii=False)))
             row = self.db.execute('SELECT * FROM chat WHERE request_id=?', (rid,)).fetchone()
             item = self._chat_dict(row)
-            self._event('chat' if role == 'user' else 'reply', item)
+            self._event('test_message' if role == 'test' else 'chat' if role == 'user' else 'reply', item)
             self._publish()
             return {'message': item}
+
+    def recall_message(self, body):
+        guest = clean(body.get('guestId', ''), 100)
+        identifier = body.get('messageId')
+        if len(guest) < 8 or type(identifier) is not int or identifier < 1:
+            raise ValueError('Choose your last sent message to recall.')
+        with self.lock:
+            row = self.db.execute("SELECT * FROM chat WHERE id=? AND guest_id=? AND role='user'",
+                                  (identifier, guest)).fetchone()
+            if not row:
+                raise ValueError('That message does not belong to this guest.')
+            result = {'recalled': {'id': row['id'], 'text': row['text'], 'requestId': row['request_id']}}
+            if row['withdrawn_at']:
+                return result
+            latest = self.db.execute("SELECT MAX(id) FROM chat WHERE guest_id=? AND role='user' AND withdrawn_at IS NULL",
+                                     (guest,)).fetchone()[0]
+            if identifier != latest:
+                raise ValueError('Only your latest message can be recalled.')
+            if (row['accepted_at'] is not None or self._message_work(identifier) is not None
+                    or str(identifier) in self._active_processing(now_ms())):
+                raise ValueError('The DJ has already accepted this message for processing.')
+            self.db.execute('UPDATE chat SET withdrawn_at=? WHERE id=?', (now_ms(), identifier))
+            self._event('message_recalled', {'messageId': identifier})
+            self._publish()
+            return result
+
+    def _description_dict(self, row):
+        return {'id': row['id'], 'text': row['text'], 'status': row['status'],
+                'tracks': json.loads(row['tracks']), 'note': row['note']}
+
+    def describe_search(self, body):
+        identifier = clean(body.get('requestId', ''), 100)
+        guest = clean(body.get('guestId', ''), 100)
+        text = clean(body.get('text', ''), 1501)
+        if len(identifier) < 8 or len(guest) < 8 or not 3 <= len(text) <= 1500:
+            raise ValueError('Describe the song in 3 to 1500 characters.')
+        with self.lock:
+            row = self.db.execute('SELECT * FROM search_descriptions WHERE id=?', (identifier,)).fetchone()
+            if row:
+                if row['guest_id'] != guest or row['text'] != text:
+                    raise ValueError('This search ID belongs to another description.')
+                return {'search': self._description_dict(row)}
+            stamp = now_ms()
+            self.db.execute('INSERT INTO search_descriptions VALUES(?,?,?,?,?,?,?,?)',
+                            (identifier, guest, text, 'pending', '[]', '', stamp, stamp))
+            self._event('search_description', {'id': identifier, 'text': text})
+            return self.description_search(identifier)
+
+    def description_search(self, identifier):
+        with self.lock:
+            row = self.db.execute('SELECT * FROM search_descriptions WHERE id=?', (clean(identifier, 100),)).fetchone()
+            if not row:
+                raise ValueError('Unknown song description.')
+            return {'search': self._description_dict(row)}
+
+    def _observation_failed(self, error):
+        message = str(error)[:300]
+        changed = self.spotify['connected'] or self.spotify.get('error') != message
+        self.spotify = {'connected': False, 'error': message}
+        self.playback = {'nowPlaying': None, 'queue': []}
+        if changed:
+            self._event('spotify', self.spotify)
+
+    def synchronize(self):
+        """Read the actual player now; no transport, queue or reconnect command."""
+        with self.lock:
+            self._control_generation += 1
+            try:
+                observed = self.client.status()
+                self._apply_observation(observed)
+            except Exception as error:
+                self._observation_failed(error)
+                self._publish()
+                raise SpotifyError(str(error), dispatched=False) from error
+            self._publish()
+            recent = [dict(json.loads(row['payload']), eventId=row['id'], seenAt=row['created_at'])
+                      for row in self.db.execute("SELECT id,payload,created_at FROM events WHERE kind='track' ORDER BY id DESC LIMIT 200")]
+            return {'state': self.snapshot(), 'observation': self.playback,
+                    'recentTracks': recent, 'lastId': self.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]}
 
     def mood(self, body):
         choice = body.get('mood')
@@ -454,9 +800,102 @@ class Party:
         if self.book_moment and stamp > self.book_moment.get('expiresAt', 0):
             self.book_moment = None
 
-    def admin(self, action, body):
+    def _command_observation(self):
+        current = self.playback.get('nowPlaying') or {}
+        playback = self.playback.get('playbackState') or {}
+        device = playback.get('device') or {}
+        return {'currentUid': current.get('uid'), 'currentUri': current.get('uri'),
+                'deviceId': device.get('id'), 'observedAt': self.spotify.get('observedAt'),
+                'connected': self.spotify.get('connected') is True,
+                'paused': current.get('paused'), 'buffering': current.get('buffering')}
+
+    def _new_command(self, action, body, origin):
+        target = {}
+        for key in ('uid', 'beforeUid', 'expectedCurrentUid', 'expectedDeviceId', 'requestId', 'uri'):
+            if isinstance(body.get(key), str):
+                target[key] = body[key][:512]
+        for key in ('orderedQueuedUids', 'expectedQueuedUids'):
+            if isinstance(body.get(key), list):
+                target[key] = [value[:512] if isinstance(value, str) else None for value in body[key][:500]]
+        if type(body.get('paused')) is bool:
+            target['paused'] = body['paused']
+        return {'started': False, 'record': {'commandId': secrets.token_hex(16), 'action': action,
+            'attribution': origin, 'target': target, 'before': self._command_observation()}}
+
+    def _command_event(self, command, phase, *, result=None, error=None):
+        if phase == 'rejected':
+            dispatched = False
+        elif error is not None:
+            value = error.dispatched if isinstance(error, SpotifyError) else None
+            dispatched = value if type(value) is bool else None
+        elif isinstance(result, dict):
+            value = result.get('dispatched')
+            if type(value) is bool:
+                dispatched = value
+            elif any(result.get(key) is True for key in ('changed', 'moved', 'queued')):
+                dispatched = True
+            elif any(result.get(key) is False for key in ('changed', 'moved')):
+                dispatched = False
+            else:
+                dispatched = None
+        else:
+            dispatched = None
+        record = {**command['record'], 'phase': phase, 'dispatched': dispatched,
+                  'dispatchUncertain': dispatched is None or (phase == 'error' and dispatched is True),
+                  'current': self._command_observation()}
+        if error is not None:
+            record.update(error=str(error)[:500], errorType=type(error).__name__)
+        if isinstance(result, dict):
+            record['returnedStatus'] = isinstance(result.get('status'), dict)
+            record['result'] = {key: result[key] for key in ('ok', 'action', 'queued', 'moved', 'changed', 'paused', 'uid', 'uri', 'requestId')
+                                if key in result and type(result[key]) in (str, bool, int, float, type(None))}
+        self._event('command', record)
+
+    def _start_command(self, command):
+        self._command_event(command, 'dispatch')
+        command['started'] = True
+
+    def _verified_playback_status(self, result, paused, current_uid, device_id):
+        status = result.get('status') if isinstance(result, dict) else None
+        valid = isinstance(status, dict)
+        current = status.get('nowPlaying') if valid else None
+        playback = status.get('playbackState') if valid else None
+        queue = status.get('queue') if valid else None
+        device = playback.get('device') if isinstance(playback, dict) else None
+        stamp = now_ms()
+        def fresh(value):
+            return (type(value) in (int, float) and stamp - OBSERVATION_TTL_MS <= value <= stamp + 1000
+                    and math.isfinite(value))
+        valid = (valid and isinstance(current, dict) and isinstance(playback, dict) and isinstance(device, dict)
+                 and isinstance(queue, list) and all(isinstance(item, dict) and
+                     all(item.get(key) is None or isinstance(item.get(key), str) for key in ('uid', 'uri', 'source'))
+                     for item in queue)
+                 and current.get('uid') == current_uid and device.get('id') == device_id
+                 and isinstance(current.get('uri'), str) and bool(current['uri'].strip())
+                 and current.get('paused') is paused and playback.get('paused') is paused
+                 and fresh(status.get('observedAt')) and fresh(current.get('observedAt')))
+        if not valid:
+            raise SpotifyError('The playback command did not return a fresh verified target observation.', dispatched=True)
+        return status
+
+    def admin(self, action, body, *, context=None):
+        origin = self._origin(body, context) if action in COMMAND_ACTIONS else None
+        with self.lock:
+            command = self._new_command(action, body, origin) if action in COMMAND_ACTIONS else None
+            try:
+                result = self._admin(action, body, context=context, command=command)
+            except Exception as error:
+                if command:
+                    self._command_event(command, 'error' if command['started'] else 'rejected', error=error)
+                raise
+            if command and command['started']:
+                self._command_event(command, 'returned', result=result)
+            return result
+
+    def _admin(self, action, body, *, context=None, command=None):
         with self.lock:
             processing = self._prepare_processing(body) if action == 'processing' else None
+            work = self._prepare_work(body) if action == 'work' else None
             if action == 'configure' and 'bookEnabled' in body and not isinstance(body['bookEnabled'], bool):
                 raise ValueError('bookEnabled must be true or false.')
             if action == 'move':
@@ -469,21 +908,66 @@ class Party:
                         or len(set(expected)) != len(expected)
                         or uid not in expected or before_uid not in expected):
                     raise ValueError('Supply the complete unique explicit queue UIDs, including the moved occurrence and anchor.')
+            if action == 'reorder':
+                ordered, expected = body.get('orderedQueuedUids'), body.get('expectedQueuedUids')
+                current_uid, device_id = body.get('expectedCurrentUid'), body.get('expectedDeviceId')
+                if (not all(isinstance(value, list) for value in (ordered, expected))
+                        or any(not isinstance(uid, str) or not uid or len(uid) > 512 for values in (ordered, expected) for uid in values)
+                        or len(set(ordered)) != len(ordered) or len(set(expected)) != len(expected)
+                        or set(ordered) != set(expected)
+                        or not all(isinstance(value, str) and 0 < len(value) <= 512 for value in (current_uid, device_id))):
+                    raise ValueError('Supply a unique permutation of the complete explicit queue and the expected current occurrence/device.')
+            if action == 'playback':
+                paused = body.get('paused')
+                current_uid, device_id = body.get('expectedCurrentUid'), body.get('expectedDeviceId')
+                if type(paused) is not bool or not all(isinstance(value, str) and value.strip() and len(value) <= 512
+                                                       for value in (current_uid, device_id)):
+                    raise ValueError('Supply paused as a boolean and the expected current occurrence/device IDs.')
+            if action == 'scene' and 'songVisual' in body:
+                visual = body['songVisual']
+                if visual is not None and (not isinstance(visual, dict) or set(visual) != {'trackUid', 'theme'}
+                        or not isinstance(visual.get('trackUid'), str) or not 0 < len(visual['trackUid']) <= 512
+                        or visual.get('theme') not in SONG_THEMES):
+                    raise ValueError('songVisual must be null or {trackUid, theme} with a supported motif.')
+            if action == 'resolve-search':
+                search_id = clean(body.get('id', ''), 100)
+                uris = body.get('uris')
+                note = clean(body.get('note', ''), 500)
+                if (not isinstance(uris, list) or len(uris) > 8
+                        or any(not isinstance(uri, str) or not TRACK.fullmatch(uri) for uri in uris)
+                        or len(set(uris)) != len(uris) or (not uris and not note)):
+                    raise ValueError('Resolve a description with up to eight exact Spotify tracks or a clarification note.')
+                if not self.db.execute('SELECT 1 FROM search_descriptions WHERE id=?', (search_id,)).fetchone():
+                    raise ValueError('Unknown song description.')
+                matches = prepare_matches(body, uris)
             read_through = body.get('readThrough')
             if read_through is not None:
                 read_through = int(read_through)
             self.last_seen = now_ms()
             if read_through is not None:
-                self.db.execute('UPDATE chat SET read_at=? WHERE role=? AND id<=?', (now_ms(), 'user', read_through))
+                self.db.execute('UPDATE chat SET read_at=COALESCE(read_at,?) WHERE role=? AND id<=? AND withdrawn_at IS NULL', (now_ms(), 'user', read_through))
                 self.db.commit()
             if action == 'heartbeat':
                 result = {'dj': self._dj()}
+            elif action == 'sync':
+                return self.synchronize()
+            elif action == 'resolve-search':
+                tracks = [{**(self.track_cache.get(uri) or self.client.track(uri)),
+                           **({'match': matches[uri]} if uri in matches else {})}
+                          for uri in uris]
+                self.db.execute("UPDATE search_descriptions SET status='resolved',tracks=?,note=?,updated_at=? WHERE id=?",
+                                (json.dumps(tracks, ensure_ascii=False), note, now_ms(), search_id))
+                self._event('search_resolved', {'id': search_id, 'uris': uris})
+                result = self.description_search(search_id)
             elif action == 'processing':
-                self.set_setting('processingMessages', processing)
-                self.processing_messages = processing
+                self._legacy_processing_work(body)
+                result = {'dj': self._dj()}
+            elif action == 'work':
+                self._save_work(work['messageIds'], work)
+                self._work_changed(work['messageIds'])
                 result = {'dj': self._dj()}
             elif action == 'reply':
-                result = self.message(body, 'assistant')
+                result = self.message(body, 'assistant', context=context)
                 if body.get('caption'):
                     self.cue(body['text'], body.get('seconds'))
             elif action == 'cue':
@@ -508,6 +992,8 @@ class Party:
                     self.scene['effect'] = int(body['effect'])
                 if 'graphicsScale' in body:
                     self.scene['graphicsScale'] = max(.75, min(2, float(body['graphicsScale'])))
+                if 'songVisual' in body:
+                    self.scene['songVisual'] = body['songVisual']
                 if style != self.scene['audioStyle']:
                     self.scene['audioActStartedAt'] = now_ms()
                 self.scene['audioStyle'] = style
@@ -553,15 +1039,32 @@ class Party:
                     raise ValueError('Choose a filename from book/cards.json.')
                 result = {'bookMoment': self.book_moment}
             elif action == 'request':
-                result = self.request(body)
+                result = self.request(body, context=context)
             elif action == 'move':
                 # A pre-move poll must not overwrite the confirmed new order.
                 # The bridge sends at most one revision-checked queue command.
                 self._control_generation += 1
+                self._start_command(command)
                 result = self.client.move_queue(uid, before_uid, expected)
                 if not isinstance(result, dict) or not isinstance(result.get('status'), dict):
                     raise SpotifyError('The queue move did not return a verified Spotify observation.')
                 self._apply_observation(result['status'])
+            elif action == 'reorder':
+                self._control_generation += 1
+                self._start_command(command)
+                result = self.client.reorder_queue(ordered, expected, current_uid, device_id)
+                if not isinstance(result, dict) or not isinstance(result.get('status'), dict):
+                    raise SpotifyError('The queue reorder did not return a verified Spotify observation.', dispatched=True)
+                self._apply_observation(result['status'])
+            elif action == 'playback':
+                if paused and self.audio:
+                    self.audio.interrupt()
+                self._control_generation += 1
+                self._start_command(command)
+                result = self.client.set_paused(paused, current_uid, device_id)
+                observed = self._verified_playback_status(result, paused, current_uid, device_id)
+                self._apply_observation(observed)
+                self._event('playback', {'action': 'setPaused', 'paused': paused})
             elif action in ('next', 'pause', 'resume'):
                 if self.audio and action in ('next', 'pause'):
                     self.audio.interrupt()
@@ -569,6 +1072,7 @@ class Party:
                 # Older polls must not overwrite this command's observation,
                 # including when dispatch fails with an uncertain outcome.
                 self._control_generation += 1
+                self._start_command(command)
                 result = self.client.control(action)
                 observed = result.get('status')
                 if observed is not None:
@@ -586,6 +1090,9 @@ class Party:
         deadline = time.monotonic() + min(max(wait, 0), 45)
         with self.changed:
             self.last_seen = now_ms()
+            if after < 0:
+                after = self.db.execute('SELECT COALESCE(MAX(id),0) FROM events').fetchone()[0]
+                return {'events': [], 'lastId': after, 'state': self.snapshot()}
             while True:
                 rows = self.db.execute('SELECT * FROM events WHERE id>? ORDER BY id LIMIT 100', (after,)).fetchall()
                 if rows or time.monotonic() >= deadline or self.stop.is_set():
@@ -598,7 +1105,9 @@ class Party:
         """Reconcile one Spotify observation while the caller holds self.lock."""
         connected_before = self.spotify['connected']
         self.playback = status
-        self.spotify = {'connected': True, 'error': None, 'mode': self.client.mode}
+        self.spotify = {'connected': True, 'error': None, 'mode': self.client.mode,
+                        'observedAt': status.get('observedAt'),
+                        'explicitQueueComplete': status.get('explicitQueueComplete') is True}
         current = status.get('nowPlaying') or {}
         uri = current.get('uri', '')
         queue = status.get('queue', [])
@@ -659,10 +1168,17 @@ class Party:
                 self._event('queue_restored', {'id': rid, 'uri': pending['uri'], 'uid': uid,
                                               'status': 'playing' if is_current else 'queued'})
         self.db.commit()
+        observed_current = status.get('nowPlaying')
+        playing = self.db.execute("SELECT * FROM requests WHERE status='playing' ORDER BY created_at LIMIT 1").fetchone()
+        if observed_current and playing:
+            observed_current = {**observed_current, 'requestedUri': playing['uri'],
+                'requestId': playing['id'], 'requestedBy': playing['requested_by'], 'dedication': playing['dedication']}
+        if self.karaoke.observe(observed_current, self.spotify['connected'], now_ms()):
+            self.set_setting('karaoke', self.karaoke.saved())
         if self.audio:
             requests = [self._request_dict(r) for r in self.db.execute(
                 "SELECT * FROM requests WHERE status IN ('pending','queued','uncertain','playing') ORDER BY created_at").fetchall()]
-            self.audio.observe(self.snapshot().get('nowPlaying'), requests)
+            self.audio.observe(observed_current, requests, playback_state=status.get('playbackState'))
         if not connected_before:
             self._event('spotify', {'connected': True, 'mode': self.client.mode})
         # Compare observed occurrences, including their order and duplicates.
@@ -688,14 +1204,7 @@ class Party:
             with self.lock:
                 if generation != self._control_generation:
                     return
-                message = str(error)[:300]
-                changed = self.spotify['connected'] or self.spotify.get('error') != message
-                self.spotify = {'connected': False, 'error': message}
-                # The last observation cannot identify what another Spotify
-                # process is now playing after a desktop or Connect restart.
-                self.playback = {'nowPlaying': None, 'queue': []}
-                if changed:
-                    self._event('spotify', self.spotify)
+                self._observation_failed(error)
 
     def _dispatch(self):
         with self.lock:
@@ -706,11 +1215,18 @@ class Party:
                 return
             self.db.execute("UPDATE requests SET status='sending',updated_at=? WHERE id=?", (now_ms(), row['id']))
             self.db.commit()
+            command = self._new_command('enqueue', {'requestId': row['id'], 'uri': row['uri']}, self._stored_origin(row))
+            self._start_command(command)
         try:
             result = self.client.enqueue(row['uri'], row['id'])
+            if (not isinstance(result, dict) or result.get('queued') is not True
+                    or result.get('uri') != row['uri'] or result.get('requestId') != row['id']
+                    or not isinstance(result.get('uid'), str) or not result['uid'].strip() or len(result['uid']) > 512):
+                raise SpotifyError('The queue add did not return a confirmed requested occurrence.', dispatched=True)
         except Exception as error:
             with self.lock:
-                known_not_sent = isinstance(error, SpotifyError) and not error.dispatched
+                self._command_event(command, 'error', error=error)
+                known_not_sent = isinstance(error, SpotifyError) and error.dispatched is False
                 state = 'pending' if known_not_sent else 'uncertain'
                 self.db.execute("UPDATE requests SET status=?,error=?,updated_at=? WHERE id=?",
                     (state, str(error)[:300], now_ms(), row['id']))
@@ -719,6 +1235,7 @@ class Party:
                     {'id': row['id'], 'uri': row['uri'], 'error': str(error)[:300]})
         else:
             with self.lock:
+                self._command_event(command, 'returned', result=result)
                 if isinstance(result, dict) and result.get('uid'):
                     track = json.loads(row['track'])
                     track['uid'] = result['uid']
@@ -772,6 +1289,10 @@ class Handler(BaseHTTPRequestHandler):
         token = self.headers.get('Authorization', '')
         return hmac.compare_digest(token, 'Bearer ' + self.party.admin_token)
 
+    def request_context(self):
+        return {'operatorLabel': self.headers.get('X-DJ-Operator', ''),
+                'httpPeer': {'address': self.client_address[0], 'port': self.client_address[1]}}
+
     def file(self, base, relative):
         base = base.resolve()
         filename = (base / unquote(relative)).resolve()
@@ -799,6 +1320,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({'error': 'DJ access required.'}, 401)
                 elif url.path == '/api/admin/events':
                     self.send_json(self.party.events(int(query.get('after', ['0'])[0]), float(query.get('wait', ['0'])[0])))
+                elif url.path == '/api/admin/message-info':
+                    self.send_json(self.party.message_info(int(query.get('id', ['0'])[0])))
                 else:
                     self.send_json({'error': 'Unknown endpoint.'}, 404)
             elif url.path == '/api/state':
@@ -807,6 +1330,11 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == '/api/search':
                 self.party.limit(self.client_address[0], 'search', 30, 60)
                 self.send_json(self.party.search(query.get('q', [''])[0]))
+            elif url.path == '/api/search/describe':
+                self.send_json(self.party.description_search(query.get('id', [''])[0]))
+            elif url.path == '/api/track':
+                self.party.limit(self.client_address[0], 'track', 30, 60)
+                self.send_json(self.party.lookup_track(query.get('uri', [''])[0]))
             elif url.path == '/api/chat':
                 self.send_json(self.party.chat(int(query.get('after', ['0'])[0])))
             elif url.path == '/health':
@@ -843,14 +1371,20 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.authorized():
                     self.send_json({'error': 'DJ access required.'}, 401)
                     return
-                self.send_json(self.party.admin(url.path.rsplit('/', 1)[-1], body))
+                self.send_json(self.party.admin(url.path.rsplit('/', 1)[-1], body, context=self.request_context()))
             elif url.path == '/api/request':
                 self.party.limit(self.client_address[0], 'request', 15, 60)
-                self.send_json(self.party.request(body))
+                self.send_json(self.party.request(body, context=self.request_context()))
             elif url.path == '/api/message':
                 self.party.limit(self.client_address[0], 'message', 20, 60)
                 self.party.visit(body.get('guestId', ''))
-                self.send_json(self.party.message(body))
+                self.send_json(self.party.message(body, context=self.request_context()))
+            elif url.path == '/api/message/recall':
+                self.party.limit(self.client_address[0], 'recall', 30, 60)
+                self.send_json(self.party.recall_message(body))
+            elif url.path == '/api/search/describe':
+                self.party.limit(self.client_address[0], 'describe', 15, 60)
+                self.send_json(self.party.describe_search(body))
             elif url.path == '/api/mood':
                 self.party.limit(self.client_address[0], 'mood', 20, 60)
                 self.party.visit(body.get('guestId', ''))
@@ -861,8 +1395,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({'error': str(error)}, 400)
         except SpotifyError as error:
             detail = {'error': str(error)}
-            if url.path == '/api/admin/move':
+            if url.path in ('/api/admin/move', '/api/admin/reorder', '/api/admin/sync', '/api/admin/playback',
+                            '/api/admin/next', '/api/admin/pause', '/api/admin/resume'):
                 detail['dispatched'] = error.dispatched
+            if url.path == '/api/admin/sync':
+                detail['state'] = self.party.snapshot()
             self.send_json(detail, 503)
         except Exception as error:
             print(f'POST {url.path}: {type(error).__name__}: {error}', flush=True)
