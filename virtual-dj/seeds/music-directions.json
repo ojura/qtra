@@ -1,0 +1,361 @@
+{
+  "schemaVersion": 1,
+  "nonexclusive": true,
+  "energyScale": {
+    "min": 1,
+    "max": 5,
+    "low": "calm",
+    "high": "peak",
+    "basis": "Curatorial judgment, not measured audio features. A typical level is not a rule for every recording or audience."
+  },
+  "directions": [
+    {
+      "id": "funk_dance",
+      "name": "Funk and rhythmic dance",
+      "energy": 4,
+      "adjacentDirections": [
+        "synthpop_dance",
+        "international_disco",
+        "guitar_party",
+        "club_electronic"
+      ],
+      "signals": [
+        "A guest asks to sustain a dance groove: keep rhythmic continuity across the next two or three songs.",
+        "An artist block is explicitly requested: choose unplayed compatible recordings, then respond to any newer direction."
+      ],
+      "searches": [
+        "Dino Dvornik Pelin i med",
+        "Jamiroquai Canned Heat",
+        "Kool & The Gang Get Down On It"
+      ],
+      "examples": [
+        {
+          "title": "Ritam moj",
+          "artist": "Dino Dvornik",
+          "album": "Svicky",
+          "uri": "spotify:track:0m4hU7fZIWTycecrlfahqi",
+          "durationMs": 235826,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        },
+        {
+          "title": "Hipnotiziran - Radio Edit",
+          "artist": "Dino Dvornik",
+          "album": "Pandorina Kutija (Special Edition)",
+          "uri": "spotify:track:0GDVfHWw92pdR20uvpZMeJ",
+          "durationMs": 231586,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        }
+      ]
+    },
+    {
+      "id": "guitar_party",
+      "name": "Guitar-driven party music",
+      "energy": 4,
+      "adjacentDirections": [
+        "funk_dance",
+        "synthpop_dance",
+        "singalong",
+        "comic_party"
+      ],
+      "signals": [
+        "The guest promotes an energetic guitar song: protect its turn and choose a similarly direct next recording.",
+        "A quieter older request is waiting: plan a recognisable transition after the current energetic block instead of forgetting it."
+      ],
+      "searches": [
+        "Prljavo Kazalište Sretno dijete",
+        "Bajaga Muzika na struju",
+        "Film Zamisli život u ritmu muzike za ples",
+        "AC/DC You Shook Me All Night Long"
+      ],
+      "examples": [
+        {
+          "title": "Muzika na struju",
+          "artist": "Bajaga & Instruktori",
+          "album": "Muzika Na Struju",
+          "uri": "spotify:track:5uHfcuy2FhpvNkqCWmUTnm",
+          "durationMs": 236839,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        },
+        {
+          "title": "Ivona",
+          "artist": "Djavoli, Neno Belan",
+          "album": "Space Twist",
+          "uri": "spotify:track:0GKuNObPd77139iflBGtVc",
+          "durationMs": 305640,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        }
+      ]
+    },
+    {
+      "id": "synthpop_dance",
+      "name": "Synthpop and familiar electronic pop",
+      "energy": 4,
+      "adjacentDirections": [
+        "funk_dance",
+        "international_disco",
+        "melodic_pop",
+        "club_electronic"
+      ],
+      "signals": [
+        "The room asks for familiar dance refrains: choose a recognisable vocal over a steady electronic rhythm.",
+        "A previous song in the same style already played: find a fresh title rather than a new remaster URI."
+      ],
+      "searches": [
+        "Denis & Denis Program tvog kompjutera",
+        "ET Da ti nisam bila dovoljna",
+        "Colonia Svijet voli pobjednike",
+        "The Human League Don't You Want Me"
+      ],
+      "examples": [
+        {
+          "title": "Program tvog kompjutera - Remaster 2026.",
+          "artist": "Denis & Denis",
+          "album": "Čuvaj Se! (Remaster 2026.)",
+          "uri": "spotify:track:0CfW7AdFw00uUdOOoE9nUV",
+          "durationMs": 257440,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        },
+        {
+          "title": "California",
+          "artist": "Neki to vole vruće",
+          "album": "Neki To Vole Vruće",
+          "uri": "spotify:track:54jRREG8sUJrQWAf0mCKPE",
+          "durationMs": 151186,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        }
+      ]
+    },
+    {
+      "id": "melodic_pop",
+      "name": "Melodic regional and familiar pop",
+      "energy": 3,
+      "adjacentDirections": [
+        "singalong",
+        "synthpop_dance",
+        "guitar_party",
+        "warm_interlude"
+      ],
+      "signals": [
+        "The guest chooses a familiar melodic pop song: continue its vocal warmth without assuming the whole room wants a slow set.",
+        "The explicit queue has been cleared: follow the new selections and build a fresh short continuation."
+      ],
+      "searches": [
+        "Magazin Kokolo",
+        "Novi Fosili Milena",
+        "Neno Belan Rijeka snova"
+      ],
+      "examples": [
+        {
+          "title": "Kokolo",
+          "artist": "Magazin",
+          "album": "Kokolo",
+          "uri": "spotify:track:7BKkabhW7MgFRbNUQGQ2qb",
+          "durationMs": 217706,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        },
+        {
+          "title": "Milena",
+          "artist": "Novi Fosili",
+          "album": "Poslije Svega",
+          "uri": "spotify:track:0v4ENERISDEx6BfnpQ1953",
+          "durationMs": 227853,
+          "energy": 3,
+          "energyBasis": "curatorial judgment"
+        },
+        {
+          "title": "Rijeka Snova",
+          "artist": "Neno Belan, Fiumens",
+          "album": "Oceani Ljubavi",
+          "uri": "spotify:track:6CrVVa2CWnmLysxIAMOMf1",
+          "durationMs": 294426,
+          "energy": 3,
+          "energyBasis": "curatorial judgment"
+        }
+      ]
+    },
+    {
+      "id": "singalong",
+      "name": "Communal singalong",
+      "energy": 3,
+      "adjacentDirections": [
+        "melodic_pop",
+        "guitar_party",
+        "warm_interlude",
+        "international_disco"
+      ],
+      "signals": [
+        "Guests report singing together: choose familiar unplayed refrains and leave room for the voices.",
+        "A dedication is requested: identify the intended person and recording while keeping ordinary playback continuous during preparation."
+      ],
+      "searches": [
+        "Novi Fosili Za dobra stara vremena",
+        "Plavi Orkestar Suada",
+        "Queen Don't Stop Me Now"
+      ],
+      "examples": []
+    },
+    {
+      "id": "comic_party",
+      "name": "Comic and exuberant party songs",
+      "energy": 5,
+      "adjacentDirections": [
+        "guitar_party",
+        "funk_dance",
+        "singalong",
+        "folk_pop_crossover"
+      ],
+      "signals": [
+        "Guests explicitly turn toward playful or comic songs: sustain the exuberance with related choices.",
+        "A comic song has a different stylistic edge: check the host's genre and explicit-content boundaries before treating it as permission for a broader change."
+      ],
+      "searches": [
+        "Vatrogasci Traktori",
+        "Dreletronic Vumrl mi je pajcek moj",
+        "Let 3 Mama ŠČ"
+      ],
+      "examples": []
+    },
+    {
+      "id": "warm_interlude",
+      "name": "Warm or reflective interlude",
+      "energy": 2,
+      "adjacentDirections": [
+        "melodic_pop",
+        "singalong",
+        "guitar_party"
+      ],
+      "signals": [
+        "The host asks for a breather or softer emotional passage: lower intensity through a familiar transition.",
+        "Chat is merely quiet: do not infer that a quieter interlude is wanted without another signal."
+      ],
+      "searches": [
+        "Neno Belan Dotakni me usnama",
+        "Oliver Dragojević Trag u beskraju",
+        "Ben E. King Stand By Me"
+      ],
+      "examples": []
+    },
+    {
+      "id": "international_disco",
+      "name": "International disco and pop dance",
+      "energy": 4,
+      "adjacentDirections": [
+        "funk_dance",
+        "synthpop_dance",
+        "singalong",
+        "club_electronic"
+      ],
+      "signals": [
+        "The audience asks for wider familiar dance music: use a strong chorus to connect the current groove to a different language or era.",
+        "The audience requested a specific regional artist block: preserve that request rather than substituting this direction automatically."
+      ],
+      "searches": [
+        "ABBA Gimme Gimme Gimme",
+        "Moloko Sing It Back Boris Musical Mix Edit",
+        "Dua Lipa Don't Start Now"
+      ],
+      "examples": []
+    },
+    {
+      "id": "club_electronic",
+      "name": "Club electronics",
+      "energy": 5,
+      "adjacentDirections": [
+        "funk_dance",
+        "synthpop_dance",
+        "international_disco",
+        "hip_hop_rnb"
+      ],
+      "signals": [
+        "Guests explicitly want a stronger continuous dance pulse: maintain it across the short next-song front.",
+        "A candidate has an extended introduction or long club version: compare its duration and arrangement with the audience's requested pace."
+      ],
+      "searches": [
+        "Daft Punk One More Time",
+        "Faithless Insomnia Radio Edit",
+        "The Chemical Brothers Hey Boy Hey Girl"
+      ],
+      "examples": []
+    },
+    {
+      "id": "hip_hop_rnb",
+      "name": "Hip-hop and R&B party rhythm",
+      "energy": 4,
+      "adjacentDirections": [
+        "funk_dance",
+        "club_electronic",
+        "international_disco",
+        "latin_dance"
+      ],
+      "signals": [
+        "Guests ask for rap or R&B: choose a recognisable rhythmic connection from the current song.",
+        "Check the selected recording's explicit flag and the host's preferences; an artist name does not determine whether this recording fits."
+      ],
+      "searches": [
+        "Missy Elliott Get Ur Freak On",
+        "Usher Yeah",
+        "Nelly Hot in Herre"
+      ],
+      "examples": []
+    },
+    {
+      "id": "latin_dance",
+      "name": "Latin and global dance pop",
+      "energy": 4,
+      "adjacentDirections": [
+        "international_disco",
+        "hip_hop_rnb",
+        "funk_dance",
+        "singalong"
+      ],
+      "signals": [
+        "Guests request a Latin or global dance turn: use a familiar rhythmic transition and observe the next response.",
+        "Do not assume language or nationality from the people in the room; use their requests and reactions."
+      ],
+      "searches": [
+        "Gipsy Kings Bamboléo",
+        "Celia Cruz La Vida Es Un Carnaval",
+        "Luis Fonsi Despacito"
+      ],
+      "examples": []
+    },
+    {
+      "id": "folk_pop_crossover",
+      "name": "Regional folk and pop crossover",
+      "energy": 4,
+      "adjacentDirections": [
+        "comic_party",
+        "singalong",
+        "melodic_pop",
+        "guitar_party"
+      ],
+      "signals": [
+        "A guest explicitly selects a crossover song: preserve that turn, then judge the next move from their actual direction.",
+        "A host sets a hard limit on further folk influence: stop expansion into this direction and choose permitted adjacent material."
+      ],
+      "searches": [
+        "Željko Bebek Sinoć sam pola kafane popio",
+        "Vuco Volim piti i ljubiti",
+        "Nedeljko Bajić Baja Koktel ljubavi"
+      ],
+      "examples": [
+        {
+          "title": "Sinoć sam pola kafane popio",
+          "artist": "Željko Bebek",
+          "album": "Niko više ne sanja",
+          "uri": "spotify:track:2QQYG5M39oAaxz3hbzfCB8",
+          "durationMs": 233880,
+          "energy": 4,
+          "energyBasis": "curatorial judgment"
+        }
+      ]
+    }
+  ]
+}
