@@ -1282,7 +1282,7 @@ private:
         const qint64 expires = static_cast<qint64>(number(book, "expiresAt", 0));
         if (book_.isNull() || (expires > 0 && QDateTime::currentMSecsSinceEpoch() >= expires)) return {};
         const QRectF card(0, 0, w, h);
-        const QSizeF imageSize = QSizeF(book_.size()).scaled(card.size(), Qt::KeepAspectRatio);
+        const QSizeF imageSize = QSizeF(book_.size()).scaled(QSizeF(w * .75, h), Qt::KeepAspectRatio);
         const QRectF destination((w - imageSize.width()) / 2, h - imageSize.height(), imageSize.width(), imageSize.height());
         p.save();
         Q_UNUSED(orange);

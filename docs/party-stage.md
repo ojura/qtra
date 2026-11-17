@@ -131,9 +131,10 @@ the main accent to cyan; other values use warm orange.
 
 `scene.graphicsScale` defaults to 1. It scales the robot fleet and delivered
 records immediately; 1.5 makes them fifty percent larger. The stage reports the
-applied value as `graphicsScale` in runtime status. Photographs take the entire
-main stage, scale to fit with their aspect ratio preserved, and meet its bottom
-edge. An opaque background covers the visualizer while the photo is visible.
+applied value as `graphicsScale` in runtime status. Photographs fit within 75% of
+the free main pane's width, after excluding the right panel. They stay centered,
+preserve their aspect ratio, and meet the bottom edge. An opaque background covers
+the entire main pane's visualizer while the photo is visible.
 Titles and captions overlay the image. Robot paths retain fixed caption clearance
 when the visualizer returns. Labels grow with the robots. The request controls,
 QR and current-track panel keep their readable size.
