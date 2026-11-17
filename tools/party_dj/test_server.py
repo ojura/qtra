@@ -51,6 +51,9 @@ class FakeSpotify:
         self.metadata_barrier = None
         self.control_calls = []
         self.control_result = None
+        self.move_calls = []
+        self.move_result = None
+        self.move_error = None
 
     def track(self, uri):
         if self.metadata_barrier is not None:
@@ -65,6 +68,12 @@ class FakeSpotify:
         self.control_calls.append(action)
         return copy.deepcopy(self.control_result if self.control_result is not None
                              else {'ok': True, 'action': action})
+
+    def move_queue(self, uid, before_uid, expected):
+        self.move_calls.append((uid, before_uid, list(expected)))
+        if self.move_error is not None:
+            raise self.move_error
+        return copy.deepcopy(self.move_result)
 
     def enqueue(self, uri, request_id):
         self.enqueue_calls.append((uri, request_id))
@@ -258,6 +267,104 @@ class PartyTests(unittest.TestCase):
                         self.party.stop.set()
                         self.party.changed.notify_all()
                     pending.result(timeout=5)
+
+    def test_queue_move_publishes_confirmed_order_and_keeps_request_metadata(self):
+        self.queued_request()
+        requested = self.client.queue[0]
+        duplicate = {**track(TRACK_A), 'uid': 'another-occurrence'}
+        self.client.queue.append(duplicate)
+        self.party._refresh()
+        fresh = self.client.status()
+        fresh['queue'] = [duplicate, requested]
+        self.client.move_result = {'ok': True, 'moved': True, 'status': fresh}
+        expected = [requested['uid'], duplicate['uid']]
+        with patch.object(self.client, 'status', wraps=self.client.status) as status:
+            result = self.party.admin('move', {'uid': duplicate['uid'], 'beforeUid': requested['uid'],
+                                               'expectedQueuedUids': expected})
+        status.assert_not_called()
+        self.assertEqual(self.client.move_calls, [(duplicate['uid'], requested['uid'], expected)])
+        self.assertEqual(result, self.client.move_result)
+        snapshot = self.party.snapshot()
+        self.assertEqual([item['uid'] for item in snapshot['queue']], list(reversed(expected)))
+        self.assertNotEqual(snapshot['queue'][0]['id'], 'request-a')
+        self.assertEqual(snapshot['queue'][1]['id'], 'request-a')
+        self.assertEqual(snapshot['queue'][1]['requestedBy'], 'Test guest')
+        self.assertEqual(snapshot['nowPlaying'], fresh['nowPlaying'])
+        self.assertEqual(json.loads((self.party.data / 'state.json').read_text())['queue'], snapshot['queue'])
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(len(self.client.enqueue_calls), 1)
+
+    def test_queue_move_validates_before_read_receipts_or_dispatch(self):
+        message = self.party.message({'requestId': 'move-validation', 'text': 'Keep the front lively.'})['message']
+        valid = {'uid': 'second', 'beforeUid': 'first', 'expectedQueuedUids': ['first', 'second'],
+                 'readThrough': message['id']}
+        before = (self.party.revision, self.party._control_generation, self.party.last_seen)
+        for change in ({'uid': None}, {'beforeUid': ''}, {'uid': 'first'},
+                       {'expectedQueuedUids': 'first,second'}, {'expectedQueuedUids': ['first']},
+                       {'expectedQueuedUids': ['first', 'second', 'second']},
+                       {'expectedQueuedUids': ['first', None]}, {'uid': 'missing'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.party.admin('move', {**valid, **change})
+            self.assertEqual((self.party.revision, self.party._control_generation, self.party.last_seen), before)
+        self.assertIsNone(self.party.db.execute('SELECT read_at FROM chat WHERE id=?', (message['id'],)).fetchone()[0])
+        self.assertEqual(self.client.move_calls, [])
+        self.assertEqual(self.client.control_calls, [])
+
+    def test_queue_move_failure_is_not_retried_or_published_as_success(self):
+        self.party._refresh()
+        with self.party.lock:
+            self.party._publish()
+        before = (self.party.revision, copy.deepcopy(self.party.playback),
+                  (self.party.data / 'state.json').read_bytes())
+        for failure in (SpotifyError('Stale order', dispatched=False),
+                        SpotifyError('Confirmation lost', dispatched=True), None):
+            with self.subTest(failure=failure):
+                self.client.move_error = failure
+                self.client.move_result = {'ok': True}  # Missing verified state must also fail.
+                calls = len(self.client.move_calls)
+                with self.assertRaises(SpotifyError) as raised:
+                    self.party.admin('move', {'uid': 'second', 'beforeUid': 'first',
+                                              'expectedQueuedUids': ['first', 'second']})
+                self.assertEqual(raised.exception.dispatched, failure.dispatched if failure else True)
+                self.assertEqual(len(self.client.move_calls), calls + 1)
+                self.assertEqual((self.party.revision, self.party.playback,
+                                  (self.party.data / 'state.json').read_bytes()), before)
+        self.assertEqual(self.client.control_calls, [])
+
+    def test_late_poll_cannot_replace_a_verified_queue_move(self):
+        old = observation(self.stamp)
+        old['queue'] = [{**track(TRACK_A), 'uid': 'first'}, {**track(TRACK_B), 'uid': 'second'}]
+        self.client.current, self.client.queue = old['nowPlaying'], old['queue']
+        self.party._refresh()
+        fresh = copy.deepcopy(old)
+        fresh['queue'].reverse()
+        self.client.move_result = {'ok': True, 'moved': True, 'status': fresh}
+        last_id = self.party.events()['lastId']
+        observed, release = threading.Event(), threading.Event()
+
+        def delayed_status():
+            observed.set()
+            if not release.wait(timeout=5):
+                raise AssertionError('The test did not release the old queue observation.')
+            return old
+
+        with patch.object(self.client, 'status', side_effect=delayed_status):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(self.party._refresh)
+                try:
+                    self.assertTrue(observed.wait(timeout=5))
+                    with self.party.lock:
+                        release.set()
+                        self.party.admin('move', {'uid': 'second', 'beforeUid': 'first',
+                                                  'expectedQueuedUids': ['first', 'second']})
+                finally:
+                    release.set()
+                pending.result(timeout=5)
+        self.assertEqual(self.party.playback, fresh)
+        self.assertEqual(self.client.move_calls, [('second', 'first', ['first', 'second'])])
+        changes = [event for event in self.party.events(after=last_id)['events'] if event['kind'] == 'queue_changed']
+        self.assertEqual(len(changes), 1)
+        self.assertEqual([item['uid'] for item in changes[0]['payload']['queue']], ['second', 'first'])
 
     def test_transport_publishes_verified_pause_and_resume_before_returning(self):
         for action, paused in [('pause', True), ('resume', False)]:
@@ -883,6 +990,35 @@ class PartyTests(unittest.TestCase):
         result = self.party.admin('processing', {'messageIds': [identifiers[-1]], 'active': True})
         self.assertEqual(result['dj']['processingMessageIds'], [identifiers[-1]])
         self.assertEqual(len(self.party.setting('processingMessages')), 1)
+
+    def test_queue_move_cli_preserves_dispatch_uncertainty_from_http(self):
+        class QuietHandler(server.Handler):
+            def log_message(self, *args):
+                pass
+        http = server.ThreadingHTTPServer(('127.0.0.1', 0), QuietHandler)
+        http.party = self.party
+        http.daemon_threads = True
+        worker = threading.Thread(target=lambda: http.serve_forever(poll_interval=.05), daemon=True)
+        worker.start()
+        body = {'uid': 'second', 'beforeUid': 'first', 'expectedQueuedUids': ['first', 'second']}
+        try:
+            for dispatched in (False, True):
+                with self.subTest(dispatched=dispatched):
+                    self.client.move_error = SpotifyError('Move not confirmed', dispatched=dispatched)
+                    command = subprocess.run([sys.executable, str(server.ROOT / 'djctl.py'), 'move',
+                        '--json', json.dumps(body), '--url', f'http://127.0.0.1:{http.server_port}',
+                        '--data', str(self.party.data)], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(command.returncode, 1)
+                    self.assertEqual(command.stderr, '')
+                    self.assertEqual(json.loads(command.stdout),
+                                     {'error': 'Move not confirmed', 'dispatched': dispatched})
+            self.assertEqual(len(self.client.move_calls), 2)
+            self.assertEqual(self.client.control_calls, [])
+            self.assertEqual(self.client.enqueue_calls, [])
+        finally:
+            http.shutdown()
+            http.server_close()
+            worker.join(timeout=2)
 
     def test_processing_http_requires_admin_and_cli_updates_an_empty_chat_poll(self):
         message_id = self.guest_messages(1)[0]

@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 7) return {ready: true};
+  if (window.__laricsDJ?.version === 8) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -94,7 +94,7 @@
 
   const operations = window.__laricsDJ?.operations || new Map();
   const bridge = {
-    version: 7,
+    version: 8,
     operations,
     async status() {
       if (browserController) ensureActualState();
@@ -207,6 +207,122 @@
       const result = await pending;
       if (result?.dispatched === false) operations.delete(requestId);
       return result;
+    },
+    async moveQueue(uid, beforeUid, expectedQueuedUids) {
+      let dispatched = false;
+      try {
+        const validUid = value => typeof value === 'string' && value.length > 0;
+        const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+        if (!validUid(uid) || !validUid(beforeUid) || uid === beforeUid) {
+          throw new Error('Choose two distinct queue occurrence UIDs for the move.');
+        }
+        if (!Array.isArray(expectedQueuedUids) || expectedQueuedUids.length < 2
+            || !expectedQueuedUids.every(validUid) || new Set(expectedQueuedUids).size !== expectedQueuedUids.length) {
+          throw new Error('The expected explicit queue must contain unique, nonempty occurrence UIDs.');
+        }
+        const queueApi = player._queue;
+        const manager = queueApi?._queueManager;
+        if (typeof queueApi?.getInternalQueue !== 'function' || typeof manager?.setInternalPlayerQueue !== 'function'
+            || typeof harmony?.getCurrentState !== 'function') {
+          throw new Error('Spotify has no revision-checked, targeted queue move connection.');
+        }
+        const identity = item => [item?.uid, item?.uri];
+        const signature = items => items.map(item => [item.uid, item.uri, item.provider, item.type,
+          !!item.hidden_in_queue, item.metadata?.is_queued]);
+        const explicit = items => items.filter(item => item.provider === 'queue' && !item.hidden_in_queue);
+        const internal = () => {
+          const value = queueApi.getInternalQueue();
+          if (!value || value.revision === undefined || value.revision === null
+              || !Array.isArray(value.next_items) || !Array.isArray(value.previous_items)
+              || !validUid(value.current_track?.uid) || !value.current_track?.uri) {
+            throw new Error('Spotify has no complete revision and current occurrence for a queue move.');
+          }
+          return value;
+        };
+        const target = deviceInfo(await activeTarget());
+        const before = await bridge.status();
+        const initial = internal();
+        const current = identity(initial.current_track);
+        const revision = initial.revision;
+        const next = initial.next_items.slice();
+        const previous = initial.previous_items;
+        const originalNext = signature(next);
+        const originalPrevious = signature(previous);
+        const checkStatus = status => {
+          if (status.playbackState.source !== 'harmony') throw new Error('The active Spotify device has no complete playback clock.');
+          if (status.playbackState.device && status.playbackState.device.id !== target.id) {
+            throw new Error('The observed Spotify device changed during the queue move.');
+          }
+          if (!same(identity(status.nowPlaying), current)) throw new Error('The current Spotify occurrence changed during the queue move.');
+        };
+        checkStatus(before);
+        const observedUids = before.queue.filter(item => item.source === 'queue').map(item => item.uid);
+        if (!same(observedUids, expectedQueuedUids)
+            || !same(explicit(next).map(item => item.uid), expectedQueuedUids)) {
+          throw new Error('The explicit Spotify queue changed; observe its current order before moving an occurrence.');
+        }
+        // Uniqueness belongs to explicit occurrences. Repeated context items and
+        // delimiters stay intact and are never reconstructed from status.queue.
+        const matches = id => next.filter(item => item.provider === 'queue' && item.uid === id);
+        const moved = matches(uid), anchor = matches(beforeUid);
+        if (moved.length !== 1 || anchor.length !== 1
+            || moved[0].hidden_in_queue || anchor[0].hidden_in_queue
+            || !expectedQueuedUids.includes(uid) || !expectedQueuedUids.includes(beforeUid)) {
+          throw new Error('The moved occurrence and its anchor must each exist exactly once in the explicit queue.');
+        }
+        next.splice(next.indexOf(moved[0]), 1);
+        next.splice(next.indexOf(anchor[0]), 0, moved[0]);
+        const desiredUids = explicit(next).map(item => item.uid);
+        const desiredNext = signature(next);
+
+        const raw = await harmony.getCurrentState();
+        if (!same(identity(raw?.track_window?.current_track), current)) {
+          throw new Error('The current Spotify occurrence changed before queue dispatch.');
+        }
+        if ((await activeTarget()).id !== target.id) throw new Error('The active Spotify device changed before queue dispatch.');
+        ensureActualState();
+        const latest = internal();
+        if (latest.revision !== revision || !same(identity(latest.current_track), current)
+            || !same(signature(latest.next_items), originalNext)
+            || !same(signature(latest.previous_items), originalPrevious)) {
+          throw new Error('The Spotify queue revision or current occurrence changed before queue dispatch.');
+        }
+        if (manager._currentPlayerState?.restrictions?.disallow_set_queue_reasons?.length) {
+          throw new Error('The active Spotify device currently forbids queue changes.');
+        }
+        if (same(desiredUids, expectedQueuedUids)) {
+          return {ok: true, action: 'moveQueue', moved: false, uid, beforeUid, device: target, status: before};
+        }
+        // Use the awaitable manager behind the UI: the public reorder wrapper
+        // drops this promise. Keep the server revision check and explicit target.
+        dispatched = true;
+        const accepted = await manager.setInternalPlayerQueue({revision, next_items: next, previous_items: previous},
+          target.id, {ignoreRevision: false});
+        if (accepted === false) throw new Error('Spotify did not accept the queue move for the active device.');
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          if ((await activeTarget()).id !== target.id) throw new Error('The active Spotify device changed before the queue move was confirmed.');
+          const status = await bridge.status();
+          checkStatus(status);
+          const observed = internal();
+          if (!same(identity(observed.current_track), current) || !same(signature(observed.previous_items), originalPrevious)) {
+            throw new Error('The current occurrence or playback history changed before the queue move was confirmed.');
+          }
+          const observedNext = signature(observed.next_items);
+          const publicOrder = status.queue.filter(item => item.source === 'queue').map(item => item.uid);
+          if (same(publicOrder, desiredUids) && same(observedNext, desiredNext)) {
+            return {ok: true, action: 'moveQueue', moved: true, uid, beforeUid, device: target, status};
+          }
+          if ((!same(publicOrder, expectedQueuedUids) && !same(publicOrder, desiredUids))
+              || (!same(observedNext, originalNext) && !same(observedNext, desiredNext))) {
+            throw new Error('The Spotify queue changed concurrently before the move was confirmed.');
+          }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        throw new Error('Spotify queue move was sent, but the observed queue did not confirm it.');
+      } catch (error) {
+        return {error: String(error?.message || error), dispatched};
+      }
     },
     async control(action) {
       if (action === 'next') {

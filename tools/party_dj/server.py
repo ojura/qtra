@@ -459,6 +459,16 @@ class Party:
             processing = self._prepare_processing(body) if action == 'processing' else None
             if action == 'configure' and 'bookEnabled' in body and not isinstance(body['bookEnabled'], bool):
                 raise ValueError('bookEnabled must be true or false.')
+            if action == 'move':
+                uid, before_uid = body.get('uid'), body.get('beforeUid')
+                expected = body.get('expectedQueuedUids')
+                if not all(isinstance(value, str) and value for value in (uid, before_uid)) or uid == before_uid:
+                    raise ValueError('Choose two distinct queue occurrence UIDs for the move.')
+                if (not isinstance(expected, list) or len(expected) < 2
+                        or not all(isinstance(value, str) and value for value in expected)
+                        or len(set(expected)) != len(expected)
+                        or uid not in expected or before_uid not in expected):
+                    raise ValueError('Supply the complete unique explicit queue UIDs, including the moved occurrence and anchor.')
             read_through = body.get('readThrough')
             if read_through is not None:
                 read_through = int(read_through)
@@ -544,6 +554,14 @@ class Party:
                 result = {'bookMoment': self.book_moment}
             elif action == 'request':
                 result = self.request(body)
+            elif action == 'move':
+                # A pre-move poll must not overwrite the confirmed new order.
+                # The bridge sends at most one revision-checked queue command.
+                self._control_generation += 1
+                result = self.client.move_queue(uid, before_uid, expected)
+                if not isinstance(result, dict) or not isinstance(result.get('status'), dict):
+                    raise SpotifyError('The queue move did not return a verified Spotify observation.')
+                self._apply_observation(result['status'])
             elif action in ('next', 'pause', 'resume'):
                 if self.audio and action in ('next', 'pause'):
                     self.audio.interrupt()
@@ -842,7 +860,10 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError) as error:
             self.send_json({'error': str(error)}, 400)
         except SpotifyError as error:
-            self.send_json({'error': str(error)}, 503)
+            detail = {'error': str(error)}
+            if url.path == '/api/admin/move':
+                detail['dispatched'] = error.dispatched
+            self.send_json(detail, 503)
         except Exception as error:
             print(f'POST {url.path}: {type(error).__name__}: {error}', flush=True)
             self.send_json({'error': 'The DJ connection is recovering. Try again shortly.'}, 503)

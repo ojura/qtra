@@ -1,8 +1,9 @@
 # Spotify transport and playback observations
 
 The request service uses the existing native Spotify debugging connection when
-available, otherwise the signed-in Spotify web controller. Search and queue
-methods are unchanged by the transport handling described here.
+available, otherwise the signed-in Spotify web controller. Search and enqueue
+keep their existing behavior. The additive queue move below changes only the
+order of already queued occurrences.
 
 ## Playback ownership
 
@@ -44,6 +45,54 @@ PlayerAPI path when Harmony is absent and confirms the returned player state.
 `next` retains its existing skip path. Transport handling does not transfer
 playback, change volume, or touch audio hardware.
 
+## Moving an existing queue occurrence
+
+`moveQueue(uid, beforeUid, expectedQueuedUids)` moves one explicit queue occurrence
+immediately before another. The Python client exposes the same operation as
+`move_queue(uid, before_uid, expected_queued_uids)` under its existing shared lock.
+Callers supply the complete ordered list of explicit queue UIDs from a fresh
+observation. Both selected UIDs must occur exactly once; repeated recordings with
+different UIDs remain separate requests. Missing or ambiguous occurrences,
+URI-only identities and stale expected order are rejected before dispatch.
+
+The inspected UI API is `PlayerAPI.reorderQueue(items, {before: anchor})`, but its
+current implementation drops the promise returned by its queue manager. The
+bridge instead awaits that same manager's
+`setInternalPlayerQueue({revision, next_items, previous_items}, deviceId,
+{ignoreRevision: false})`. It supplies the explicitly observed active device and
+retains the normal revision check. If this API is unavailable, the operation
+fails without an untargeted fallback.
+
+The move reuses the full internal queue objects and changes only their ordering.
+Current playback, previous items, context tracks, repeated context UIDs and
+delimiters are retained. The public status contains only a short context preview
+and is never used to reconstruct the internal queue. Immediately before sending,
+the bridge rereads the current occurrence, active controllable/observable device,
+queue revision and complete internal order. Synthetic state, restrictions or a
+concurrent change cancel the dispatch.
+
+Exactly one targeted command is sent. Its acknowledgement is followed by up to
+eight seconds of observation of the desired explicit UID order and the complete
+internal sequence, with the current occurrence, history and device unchanged.
+Success returns `{ok: true, action: 'moveQueue', moved, device, status}` with fresh
+state for backend publication. An already satisfied order returns `moved: false`
+without a command. An error carries `dispatched: false` before a command and
+`dispatched: true` after dispatch may have occurred; the Python wrapper preserves
+that flag in `SpotifyError`. A timeout or concurrent change is not retried.
+
+The authenticated service endpoint is `POST /api/admin/move`; `djctl move`
+accepts the same JSON body through `--json` or `--file`:
+
+```json
+{"uid":"q-new","beforeUid":"q-anchor","expectedQueuedUids":["q-anchor","q-middle","q-new"]}
+```
+
+Replace these example UIDs with the complete explicit order in fresh state, then
+pass the body to `python3 tools/party_dj/djctl.py move --file move.json`.
+The service reconciles the confirmed `result.status` and publishes public state
+before responding. Its Spotify-error response includes `dispatched`, including
+an unconfirmed command; callers must inspect fresh state instead of replaying it.
+
 ## Playback clock
 
 When Harmony supplies a complete current-track clock, its `position` and
@@ -80,7 +129,10 @@ node --check tools/party_dj/spotify_bridge.js
 Tests execute the real bridge in Node with isolated PlayerAPI and Connect
 fixtures. They cover exact target dispatch, held and zero positions, buffering,
 false acknowledgements, device changes, the synthetic-state transfer guard,
-native fallback and retained queue request IDs. No live Spotify control is sent.
+native fallback and retained queue request IDs. Queue-move fixtures additionally
+cover repeated recordings, UID/anchor validation, stale revisions/order,
+concurrent changes, full context/history preservation and unconfirmed commands.
+No live Spotify control is sent.
 
 `SpotifyClient.call` rereads the bridge file on every invocation. Updating that
 file activates the next bridge version on the following call; coordinate its

@@ -190,6 +190,14 @@ class SpotifyClient:
     def control(self, action):
         return self.call('control', action)
 
+    def move_queue(self, uid, before_uid, expected_queued_uids):
+        # call() holds the same RLock as status/search/enqueue through bootstrap,
+        # dispatch and observation. A failed move is never retried here.
+        result = self.call('moveQueue', uid, before_uid, expected_queued_uids)
+        if isinstance(result, dict) and result.get('error'):
+            raise SpotifyError(result['error'], dispatched=result.get('dispatched', True))
+        return result
+
 
 def main():
     p = argparse.ArgumentParser()
