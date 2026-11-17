@@ -51,9 +51,22 @@ Matching header controls beside the playback indicator show those shortcuts and
 **Tab** for switching to native Spotify. **Ctrl+N** requests the next song;
 **Ctrl+B** uses Spotify's previous behavior: near the start it returns to the
 previous song, while later it restarts the current song when seeking is allowed.
+**Ctrl+L** opens or closes **Stihovi** for the current recording. It keeps the
+editor and playback state intact. Matching authored cues take precedence;
+otherwise it reads the current recording's source lyrics on demand. Timed text
+highlights the whole current line and previews the next one. Untimed text is
+scrollable, with the provider credited in the same panel.
 The labels and key bindings share one native shortcut definition. Playback,
 next and previous share a pending-command guard and wait for a fresh confirmed
 observation before reporting success.
+
+Source lyrics stay bound to the actual current recording, occurrence and device.
+Closing the mode or changing that target discards the old reply. The display
+distinguishes loading, unavailable content and a missing player connection;
+close and reopen after a failed lookup to request it again. Pause, buffering and
+the observation deadline hold timed highlighting at the last trusted position.
+See [the native lyrics reference](../docs/party-stage.md#karaoke) for source,
+clock and rehearsal behavior, and [DECISIONS.md](DECISIONS.md) for the live outcome.
 
 ## Keep the next two or three songs intentional
 
@@ -101,6 +114,14 @@ before automatic promotion; an observed manual placement is left for review.
 `frontPending` means the saved request needs inspection, not resubmission.
 The command prints its request ID before submitting, so a response loss does
 not lose the identity of the intended request.
+
+If Connect cannot observe the device but the standalone app remains usable,
+inspect its complete actual queue before considering a native UI addition.
+Check the selected recording's exact link, preserve the current pause/play state,
+use Add to queue once, and verify the new entry and order in that same app.
+Keep the original request and uncertain operation intact until a fresh Connect
+observation can bind the actual occurrence UID. Report the native confirmation
+separately from that pending service reconciliation.
 
 The desk checks observed history by URI and normalized artist/title, including
 common remaster and version suffixes. An intentional repeat uses `--allow-repeat`.
@@ -230,8 +251,10 @@ python3 virtual-dj/dj.py visual --clear
 
 A visual cue binds to the current occurrence UID. It yields to the next song
 automatically. See [visual plugins](plugins/visuals.md) for the motif vocabulary,
-procedural robots, ten-minute acts and extension points. Vary rhythm, scale,
-colour and humour in response to the room; the archived show is a mild seed.
+procedural robots, the independent 60-second form cycle and extension points.
+Disco, streamers, conga, stadium, kolo and tram share that cycle; song-driven
+props retain their separate timing. Vary rhythm, scale, colour and humour in
+response to the room; the archived show is a mild seed.
 Book/photo material is optional and can remain disabled.
 
 ## Rehearse speech and karaoke quietly
