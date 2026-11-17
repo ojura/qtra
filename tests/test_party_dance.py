@@ -122,6 +122,29 @@ class PartyDance(unittest.TestCase):
         capture = os.environ.get("PARTY_DANCE_CAPTURE")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".disco.png")))
+        for index, (title, theme) in enumerate([
+                ("Volim piti", "bottles"), ("Koktel ljubavi", "cocktail"),
+                ("Gdje Sam Bio", "compass"), ("Podigla Me Iz Pepela", "embers"),
+                ("Maslačak", "dandelion")]):
+            self.stage.state["nowPlaying"].update(uid=f"song-{index}", uri=f"spotify:track:fixture{index}", title=title)
+            self.stage.write_state()
+            self.stage.eventually(lambda: self.run_dance()["theme"] == theme, f"theme did not follow {title}")
+            if capture and theme in ("bottles", "dandelion"):
+                self.stage.run_stage(capture=str(Path(capture).with_suffix(f".{theme}.png")))
+        song = self.run_dance()
+        self.stage.state["nowPlaying"]["progressMs"] += 1000
+        self.stage.state["queue"] = [{"title": "Volim piti", "uid": "queued-only"}]
+        self.stage.write_state()
+        time.sleep(.6)
+        self.assertEqual(self.run_dance()["songRevision"], song["songRevision"], "progress/queue changed the current song artwork")
+        for occurrence in ("unmatched-one", "unmatched-two"):
+            revision = self.run_dance()["songRevision"]
+            self.stage.state["nowPlaying"].update(uid=occurrence, title="An original fixture tune")
+            self.stage.write_state()
+            self.stage.eventually(lambda: self.run_dance()["songRevision"] > revision, "new occurrence did not update the artwork")
+            current = self.run_dance()
+            if occurrence == "unmatched-one": first_default = current["theme"]
+            else: self.assertNotEqual(current["theme"], first_default, "default musical motif did not change")
         self.stage.state["scene"]["audioActStartedAt"] += 600000
         self.stage.write_state()
         self.stage.eventually(lambda: self.run_dance()["act"] == "streamers", "scheduled act did not change")
@@ -136,6 +159,11 @@ class PartyDance(unittest.TestCase):
         self.stage.eventually(lambda: self.run_dance()["act"] == "conga", "third act did not start")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".conga.png")))
+        self.stage.state["scene"]["audioActStartedAt"] += 600000
+        self.stage.write_state()
+        self.stage.eventually(lambda: self.run_dance()["act"] == "stadium", "fourth act did not start")
+        if capture:
+            self.stage.run_stage(capture=str(Path(capture).with_suffix(".stadium.png")))
         after = self.stage.run_stage(getComposerDraft=True)
         self.assertEqual(after["composerDraft"], original["composerDraft"])
         self.assertEqual(self.stage.magic_bounds(), original_bounds)
@@ -145,10 +173,12 @@ class PartyDance(unittest.TestCase):
             self.client.request("object.get", {"objectName": "partyDance", "property": "width"})
         self.assertEqual(self.stage.run_stage(getComposerDraft=True)["composerDraft"], original["composerDraft"])
         reloaded = self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path)
-        self.assertEqual(reloaded["act"], "conga")
+        self.assertEqual(reloaded["act"], "stadium")
+        self.assertEqual(reloaded["songRevision"], current["songRevision"])
+        self.assertEqual(reloaded["theme"], current["theme"])
         self.stage.state["scene"]["audioActStartedAt"] += 600000
         self.stage.write_state()
-        self.stage.eventually(lambda: self.run_dance()["act"] == "disco", "three-act cycle did not wrap")
+        self.stage.eventually(lambda: self.run_dance()["act"] == "disco", "four-act cycle did not wrap")
         self.run_dance(restore=True)
 
 

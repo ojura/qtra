@@ -240,9 +240,21 @@ on the test's private X display. Set
 layer beneath the stage. It follows the free main pane's bounds, leaving the
 permanent guest panel, captions and robot fleet in place. The first act combines
 a faceted disco ball, a perspective neon floor, slowly sweeping lights and up to
-48 confetti pieces. The second act uses flowing ribbons and orbiting records.
-The third adds a ten-robot conga line led by a smiling vinyl record in a party
+24 larger confetti pieces. The second act uses flowing ribbons and orbiting records.
+The third adds six larger conga robots led by a smiling vinyl record in a party
 hat; speaker bodies, antennae, arms and legs dance along a winding floor trail.
+The fourth is a stadium wave with eight large speaker-robots and occasional
+four-second OPA/BIS scorecards with soft fades. Fewer floor tiles and mirror-ball
+facets keep the large silhouettes readable on a 15-inch laptop.
+
+Actual `nowPlaying` occurrence, URI, title and artist select the song artwork.
+Robots hold large bottles for titles mentioning drinking, cocktail glasses for
+Koktel ljubavi, compasses for Gdje sam bio, dandelions for Maslačak, and flames
+for titles mentioning ashes. Unmatched songs alternate large records, speakers,
+headphones and microphones. Prop colors change with each new song; progress
+updates, searches and queue edits leave the currently playing song's art alone.
+The song key and revision survive a module reload. Native status exposes
+`theme`, `songKey` and `songRevision` for the DJ to coordinate captions.
 
 The launcher loads it with `stateFile` and `agentSocket`. One asynchronous local
 socket subscribes to the existing `audio.beat` events; the module never opens an
@@ -251,9 +263,13 @@ brightness, with a 0.55-second decay. Painting is limited to 30 frames per secon
 and stops while the window is hidden. No full-screen flashes or blur passes are
 used. Status reports frames, received beats, connection state and paint time.
 
+Each act pairs the current song's large held motif with a second robot holding
+a large cocktail glass, so the party toast remains visible on every song.
+
 `act:"auto"` advances the choreography when the service's ten-minute
-`scene.audioActStartedAt` anchor changes, cycling through disco, streamers and
-conga. `act:"disco"`, `act:"streamers"` and `act:"conga"` select an act explicitly.
+`scene.audioActStartedAt` anchor changes, cycling through disco, streamers,
+conga and stadium. `act:"disco"`, `act:"streamers"`, `act:"conga"` and
+`act:"stadium"` select an act explicitly.
 Releasing or hot-reloading this module affects only
 its layer, timers and event connection; the audio and request-panel modules stay
 running. Use the GUI executor. The current choice survives a module reload in
