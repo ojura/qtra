@@ -133,10 +133,10 @@ the main accent to cyan; other values use warm orange.
 records immediately; 1.5 makes them fifty percent larger. The stage reports the
 applied value as `graphicsScale` in runtime status. Photographs fit within 75% of
 the free main pane's width, after excluding the right panel. They stay centered,
-preserve their aspect ratio, and meet the bottom edge. An opaque background covers
-the entire main pane's visualizer while the photo is visible.
+preserve their aspect ratio, and meet the bottom edge. The visualizer continues
+behind the photo and remains visible around its edges.
 Titles and captions overlay the image. Robot paths retain fixed caption clearance
-when the visualizer returns. Labels grow with the robots. The request controls,
+behind the photo. Labels grow with the robots. The request controls,
 QR and current-track panel keep their readable size.
 
 Book images and robot paths keep the same bounds when a caption appears,

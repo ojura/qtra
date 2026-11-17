@@ -852,8 +852,7 @@ protected:
         const double pulse = cube_ ? unit((cube_->m_tint.y() - .5) * 2.2) : 0;
         const double reaction = .20 + energy * .8;
         const double margin = 34 * u;
-        const QRectF bookCard = drawBook(p, w, h, u, orange);
-        if (bookCard.isEmpty()) {
+        {
             QLinearGradient top(0, 0, 0, h * .34);
             top.setColorAt(0, QColor(6, 10, 22, 235)); top.setColorAt(1, QColor(6, 10, 22, 0));
             p.fillRect(QRectF(0, 0, w, h * .34), top);
@@ -953,6 +952,7 @@ protected:
                 }
             }
         }
+        drawBook(p, w, h, u, orange);
         drawKaraoke(p, w, h, u, orange);
         drawCaption(p, w, h, u, white, orange);
 
@@ -1286,7 +1286,6 @@ private:
         const QRectF destination((w - imageSize.width()) / 2, h - imageSize.height(), imageSize.width(), imageSize.height());
         p.save();
         Q_UNUSED(orange);
-        p.fillRect(card, QColor("#05070d"));
         p.setRenderHint(QPainter::SmoothPixmapTransform); p.drawImage(destination, book_);
         QLinearGradient labelShade(0, h - 108 * u, 0, h);
         labelShade.setColorAt(0, QColor(6, 10, 22, 0)); labelShade.setColorAt(1, QColor(6, 10, 22, 245));
