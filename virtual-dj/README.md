@@ -131,7 +131,7 @@ candidates and resolve its event ID with exact URIs:
 
 ```sh
 python3 virtual-dj/dj.py describe 'ona Bebekova iz kafane gdje nije sklopio oka zbog ljubavi'
-python3 virtual-dj/dj.py resolve 'DESCRIPTION_ID' 'spotify:track:2QQYG5M39oAaxz3hbzfCB8' --note 'Željko Bebek — Sinoć sam pola kafane popio'
+python3 virtual-dj/dj.py resolve 'DESCRIPTION_ID' 'spotify:track:2QQYG5M39oAaxz3hbzfCB8' --note 'Željko Bebek: Sinoć sam pola kafane popio'
 ```
 
 Resolution returns choices to the person who asked; it does not enqueue them.
@@ -144,9 +144,11 @@ used for that judgment; supplied attribution is not server verification.
 
 ## Distinguish receipt, work and outcome
 
-A read receipt means the message was seen. Acceptance records when work began.
-An orange active marker means work is currently being performed; review,
-deployment waits and blocked work have their own states.
+A read receipt means the message was seen. The acceptance time records the first
+explicit acceptance when available. Migrated work can retain an unknown historical
+acceptance time through later status changes. An orange active marker means work
+is currently being performed; review, deployment waits and blocked work have their
+own states.
 
 ```sh
 python3 virtual-dj/dj.py work active 123 --summary 'Checking the requested transition'
@@ -161,7 +163,7 @@ the recorded work instead of inventing completion. Read receipts, replies and
 the passage of time do not finish work. Reconcile old unresolved items against
 the request inventory and actual delivered changes.
 
-`message-info` is authenticated. It returns stored caller-declared surface,
+`message-info` is authenticated. It returns the stored caller-declared source,
 guest ID, actual HTTP peer, operator label and delivery/acceptance/read times.
 These identify an observed submission path. Legacy messages without origin
 metadata remain unknown. Explicit fixture submissions have a test role and
