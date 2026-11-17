@@ -22,6 +22,29 @@ On the laptop, press **R** or click **Zatraži pjesmu** for the native search an
 chat panel. **Escape** closes that panel, then leaves fullscreen on the next
 press. **F11** toggles fullscreen. A name and song dedication are optional.
 
+A nonempty dedication is also spoken briefly in Croatian as its requested song
+starts. The local robot voice is prepared in advance; Spotify keeps playing and
+its stream fades down by 10 dB over half a second, then returns smoothly after
+the line. Speech volume follows the original Spotify stream level and is capped
+below full volume. The mixer accounts for PulseAudio's cubic volume units.
+Speech lasts at most 12 seconds. Long messages remain complete on screen and are
+shortened at word boundaries for speech. Empty dedications stay silent.
+
+Speech uses `espeak-ng`, `ffmpeg`, `pactl` and `paplay`. On this laptop, the
+matching eSpeak NG command is unpacked under `build/party-audio-deps/` and uses
+the installed engine and Croatian voice data. On another desktop, install the
+normal eSpeak NG and PulseAudio command packages. Public state reports
+`speech.available`, `speech.enabled`, and the last result.
+The DJ can turn spoken dedications off or on with
+`djctl.py configure --json '{"speechEnabled":false}'` (or `true`).
+
+The mixer follows the actual native Spotify stream and uses the same audio
+output. A song skip, pause or output change cancels speech and returns the owned
+stream level. If the host changes Spotify's stream volume, that new value takes
+precedence. Speech failures leave the visual dedication in place. A persistent
+occurrence history prevents duplicate speech, including after service restarts;
+the song already playing when the service starts stays silent.
+
 ```sh
 python3 tools/party_dj/launch.py status
 python3 tools/party_dj/launch.py start --restart --fullscreen
@@ -82,6 +105,7 @@ python3 tools/party_dj/djctl.py state
 python3 tools/party_dj/djctl.py search 'Dino Dvornik'
 python3 tools/party_dj/djctl.py reply --json '{"requestId":"dj-welcome-001","text":"Tu sam. Što se sluša?","caption":true}'
 python3 tools/party_dj/djctl.py cue 'Robot je upravo zatražio još jedan refren.'
+python3 tools/party_dj/djctl.py speak --json '{"requestId":"spoken-dedication-001","text":"Ova je za cijelu ekipu."}'
 python3 tools/party_dj/djctl.py scene --json '{"mode":"auto","effect":3,"energy":0.75,"holdSeconds":180}'
 python3 tools/party_dj/djctl.py book --json '{"filename":"p0319-robot-drummer-photo.jpg","seconds":35}'
 ```
@@ -131,6 +155,7 @@ Runtime data lives in `~/.local/state/larics-dj/`:
 | --- | --- |
 | `state.json` | Atomically replaced state for the native stage |
 | `party.sqlite3` | Requests, chat, events and settings |
+| `speech-history.json`, `speech/` | Spoken occurrence history and prepared voice files |
 | `admin-token` | Local DJ control token |
 | `request-qr.png` | Generated guest URL QR |
 | `server.pid`, `server.log` | Request service process and diagnostics |

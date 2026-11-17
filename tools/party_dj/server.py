@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit, unquote
 
 from spotify_native import SpotifyClient, SpotifyError
+from speech import DedicationAudio
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA = Path.home() / '.local/state/larics-dj'
@@ -46,7 +47,7 @@ def atomic_json(filename, value):
 
 
 class Party:
-    def __init__(self, data=DEFAULT_DATA, port=8787, client=None):
+    def __init__(self, data=DEFAULT_DATA, port=8787, client=None, audio=None):
         self.data = Path(data)
         self.data.mkdir(parents=True, exist_ok=True)
         self.port = port
@@ -54,6 +55,7 @@ class Party:
         self.changed = threading.Condition(self.lock)
         self.stop = threading.Event()
         self.client = client or SpotifyClient()
+        self.audio = audio
         self.db = sqlite3.connect(self.data / 'party.sqlite3', check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
@@ -106,6 +108,8 @@ class Party:
         self.db.execute("UPDATE requests SET status='uncertain' WHERE status='sending'")
         self.db.commit()
         self.request_url = self.setting('requestUrl', self._lan_url())
+        if self.audio:
+            self.audio.set_enabled(self.setting('speechEnabled', True))
         self._write_qr()
         self._publish()
 
@@ -219,6 +223,7 @@ class Party:
                 'mood': self._mood(), 'guestCount': sum(now_ms() - t < 90000 for t in self.guests.values()),
                 'requestUrl': self.request_url, 'qrPath': str(self.data / 'request-qr.png'),
                 'spotify': self.spotify.copy(), 'dj': self._dj(), 'bookMoment': self.book_moment,
+                'speech': self.audio.snapshot() if self.audio else {'available': False, 'enabled': False},
                 'title': 'LARICS / LYRICS'}
             return result
 
@@ -405,6 +410,12 @@ class Party:
             elif action == 'cue':
                 self.cue(body.get('text', ''), body.get('seconds'))
                 result = {'queued': True}
+            elif action == 'speak':
+                text = clean(body.get('text', ''), 170)
+                rid = clean(body.get('requestId', ''), 100)
+                result = self.audio.submit(rid, text) if self.audio else {'queued': False, 'error': 'Speech is unavailable.'}
+                if body.get('caption', True):
+                    self.cue(text)
             elif action == 'scene':
                 mode = body.get('mode', self.scene['mode'])
                 if mode not in ('auto', 'orbit', 'laser', 'robots', 'quiet'):
@@ -420,6 +431,12 @@ class Party:
                 self._event('scene', self.scene)
                 result = {'scene': self.scene}
             elif action == 'configure':
+                if 'speechEnabled' in body:
+                    if not isinstance(body['speechEnabled'], bool):
+                        raise ValueError('speechEnabled must be true or false.')
+                    self.set_setting('speechEnabled', body['speechEnabled'])
+                    if self.audio:
+                        self.audio.set_enabled(body['speechEnabled'])
                 if 'requestUrl' in body:
                     url = clean(body['requestUrl'], 300)
                     if not url.startswith(('http://', 'https://')):
@@ -427,7 +444,8 @@ class Party:
                     self.request_url = url
                     self.set_setting('requestUrl', url)
                     self._write_qr()
-                result = {'requestUrl': self.request_url}
+                result = {'requestUrl': self.request_url,
+                          'speech': self.audio.snapshot() if self.audio else {'available': False, 'enabled': False}}
             elif action == 'book':
                 filename = clean(body.get('filename', ''), 200)
                 card = next((c for c in self._book_cards() if Path(c.get('imagePath') or c.get('path') or c.get('image') or '').name == filename), None)
@@ -437,6 +455,8 @@ class Party:
             elif action == 'request':
                 result = self.request(body)
             elif action in ('next', 'pause', 'resume'):
+                if self.audio and action in ('next', 'pause'):
+                    self.audio.interrupt()
                 # The client serializes playback operations with queue writes.
                 result = self.client.control(action)
                 self._event('playback', {'action': action})
@@ -509,6 +529,10 @@ class Party:
                             self.missing_requests.pop(rid, None)
                             self._event('removed', {'id': rid, 'uri': pending['uri']})
                 self.db.commit()
+                if self.audio:
+                    requests = [self._request_dict(r) for r in self.db.execute(
+                        "SELECT * FROM requests WHERE status IN ('pending','queued','uncertain','playing') ORDER BY created_at").fetchall()]
+                    self.audio.observe(self.snapshot().get('nowPlaying'), requests)
                 if not connected_before:
                     self._event('spotify', {'connected': True, 'mode': self.client.mode})
         except Exception as error:
@@ -693,10 +717,12 @@ def main():
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--data', type=Path, default=DEFAULT_DATA)
     args = parser.parse_args()
-    party = Party(args.data, args.port)
+    audio = DedicationAudio(args.data)
+    party = Party(args.data, args.port, audio=audio)
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     server.daemon_threads = True
     server.party = party
+    audio.start()
     worker = threading.Thread(target=party.run, name='spotify-state', daemon=True)
     worker.start()
     print(f'LARICS / LYRICS is listening at {party.request_url}', flush=True)
@@ -709,6 +735,7 @@ def main():
         party.stop.set()
         with party.changed:
             party.changed.notify_all()
+        audio.close()
         worker.join()
         party.client.close()
         server.server_close()

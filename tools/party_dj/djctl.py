@@ -9,7 +9,7 @@ import urllib.parse
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('action', choices=['state','search','events','heartbeat','reply','cue','scene','book','request','configure','next','pause','resume'])
+    p.add_argument('action', choices=['state','search','events','heartbeat','reply','cue','speak','scene','book','request','configure','next','pause','resume'])
     p.add_argument('text', nargs='?', default='')
     p.add_argument('--json', default=None)
     p.add_argument('--after', type=int, default=0)
