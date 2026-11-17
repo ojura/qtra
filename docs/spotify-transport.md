@@ -188,20 +188,84 @@ an unconfirmed command; callers must inspect fresh state instead of replaying it
 
 ## Confirming a new queue addition
 
-Enqueue retains the request UUID and its cached outcome. Before dispatch, browser
-controllers must expose actual state and a complete explicit queue; a synthetic
-state discovered during that preflight is definitely unsent. After one
-`addToQueue` call, success requires either an increased count of the requested
-recording with exactly one new queued UID, or a different known current UID for
-that recording which was not already in the initial queue. The recording that
-was already playing cannot confirm its own new request. An ambiguous pair of new
-UIDs remains unconfirmed.
+`enqueue(uri, operationId)`, exposed by Python as
+`SpotifyClient.enqueue(uri, request_id)`, retains the operation ID and its
+cached outcome. The request service normally uses the saved request UUID as this
+ID. The Python client keeps queue writes serialized through acknowledgement and
+confirmation.
 
-An explicit false acknowledgement, lost response, malformed observation or
-confirmation timeout carries `dispatched:true` and retains the request's cached
-outcome. The Python wrapper also treats a malformed success object or missing
-occurrence UID as uncertain. Callers inspect actual state before another decision;
-none of these outcomes causes an automatic replay.
+The bridge awaits the existing queue manager's
+`addToQueue([uri], deviceId)`. The public `PlayerAPI.addToQueue` wrapper delegates
+to an async queue wrapper that drops the manager's promise and omits its device.
+That omission lets Harmony select its local streamer path. Supplying the observed
+standalone device and awaiting the manager preserves the actual command result.
+
+Before dispatch, the bridge requires actual Harmony state, a known current
+occurrence UID, a complete explicit queue, and one active device that is both
+controllable and observable. A browser controller must target a standalone
+device. It compares the actual current occurrence and observed device, rereads
+the active target, then synchronously checks the internal current occurrence,
+explicit queue order and add restrictions immediately before the manager call.
+Synthetic state, a changed observation, missing targeted access or a restriction
+returns `dispatched:false`; the public wrapper is not a fallback.
+
+After the one targeted call completes, confirmation continues on the same actual
+device. Success requires either an increased count of the requested recording
+with exactly one new queued UID, or a different known current UID for that
+recording which was not already in the initial queue. The recording that was
+already playing cannot confirm its own new request. An ambiguous pair of new
+UIDs remains unconfirmed. Success returns `{queued:true, uri, requestId, uid}`.
+
+An explicit false acknowledgement, rejected promise, lost response, malformed
+observation, device change or confirmation timeout carries `dispatched:true` and
+retains the operation's cached outcome. The Python wrapper also treats a
+malformed success object or missing occurrence UID as uncertain. These outcomes
+require fresh observation and an operator decision before another command.
+
+### Deliberately recovering an absent uncertain request
+
+Keep the original saved request and cached operation outcome intact. Repeating
+the same operation ID returns its cached result. Creating another service request
+for the same recording can also return the existing request through URI
+deduplication.
+
+The sole queue operator can assess a new addition using this sequence:
+
+1. Read fresh actual current-track/device state, the complete internal upcoming
+   queue and all retained previous items, together with retained service track
+   observations. Inspect the exact requested URI. The public context preview is
+   truncated; use the existing controller's `getInternalQueue()` for complete
+   `next_items` and `previous_items`. A disconnected or synthetic observation
+   cannot establish absence.
+2. If the requested occurrence is present, let ordinary observation reconcile its
+   UID. If the item is absent and the operator deliberately decides to add it,
+   choose one new stable operator operation ID associated with the saved request.
+3. Call the existing Python enqueue API exactly once with that new operation ID.
+   Leave the original UUID, database row and cached result unchanged.
+4. Verify the returned UID in actual playback/queue state and verify that normal
+   service observation attaches it to the original uncertain request. A lost,
+   rejected or unconfirmed result returns to observation; do not blindly replay
+   it or generate successive operation IDs.
+
+From the repository root, after that assessment, the supported invocation is:
+
+```sh
+python3 - 'spotify:track:TRACK_ID' 'assessed-REQUEST_ID-1' <<'PY'
+import json
+import sys
+from tools.party_dj.spotify_native import SpotifyClient
+
+client = SpotifyClient()
+try:
+    print(json.dumps(client.enqueue(sys.argv[1], sys.argv[2]), ensure_ascii=False))
+finally:
+    client.close()
+PY
+```
+
+Replace both placeholders with the verified URI and the operation ID chosen for
+that single assessed action. This uses the maintained client and ordinary
+request reconciliation; it does not require a database or cache repair.
 
 ## Playback clock
 
