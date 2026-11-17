@@ -174,11 +174,13 @@ void robot(QPainter& p, int kind, QPointF at, double scale, double time,
     p.drawEllipse(QPointF(-4 + direction * 1.1, air ? -5 : -13), 2, blink);
     p.drawEllipse(QPointF(4 + direction * 1.1, air ? -5 : -13), 2, blink);
     p.restore();
-    p.setFont(stageFont(std::clamp(scale * 10, 12.0, 15.0), true));
+    p.setFont(stageFont(std::clamp(scale * 10, 14.0, 32.0), true));
     p.setPen(alpha(light, .82));
     const QString name = kind == 0 ? QStringLiteral("EagleRed")
         : kind == 1 ? QStringLiteral("VIV") : kind == 2 ? QStringLiteral("Navines") : QStringLiteral("MORUS");
-    p.drawText(QRectF(at.x() - 80, at.y() + scale * (carrying && air ? 76 : 34), 160, 22),
+    const QFontMetricsF label(p.font());
+    const double labelWidth = label.horizontalAdvance(name) + 24;
+    p.drawText(QRectF(at.x() - labelWidth / 2, at.y() + scale * (carrying && air ? 76 : 34), labelWidth, label.height() + 4),
                Qt::AlignCenter, name);
 }
 
@@ -518,10 +520,11 @@ public:
         }
         loadImage(text(state, "qrPath"), qrPath_, qr_, QSize(320, 320));
         const auto book = state.value(QStringLiteral("bookMoment")).toObject();
-        loadImage(text(book, "imagePath"), bookPath_, book_, QSize(1400, 1000));
+        loadImage(text(book, "imagePath"), bookPath_, book_, QSize(2200, 1600));
         if (desk_) desk_->setBase(requestUrl());
         setProperty("revision", state.value(QStringLiteral("revision")).toVariant());
         setProperty("scene", sceneMode());
+        setProperty("graphicsScale", graphicsScale());
         setProperty("trackTitle", text(now, "title"));
         applyEffect();
         update();
@@ -530,7 +533,8 @@ public:
     {
         QJsonObject result{{QStringLiteral("active"), true}, {QStringLiteral("stateFile"), stateFile_},
                 {QStringLiteral("revision"), state_.value(QStringLiteral("revision"))},
-                {QStringLiteral("scene"), sceneMode()}, {QStringLiteral("captionId"), cue_.id},
+                {QStringLiteral("scene"), sceneMode()}, {QStringLiteral("graphicsScale"), graphicsScale()},
+                {QStringLiteral("captionId"), cue_.id},
                 {QStringLiteral("caption"), cue_.text}, {QStringLiteral("captionSeconds"), cue_.seconds},
                 {QStringLiteral("pendingCaptions"), pending_.size()},
                 {QStringLiteral("effect"), effectIndex_}, {QStringLiteral("effectError"), effectError_},
@@ -685,14 +689,23 @@ protected:
                        QFontMetrics(p.font()).elidedText(guestUrl, Qt::ElideMiddle, qRound(210 * u)));
         }
 
-        drawBook(p, w, h, u, orange);
+        const QRectF bookCard = drawBook(p, w, h, u, orange);
         const double mission = t - missionStart_;
         if (mission >= 0 && mission < 17) drawDelivery(p, w, h, u, t, pulse, orange, mission);
         if (mode == QStringLiteral("robots")) {
             for (int i = 0; i < 3; ++i) {
-                const double x = w * (.20 + i * .30) + std::sin(t * .5 + i) * 24 * u;
-                robot(p, i, QPointF(x, h * (.68 + (i == 0 ? -.07 : .03))),
-                      (i == 0 ? 1.05 : 1.15) * u, t + i, t * 18, std::cos(t + i), pulse, false);
+                double robotScale = (i == 0 ? 1.05 : 1.15) * u * graphicsScale();
+                double x = w * (.20 + i * .30) + std::sin(t * .5 + i) * 24 * u;
+                double y = h * (.68 + (i == 0 ? -.07 : .03));
+                if (!bookCard.isEmpty()) {
+                    // Leave the photograph unobscured while the fleet keeps dancing.
+                    const double gutter = bookCard.left();
+                    robotScale = std::min(robotScale, std::max(.65, (gutter - 20 * u) / 112));
+                    x = i == 2 ? w - gutter / 2 : gutter / 2;
+                    y = bookCard.top() + bookCard.height() * (i == 0 ? .28 : .76);
+                }
+                y = std::min(y, graphicsBottom(w, h, u) - 42 * robotScale - 36);
+                robot(p, i, QPointF(x, y), robotScale, t + i, t * 18, std::cos(t + i), pulse, false);
             }
         }
         drawCaption(p, w, h, u, white, orange);
@@ -787,6 +800,25 @@ private:
         }
         update();
     }
+    double graphicsScale() const
+    {
+        return std::clamp(number(state_.value(QStringLiteral("scene")).toObject(), "graphicsScale", 1), .75, 2.0);
+    }
+    QRectF captionRect(double w, double h, double u) const
+    {
+        if (cue_.text.isEmpty()) return {};
+        const QFontMetricsF fm(stageFont(24 * u, true));
+        const double widest = std::min(w * .79, 1000 * u);
+        const QRectF bounds = fm.boundingRect(QRectF(0, 0, widest - 54 * u, h * .32), Qt::TextWordWrap | Qt::AlignCenter, cue_.text);
+        const double width = std::min(widest, std::max(360 * u, bounds.width() + 54 * u));
+        const double height = bounds.height() + 36 * u;
+        return QRectF((w - width) / 2, h - 77 * u - height, width, height);
+    }
+    double graphicsBottom(double w, double h, double u) const
+    {
+        const QRectF caption = captionRect(w, h, u);
+        return std::min(h - 54 * u, caption.isEmpty() ? h : caption.top() - 14 * u);
+    }
     void drawCaption(QPainter& p, double w, double h, double u, QColor white, QColor orange)
     {
         if (cue_.text.isEmpty()) return;
@@ -794,12 +826,7 @@ private:
         const double opacity = std::min(smooth(age / .6), smooth((cue_.seconds - age) / .65));
         p.save(); p.setOpacity(opacity);
         p.setFont(stageFont(24 * u, true));
-        const QFontMetricsF fm(p.font());
-        const double widest = std::min(w * .79, 1000 * u);
-        QRectF bounds = fm.boundingRect(QRectF(0, 0, widest - 54 * u, h * .32), Qt::TextWordWrap | Qt::AlignCenter, cue_.text);
-        const double width = std::min(widest, std::max(360 * u, bounds.width() + 54 * u));
-        const double height = bounds.height() + 36 * u;
-        const QRectF card((w - width) / 2, h - 77 * u - height, width, height);
+        const QRectF card = captionRect(w, h, u);
         panel(p, card, orange, .93);
         p.setPen(white);
         p.drawText(card.adjusted(27 * u, 18 * u, -27 * u, -18 * u),
@@ -812,10 +839,15 @@ private:
         const bool air = missionKind_ == 0 || missionKind_ == 3;
         const double approach = smooth(age / 5.5);
         const double leaving = smooth((age - 11.0) / 5.5);
-        const double x = age < 11 ? (-100 * u + approach * (w * .5 + 100 * u))
-                                 : w * .5 + leaving * (w * .5 + 120 * u);
-        const double y = h * (air ? .34 : .69) - (air ? std::sin(approach * pi) * 48 * u : 0);
-        const double robotScale = (missionKind_ == 3 ? 3.3 : 1.45) * u;
+        const double top = 230 * u, bottom = graphicsBottom(w, h, u);
+        const double robotScale = std::min((missionKind_ == 3 ? 3.3 : 1.45) * u * graphicsScale(),
+                                          std::max(.65, (bottom - top - 36) / (air ? 112 : 90)));
+        const double offscreen = 78 * robotScale;
+        const double x = age < 11 ? (-offscreen + approach * (w * .5 + offscreen))
+                                 : w * .5 + leaving * (w * .5 + offscreen);
+        const double minY = top + 32 * robotScale;
+        const double maxY = std::max(minY, bottom - (air ? 80 : 42) * robotScale - 36);
+        const double y = std::clamp(h * (air ? .40 : .69) - (air ? std::sin(approach * pi) * 32 * u : 0), minY, maxY);
         robot(p, missionKind_, QPointF(x, y), robotScale, t, x, 1, pulse, age < 7.5);
         if (age >= 7.5 && age < 13) {
             const double fade = std::min(1.0, (13 - age) / 2);
@@ -825,25 +857,29 @@ private:
             const QPointF deck(w * .5, h * .57);
             const QPointF position = pickup * (1 - delivered) + deck * delivered;
             p.save(); p.setOpacity(fade);
-            disc(p, position, 28 * u, orange, t * 36); p.restore();
+            disc(p, position, 28 * u * graphicsScale(), orange, t * 36); p.restore();
         }
         if (age > 4.5 && age < 11) {
-            const QRectF bubble(w * .5 - 205 * u, h * (air ? .23 : .56), 410 * u, 49 * u);
+            const QRectF bubble(w * .5 - 205 * u, std::max(top, y - 42 * robotScale - 58 * u), 410 * u, 49 * u);
             panel(p, bubble, orange, .94);
             const QPointF anchor(std::clamp(x, bubble.left() + 12, bubble.right() - 12), bubble.bottom());
-            line(p, anchor, QPointF(x, y - 36 * u), alpha(orange, .55), 1.2);
+            line(p, anchor, QPointF(x, y - 28 * robotScale), alpha(orange, .55), 1.2);
             p.setFont(stageFont(14 * u, true)); p.setPen(QColor("#ffe4cc"));
             const QString words = age < 7.5 ? missionText_ : QStringLiteral("Na tri!  Jedan, dva... refren.");
             p.drawText(bubble.adjusted(14 * u, 5 * u, -14 * u, -5 * u),
                        Qt::AlignCenter, QFontMetrics(p.font()).elidedText(words, Qt::ElideRight, qRound(bubble.width() - 28 * u)));
         }
     }
-    void drawBook(QPainter& p, double w, double h, double u, QColor orange)
+    QRectF drawBook(QPainter& p, double w, double h, double u, QColor orange)
     {
         const auto book = state_.value(QStringLiteral("bookMoment")).toObject();
         const qint64 expires = static_cast<qint64>(number(book, "expiresAt", 0));
-        if (book_.isNull() || (expires > 0 && QDateTime::currentMSecsSinceEpoch() >= expires)) return;
-        const QRectF card(w * .28, h * .275, w * .44, h * .405);
+        if (book_.isNull() || (expires > 0 && QDateTime::currentMSecsSinceEpoch() >= expires)) return {};
+        const double top = std::max(h * .275, 230 * u);
+        const double cardWidth = std::min(w - 68 * u, w * .44 * graphicsScale());
+        const double cardHeight = std::min(h * .405 * graphicsScale(), graphicsBottom(w, h, u) - top);
+        if (cardHeight < 100 * u) return {};
+        const QRectF card((w - cardWidth) / 2, top, cardWidth, cardHeight);
         p.save();
         panel(p, card, orange, .97);
         const QRectF area = card.adjusted(13 * u, 13 * u, -13 * u, -52 * u);
@@ -859,6 +895,7 @@ private:
         p.drawText(QRectF(card.x(), card.bottom() - 22 * u, card.width(), 17 * u), Qt::AlignCenter,
                    QStringLiteral("30 godina LARICS-a") + (page.isEmpty() ? QString() : QStringLiteral(" · str. ") + page));
         p.restore();
+        return card;
     }
     QPointer<CubeWidget> cube_;
     QPointer<RequestDesk> desk_;

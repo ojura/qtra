@@ -93,7 +93,7 @@ error in its runtime status. It reads at most 1 MiB.
 | `revision` | State version, echoed in stage status |
 | `nowPlaying` | `title`, `artist`, `uri` or `id`, `playing`, `progressMs`, `durationMs`, `observedAt` in epoch milliseconds |
 | `queue` | Tracks with `title`, `artist`, `uri` or `id`, `requestedBy` |
-| `scene` | `mode`, `energy` from 0 to 1, `palette`, `effect` from 0 to 7 |
+| `scene` | `mode`, `energy` from 0 to 1, `palette`, `effect` from 0 to 7, `graphicsScale` from 0.75 to 2 |
 | `caption` | `id`, `text`, `seconds`, `createdAt` in epoch milliseconds |
 | `bookMoment` | `imagePath`, `title`, printed `page`, optional `expiresAt` in epoch milliseconds |
 | `requestUrl` | Guest address printed below the request affordance |
@@ -106,6 +106,14 @@ error in its runtime status. It reads at most 1 MiB.
 stage's embellishments every 85 seconds. The service can select a mode at any time.
 Energy changes the strength of the extra light effects. `palette:"ice"` changes
 the main accent to cyan; other values use warm orange.
+
+`scene.graphicsScale` defaults to 1. It scales the robot fleet, delivered records,
+and book/photo cards immediately; 1.5 makes the graphics fifty percent larger.
+The stage reports the applied value as `graphicsScale` in runtime status. Photo
+cards fit between the header and the current caption, and idle robots move into
+the side margins while a book image is visible. Large delivery robots fit within
+those same vertical bounds. Labels grow with the robots. The request controls,
+QR and current-track panel keep their readable size.
 
 The effect index controls existing qtra geometry independently of the stage mode:
 
