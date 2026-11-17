@@ -806,6 +806,45 @@ class ServiceWorkflows(unittest.TestCase):
         self.assertEqual((work['state'], work['outcome'], work['evidence']),
                          ('completed', completed['outcome'], completed['evidence']))
 
+    def test_migrated_unknown_acceptance_survives_completion_reopen_and_legacy_updates(self):
+        sent = self.message('Historical work with an unknown acceptance time.')
+        self.party.set_setting('processingMessages', {str(sent['id']): self.stamp + 900000})
+        self.party.db.execute("DELETE FROM settings WHERE key='messageWorkMigrated'")
+        self.party.db.commit()
+        restored = server.Party(self.party.data, client=self.client)
+        self.addCleanup(restored.db.close)
+
+        def check(party, expected_state):
+            info = party.message_info(sent['id'])
+            self.assertIsNone(info['message']['acceptedAt'])
+            self.assertEqual(info['message']['work']['state'], expected_state)
+            with self.assertRaises(ValueError):
+                party.recall_message({'guestId': 'fixture-guest', 'messageId': sent['id']})
+
+        check(restored, 'waiting')
+        self.stamp += 1000
+        restored.admin('work', {'messageIds': [sent['id']], 'state': 'completed',
+            'outcome': 'The historical fixture outcome is now recorded.',
+            'evidence': ['The original fixture result was inspected.']})
+        check(restored, 'completed')
+        reopened = server.Party(self.party.data, client=self.client)
+        self.addCleanup(reopened.db.close)
+        check(reopened, 'completed')
+        self.stamp += 1000
+        reopened.admin('work', {'messageIds': [sent['id']], 'state': 'active',
+                                'summary': 'Explicit follow-up to historical work.'})
+        check(reopened, 'active')
+        self.stamp += 1000
+        reopened.admin('processing', {'messageIds': [sent['id']], 'active': True})
+        check(reopened, 'active')
+        self.stamp += 1000
+        reopened.admin('processing', {'messageIds': [sent['id']], 'active': False})
+        check(reopened, 'waiting')
+        self.stamp += 1000
+        reopened.admin('work', {'messageIds': [sent['id']], 'state': 'waiting',
+                                'summary': 'The follow-up is waiting for more input.'})
+        check(reopened, 'waiting')
+
     def test_explicit_work_acceptance_and_recall_have_one_atomic_winner(self):
         sent = self.message()
         results = self.parallel(

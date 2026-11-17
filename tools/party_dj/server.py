@@ -415,13 +415,15 @@ class Party:
 
     def _save_work(self, identifiers, work, *, accept=True):
         for identifier in identifiers:
+            first_work = self.db.execute('SELECT 1 FROM message_work WHERE message_id=?', (identifier,)).fetchone() is None
             self.db.execute('''INSERT INTO message_work VALUES(?,?,?,?,?,?,?)
                 ON CONFLICT(message_id) DO UPDATE SET state=excluded.state,summary=excluded.summary,
                 outcome=excluded.outcome,evidence=excluded.evidence,updated_at=excluded.updated_at,
                 active_until=excluded.active_until''',
                 (identifier, work['state'], work['summary'], work['outcome'], json.dumps(work['evidence'], ensure_ascii=False),
                  work['updatedAt'], work['activeUntil']))
-            if accept:
+            # Existing legacy work may have an unknown historical acceptance time.
+            if accept and first_work:
                 self.db.execute('UPDATE chat SET accepted_at=COALESCE(accepted_at,?) WHERE id=?', (work['updatedAt'], identifier))
 
     def _work_changed(self, identifiers):
