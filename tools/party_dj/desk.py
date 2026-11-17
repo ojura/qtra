@@ -175,8 +175,11 @@ def set_presence(client, state, agent_session, sequence, lease_seconds=60):
             or type(sequence) is not int or not 1 <= sequence <= 2**53 - 1
             or type(lease_seconds) is not int or not 30 <= lease_seconds <= 120):
         raise DeskError('Use a session identifier, positive sequence and a 30-120 second presence lease.')
-    return client.call('/api/admin/presence', {'agentSessionId': agent_session,
+    result = client.call('/api/admin/presence', {'agentSessionId': agent_session,
         'sequence': sequence, 'state': state, 'leaseSeconds': lease_seconds})
+    if isinstance(result.get('dj'), dict):
+        result = {**result, 'dj': concise_state({'dj': result['dj']})['dj']}
+    return result
 
 
 def native_stage(data, request):

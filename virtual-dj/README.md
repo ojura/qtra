@@ -136,8 +136,8 @@ previous lease expires. The default is 60 seconds and the permitted range is
 30-120 seconds. On handoff or departure, send offline for that session. An
 unrenewed lease expires even if the watcher keeps running or state.json remains
 unchanged. A service restart clears the in-memory leases. Coding helpers do not
-renew the live DJ's badge. `status` and `watch`
-show `dj.llm` and `dj.watcher` separately.
+renew the live DJ's badge. `presence`, `status` and `watch` show `dj.llm` and
+`dj.watcher` separately, with compact work counts instead of the full history.
 
 Local intent gating suppresses obvious conversation and interface instructions
 before automatic catalogue lookup. The DJ can correct that decision for the

@@ -89,9 +89,13 @@ class DeskTests(unittest.TestCase):
         return client
 
     def test_presence_is_one_explicit_write_and_lost_response_is_not_repeated(self):
-        client = ScriptedClient(('/api/admin/presence', {'ok': True}))
-        with patch.object(desk, 'ServiceClient', return_value=client), contextlib.redirect_stdout(io.StringIO()):
+        client = ScriptedClient(('/api/admin/presence', {'dj': {'llm': {'status': 'online'},
+            'watcher': {'status': 'polling'}, 'messageWork': {'8': {'state': 'completed'}}}}))
+        output = io.StringIO()
+        with patch.object(desk, 'ServiceClient', return_value=client), contextlib.redirect_stdout(output):
             self.assertEqual(desk.main(['presence', 'online', '--agent-session', 'actual-dj.1', '--sequence', '7']), 0)
+        self.assertEqual(json.loads(output.getvalue())['dj'], {'llm': {'status': 'online'},
+            'watcher': {'status': 'polling'}, 'workCounts': {'completed': 1}})
         self.assertEqual(client.calls, [('/api/admin/presence', {
             'agentSessionId': 'actual-dj.1', 'sequence': 7, 'state': 'online', 'leaseSeconds': 60})])
         lost = ScriptedClient(('/api/admin/presence', desk.DeskError({'error': 'Response lost', 'responseLost': True})))
