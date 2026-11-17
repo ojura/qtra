@@ -124,9 +124,19 @@ async function fixture(options = {}) {
     }})};
   const element = {'__reactFiber$fixture': {memoizedProps: {value: platform}}};
   const page = {'__reactFiber$search': {get memoizedProps() {
-    return {results: {requestId: catalogue.requestId, tracks: {items: catalogue.tracks}}};
+    return {results: {requestId: catalogue.topRequestId ?? catalogue.requestId,
+      tracks: {items: catalogue.topTracks ?? catalogue.tracks}}};
   }}};
-  const row = {'__reactFiber$row': {get memoizedProps() { return {tracks: catalogue.tracks}; }}};
+  const queryOwner = {get memoizedState() {
+    return {memoizedState: {options: {queryKey: ['searchCategoryResults', catalogue.observerQuery ?? catalogue.query,
+      {category: catalogue.category ?? 'tracks'}]}}, next: {memoizedState: {
+        isSuccess: catalogue.isSuccess ?? true, isPlaceholderData: catalogue.placeholder ?? false,
+        isLoading: catalogue.loading ?? false, dataUpdatedAt: catalogue.updatedAt ?? clock,
+        data: {items: catalogue.resultItems ?? catalogue.tracks, requestId: catalogue.requestId}}}};
+  }};
+  const row = {'__reactFiber$row': {get key() {return catalogue.rowQuery ?? catalogue.query;},
+    get memoizedProps() { return {tracks: catalogue.renderedTracks ?? catalogue.tracks,
+      ariaLabel: `All songs for “${catalogue.rowQuery ?? catalogue.query}”`}; }, return: queryOwner}};
   const list = {getAttribute: () => `Search results for “${catalogue.query}”`,
     querySelector: () => catalogue.tracks.length ? row : null};
   const window = {__laricsDJ: options.previousBridge};
@@ -265,6 +275,40 @@ class BridgeTransportTests(unittest.TestCase):
           assert.equal(metadata.uri, found.uri);
           assert.equal(f.catalogue.pushes.length, 2);
           assert.deepEqual(f.calls, []);
+        ''')
+
+    def test_catalogue_uses_the_successful_row_query_when_top_holder_is_empty_and_unchanged(self):
+        self.run_js(r'''
+const f = await fixture();
+f.catalogue.topTracks = []; f.catalogue.topRequestId = 'unrelated-top-holder';
+f.bridge.beginSearch('Main Title and Calvera Elmer Bernstein', 'catalogue-score');
+f.showSearch('Main Title and Calvera Elmer Bernstein', [queuedTrack('score')], 'row-query-request');
+const result = f.bridge.pollSearch('catalogue-score');
+assert.equal(result.state, 'complete'); assert.equal(result.tracks[0].uid, 'score');
+assert.equal(f.catalogue.topRequestId, 'unrelated-top-holder'); assert.deepEqual(f.calls, []);
+        ''')
+
+    def test_catalogue_row_binding_rejects_old_query_wrong_category_and_placeholder_results(self):
+        self.run_js(r'''
+for (const fields of [{rowQuery:'old query'}, {observerQuery:'old query'}, {category:'albums'},
+  {placeholder:true}, {isSuccess:false}, {loading:true}, {updatedAt:0}, {requestId:''}]) {
+  const f = await fixture(); f.bridge.beginSearch('new query', 'catalogue-boundary');
+  f.showSearch('new query', [queuedTrack('fresh')]); Object.assign(f.catalogue, fields);
+  assert.equal(f.bridge.pollSearch('catalogue-boundary').state, 'pending');
+  assert.deepEqual(f.calls, []);
+}
+        ''')
+
+    def test_catalogue_result_items_must_be_the_items_in_the_current_query_rows(self):
+        self.run_js(r'''
+const f = await fixture(); f.bridge.beginSearch('current query', 'catalogue-row-items');
+f.showSearch('current query', [queuedTrack('visible-old')]);
+f.catalogue.resultItems = [queuedTrack('fresh-response')];
+assert.equal(f.bridge.pollSearch('catalogue-row-items').state, 'pending');
+f.catalogue.renderedTracks = f.catalogue.resultItems;
+const result = f.bridge.pollSearch('catalogue-row-items');
+assert.equal(result.state, 'complete'); assert.equal(result.tracks[0].uid, 'fresh-response');
+assert.deepEqual(f.calls, []);
         ''')
 
     def test_guarded_skip_next_confirms_new_occurrence_even_for_the_same_recording(self):

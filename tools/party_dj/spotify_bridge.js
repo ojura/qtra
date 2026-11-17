@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 11) return {ready: true};
+  if (window.__laricsDJ?.version === 12) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -81,13 +81,39 @@
       source: item.provider === 'queue' ? 'queue' : 'context'};
   }
 
-  function searchResults() {
-    const page = document.getElementById('searchPage');
-    if (!page) return null;
-    let fiber = page[Object.keys(page).find(key => key.startsWith('__reactFiber$'))];
-    for (let i = 0; fiber && i < 30; ++i, fiber = fiber.return) {
-      const results = fiber.memoizedProps?.results;
-      if (results?.tracks?.items) return results;
+  function searchRows(query) {
+    const matches = label => typeof label === 'string'
+      && (label.endsWith(`“${query}”`) || label.endsWith(`"${query}"`));
+    const list = document.querySelector('[data-testid="track-list"]');
+    if (!matches(list?.getAttribute('aria-label'))) return null;
+    const row = list.querySelector('[data-testid="tracklist-row"]');
+    if (!row) return null;
+    let fiber = row[Object.keys(row).find(key => key.startsWith('__reactFiber$'))];
+    let tracks;
+    for (let i = 0; fiber && i < 60; ++i, fiber = fiber.return) {
+      const props = fiber.memoizedProps;
+      if (fiber.key === query && matches(props?.ariaLabel) && Array.isArray(props?.tracks)) tracks = props.tracks;
+      if (!tracks?.length) continue;
+      // The all-songs component owns a separate query from the top search holder.
+      // Bind its committed result to this exact query and the rendered row items.
+      let hook = fiber.memoizedState, matchingQuery = false;
+      const results = [];
+      for (let j = 0; hook && j < 40; ++j, hook = hook.next) {
+        const value = hook.memoizedState, key = value?.options?.queryKey;
+        if (Array.isArray(key) && key[0] === 'searchCategoryResults' && key[1] === query
+            && key[2]?.category === 'tracks') matchingQuery = true;
+        if (value?.isSuccess === true && value.isPlaceholderData === false && value.isLoading !== true
+            && Number.isFinite(value.dataUpdatedAt) && value.dataUpdatedAt > 0
+            && typeof value.data?.requestId === 'string' && value.data.requestId.length > 0
+            && Array.isArray(value.data.items)) results.push(value.data);
+      }
+      if (!matchingQuery) continue;
+      for (const result of results) {
+        const items = result.items.filter(item => item?.uri);
+        if (items.length === tracks.length && items.every((item, index) => item === tracks[index])) {
+          return {tracks, requestId: result.requestId};
+        }
+      }
     }
     return null;
   }
@@ -246,7 +272,7 @@
     catch { return false; }
   };
   const bridge = {
-    version: 11,
+    version: 12,
     operations,
     async status() {
       if (browserController) ensureActualState();
@@ -316,10 +342,8 @@
         return {searchId, state: 'pending'};
       }
       const destination = '/search/' + encodeURIComponent(query) + '/tracks';
-      const previous = searchResults();
       const sameQuery = sameSearchRoute(destination);
-      searchJob = {id: searchId, query, destination, previousId: previous?.requestId,
-        sameQuery, deadline: Math.min(expiresAt, stamp + 16000)};
+      searchJob = {id: searchId, query, destination, deadline: Math.min(expiresAt, stamp + 16000)};
       try {
         if (!sameQuery) platform.getHistory().push(destination);
       } catch (error) {
@@ -341,20 +365,10 @@
         searchJob = null;
         return {searchId, state: 'error', error: 'Spotify search is still loading. Try again in a moment.'};
       }
-      const results = searchResults();
-      const list = document.querySelector('[data-testid="track-list"]');
-      const label = list?.getAttribute('aria-label') || '';
-      const labelMatches = label.endsWith(`“${job.query}”`) || label.endsWith(`"${job.query}"`);
-      const row = list?.querySelector('[data-testid="tracklist-row"]');
-      if (labelMatches && row && results && (job.sameQuery || results.requestId !== job.previousId)) {
-        let fiber = row[Object.keys(row).find(key => key.startsWith('__reactFiber$'))];
-        for (let i = 0; fiber && i < 45; ++i, fiber = fiber.return) {
-          const tracks = fiber.memoizedProps?.tracks;
-          if (Array.isArray(tracks) && tracks.length) {
-            searchJob = null;
-            return {searchId, state: 'complete', tracks: tracks.filter(t => t.isPlayable !== false).slice(0, 12).map(normalize)};
-          }
-        }
+      const rows = searchRows(job.query);
+      if (rows) {
+        searchJob = null;
+        return {searchId, state: 'complete', tracks: rows.tracks.filter(t => t.isPlayable !== false).slice(0, 12).map(normalize)};
       }
       const text = document.querySelector('main')?.innerText || '';
       if (text.includes(job.query) && /No results found for|No results for/.test(text)) {
