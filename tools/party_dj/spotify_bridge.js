@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 12) return {ready: true};
+  if (window.__laricsDJ?.version === 13) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -272,7 +272,7 @@
     catch { return false; }
   };
   const bridge = {
-    version: 12,
+    version: 13,
     operations,
     async status() {
       if (browserController) ensureActualState();
@@ -306,7 +306,7 @@
       const timestampAnchor = number(useRaw ? raw.timestamp : null, normalizedClock.timestamp);
       const held = useRaw ? raw.paused === true || raw.loading === true
         : state.isPaused === true || state.isBuffering === true;
-      const clockValid = !!item && positionAnchor !== undefined && positionAnchor >= 0
+      const validAnchor = !!item && positionAnchor !== undefined && positionAnchor >= 0
         && (held || (timestampAnchor !== undefined && timestampAnchor > 0 && timestampAnchor <= stamp + 1000));
       // Preserve the existing numeric fields for callers while exposing whether
       // they came from a real anchor; a default zero/now is never a valid clock.
@@ -315,6 +315,9 @@
       const speed = number(useRaw ? raw.playback_speed : null, normalizedClock.speed, 1);
       const elapsed = playing && sourceTimestamp > 0 ? Math.max(0, stamp - sourceTimestamp) * Math.max(0, speed) : 0;
       const progress = Math.max(0, position + elapsed);
+      // Harmony can advance its cached position and timestamp on each read.
+      // A playing clock stops being confirmed at a known end; held positions remain valid.
+      const clockValid = validAnchor && (!playing || duration <= 0 || progress < duration);
       const device = typeof connectDevices?.getActiveDevice === 'function' ? await connectDevices.getActiveDevice() : null;
       return {
         nowPlaying: item ? {...item, playing, paused, buffering, clockValid, durationMs: duration,

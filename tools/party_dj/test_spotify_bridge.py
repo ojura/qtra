@@ -749,6 +749,78 @@ for (const held of [{paused: true}, {loading: true}]) {
 }
 ''')
 
+    def test_playing_clock_becomes_invalid_at_known_track_end(self):
+        self.run_js(r'''
+for (const withHarmony of [true, false]) {
+  for (const position of [127049, 127050, 127051, 187050]) {
+    const f = await fixture({withHarmony, raw: {position, timestamp: 1000000},
+      state: {positionAsOfTimestamp: position, timestamp: 1000000}});
+    const status = await f.bridge.status();
+    assert.equal(status.nowPlaying.clockValid, position < 127050);
+    assert.equal(status.playbackState.clockValid, position < 127050);
+    assert.equal(status.nowPlaying.progressMs, Math.min(position, 127050));
+    assert.equal(status.playbackState.positionMs, position);
+    assert.equal(status.nowPlaying.playing, true);
+    assert.deepEqual(f.calls, []);
+  }
+}
+''')
+
+    def test_playing_end_is_invalid_after_elapsed_or_refreshed_harmony_anchor(self):
+        self.run_js(r'''
+for (const withHarmony of [true, false]) {
+  const f = await fixture({withHarmony, raw: {position: 126000, timestamp: 1000000},
+    state: {positionAsOfTimestamp: 126000, timestamp: 1000000}});
+  assert.equal((await f.bridge.status()).nowPlaying.clockValid, true);
+  f.advance(1049);
+  assert.equal((await f.bridge.status()).nowPlaying.clockValid, true);
+  f.advance(1);
+  let status = await f.bridge.status();
+  assert.equal(status.nowPlaying.progressMs, 127050);
+  assert.equal(status.nowPlaying.clockValid, false);
+  f.advance(60000);
+  status = await f.bridge.status();
+  assert.equal(status.observedAt, 1061050);
+  assert.equal(status.nowPlaying.clockValid, false);
+  assert.deepEqual(f.calls, []);
+}
+const refreshed = await fixture({raw: {position: 126050, timestamp: 1000000},
+  onRawRead: ({raw, read}) => {
+    if (read > 1) {raw.position += 5000; raw.timestamp += 5000;}
+  }});
+assert.equal((await refreshed.bridge.status()).nowPlaying.clockValid, true);
+refreshed.advance(5000);
+const status = await refreshed.bridge.status();
+assert.equal(status.playbackState.sourceTimestamp, status.observedAt);
+assert.equal(status.playbackState.positionMs, 131050);
+assert.equal(status.nowPlaying.progressMs, 127050);
+assert.equal(status.nowPlaying.clockValid, false);
+assert.equal(status.playbackState.clockValid, false);
+assert.deepEqual(refreshed.calls, []);
+''')
+
+    def test_explicitly_held_endpoints_keep_valid_clock_without_extrapolation(self):
+        self.run_js(r'''
+for (const withHarmony of [true, false]) {
+  for (const buffering of [false, true]) {
+    for (const position of [127050, 132050]) {
+      const f = await fixture({withHarmony,
+        raw: {position, paused: !buffering, loading: buffering, timestamp: undefined},
+        state: {positionAsOfTimestamp: position, isPaused: !buffering,
+          isBuffering: buffering, timestamp: undefined}});
+      f.advance(60000);
+      const status = await f.bridge.status();
+      assert.equal(status.nowPlaying.clockValid, true);
+      assert.equal(status.playbackState.clockValid, true);
+      assert.equal(status.nowPlaying.playing, false);
+      assert.equal(status.nowPlaying.progressMs, 127050);
+      assert.equal(status.playbackState.positionMs, position);
+      assert.deepEqual(f.calls, []);
+    }
+  }
+}
+''')
+
     def test_explicitly_held_clocks_need_position_but_no_timestamp(self):
         self.run_js(r'''
 for (const buffering of [false, true]) {
