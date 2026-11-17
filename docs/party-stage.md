@@ -35,6 +35,19 @@ new host. It writes `qtra.pid`, `qtra-modules.json`, and `qtra.log` beside the s
 file. The native request desk is always open (`--panel` remains compatible). `--state-file`, `--base-url`,
 `--socket`, `--runtime-dir`, and `--build-dir` select an alternative local setup.
 
+For the Tab switch to native Spotify, install the small X11 event dependency into
+the existing local dependency folder:
+
+```sh
+python3 -m pip install --target build/party-deps python-xlib
+```
+
+The launcher starts `tools/party_dj/window_toggle.py` once and reports its status
+in `windowToggle`. It owns `window-toggle.pid`, `window-toggle.sock`, and
+`window-toggle.log` beside the state file. Its `status` and `stop` commands inspect
+or release the binding; they do not change playback. The Qt action works in qtra
+on Wayland or X11. The return binding requires native Spotify's X11 window.
+
 For manual runtime control, start qtra with a dedicated socket:
 
 ```sh
@@ -71,6 +84,11 @@ Qt's `plainText` property.
 
 ## Guest controls
 
+- **Tab** switches qtra to fullscreen native Spotify, and **Tab** in Spotify
+  returns to qtra with the same draft and focus. The helper binds Tab only on
+  Spotify's managed windows; other applications retain their own Tab behavior.
+  Closing or relaunching Spotify refreshes those bindings. Switching windows
+  leaves the track, queue and volume alone.
 - The native request and chat panel stays open. Click **Zatraži pjesmu · R**, or
   press **R**, to focus its bottom **Magic box**, which accepts a song, artist, or a
   message to the DJ. Typing shows debounced results above it; **Pošalji poruku (Enter)** always

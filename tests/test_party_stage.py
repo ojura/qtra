@@ -335,6 +335,8 @@ class PartyStage(unittest.TestCase):
         self.assertNotIn("partyStage", names)
         self.assertNotIn("partyRequestPanel", names)
         self.assertNotIn("partyRequestAction", names)
+        self.assertNotIn("partySpotifyAction", names)
+        self.assertNotIn("partyReturnAction", names)
         self.eventually(lambda: not checked("actionOrbitSphere") and not checked("actionMobiusRing") and not checked("actionWireframe"), "release did not restore the prior scene actions")
         self.assertIn("pid", self.client.request("hello", {}))
 

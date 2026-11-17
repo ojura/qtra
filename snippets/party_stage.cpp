@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QEasingCurve>
 #include <QFile>
+#include <QFileInfo>
 #include <QFontMetricsF>
 #include <QHash>
 #include <QHideEvent>
@@ -36,6 +37,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
+#include <QProcess>
 #include <QPropertyAnimation>
 #include <QQueue>
 #include <QPushButton>
@@ -361,6 +363,7 @@ public:
                 {QStringLiteral("queryCursor"), savedQueryCursor_}, {QStringLiteral("queryAnchor"), savedQueryAnchor_},
                 {QStringLiteral("selectedTrack"), selectedTrack_}};
     }
+    void showNotice(const QString& words) { setNotice(words); }
     void restoreDraft(const QJsonObject& draft)
     {
         selectedTrack_ = draft.value(QStringLiteral("selectedTrack")).toObject();
@@ -382,6 +385,14 @@ protected:
         }
         if ((watched == message_ || watched == chat_) && (event->type() == QEvent::Move || event->type() == QEvent::Resize))
             updateSuggestionOverlay();
+        if (event->type() == QEvent::KeyPress) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            auto* toggle = window()->findChild<QAction*>(QStringLiteral("partySpotifyAction"));
+            if (key->key() == Qt::Key_Tab && key->modifiers() == Qt::NoModifier && toggle && toggle->isEnabled()) {
+                if (!key->isAutoRepeat()) toggle->trigger();
+                return true;
+            }
+        }
         if (watched == message_ && event->type() == QEvent::KeyPress) {
             auto* key = static_cast<QKeyEvent*>(event);
             const auto modifiers = key->modifiers() & ~Qt::KeypadModifier;
@@ -734,6 +745,21 @@ public:
         window->addAction(escapeAction_);
         // Escape is intentionally consumed: the guest desk stays available.
         connect(escapeAction_, &QAction::triggered, this, [] {});
+        spotifyAction_ = new QAction(QStringLiteral("Spotify · Tab"), this);
+        spotifyAction_->setObjectName(QStringLiteral("partySpotifyAction"));
+        spotifyAction_->setShortcut(QKeySequence(Qt::Key_Tab)); spotifyAction_->setAutoRepeat(false);
+        window->addAction(spotifyAction_);
+        connect(spotifyAction_, &QAction::triggered, this, [this] { showSpotify(); });
+        returnAction_ = new QAction(this); returnAction_->setObjectName(QStringLiteral("partyReturnAction"));
+        window->addAction(returnAction_);
+        connect(returnAction_, &QAction::triggered, this, [this] {
+            auto* window = cube_->window(); window->showFullScreen(); window->raise(); window->activateWindow();
+            QTimer::singleShot(0, this, [this] {
+                if (returnFocus_) returnFocus_->setFocus();
+                else if (desk_) if (auto* composer = desk_->findChild<QPlainTextEdit*>(QStringLiteral("partyMessage"))) composer->setFocus();
+            });
+        });
+        configureWindowToggle(QJsonObject::fromVariantMap(window->property("partyWindowToggleConfig").toMap()));
         window->setWindowTitle(QStringLiteral("LARICS / LYRICS · after hours"));
         setStateFile(stateFile);
         showRequests(true);
@@ -753,7 +779,7 @@ public:
             if (auto* main = qobject_cast<QMainWindow*>(cube_->window())) {
                 main->menuBar()->setVisible(menuWasVisible_); main->statusBar()->setVisible(statusWasVisible_);
             }
-            for (QAction* a : {requestAction_, fullAction_, escapeAction_}) cube_->window()->removeAction(a);
+            for (QAction* a : {requestAction_, fullAction_, escapeAction_, spotifyAction_, returnAction_}) cube_->window()->removeAction(a);
         }
     }
     void setStateFile(const QString& file) { stateFile_ = file; bytes_.clear(); readState(); }
@@ -830,6 +856,8 @@ public:
                 {QStringLiteral("effect"), effectIndex_}, {QStringLiteral("effectError"), effectError_},
                 {QStringLiteral("fileError"), fileError_}, {QStringLiteral("paintCount"), QString::number(paints_)},
                 {QStringLiteral("requestUrl"), requestUrl()},
+                {QStringLiteral("windowToggleConfigured"), spotifyAction_->isEnabled()},
+                {QStringLiteral("windowToggleBusy"), !toggleProcess_.isNull()}, {QStringLiteral("windowToggleError"), windowToggleError_},
                 {QStringLiteral("trackTitle"), text(state_.value(QStringLiteral("nowPlaying")).toObject(), "title")},
                 {QStringLiteral("bookLoaded"), !book_.isNull()}, {QStringLiteral("qrLoaded"), !qr_.isNull()}};
         result.insert(QStringLiteral("panelVisible"), false);
@@ -873,6 +901,13 @@ public:
     {
         if (!desk_) showRequests(true);
         if (desk_) desk_->restoreDraft(draft);
+    }
+    void configureWindowToggle(const QJsonObject& config)
+    {
+        windowToggle_ = config;
+        cube_->window()->setProperty("partyWindowToggleConfig", config.toVariantMap());
+        spotifyAction_->setEnabled(QFileInfo::exists(text(config, "script")) && !text(config, "socket").isEmpty()
+                                  && !text(config, "data").isEmpty());
     }
 protected:
     void showEvent(QShowEvent* e) override { frame_.start(); QWidget::showEvent(e); }
@@ -1207,6 +1242,29 @@ private:
         showRequests(true);
         if (desk_) if (auto* composer = desk_->findChild<QPlainTextEdit*>(QStringLiteral("partyMessage"))) composer->setFocus();
     }
+    void showSpotify()
+    {
+        if (!spotifyAction_->isEnabled() || toggleProcess_) return;
+        returnFocus_ = QApplication::focusWidget(); windowToggleError_.clear();
+        auto* process = new QProcess(this); toggleProcess_ = process;
+        const auto finish = [this, process](bool failed) {
+            if (toggleProcess_ != process) return;
+            if (failed) {
+                windowToggleError_ = QString::fromUtf8(process->readAllStandardError()).trimmed();
+                if (windowToggleError_.isEmpty()) windowToggleError_ = process->errorString();
+                if (desk_) desk_->showNotice(QStringLiteral("Prebacivanje na Spotify nije uspjelo. Pokušaj ponovno."));
+            }
+            toggleProcess_ = nullptr; process->deleteLater();
+        };
+        connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                [finish](int code, QProcess::ExitStatus status) { finish(code != 0 || status != QProcess::NormalExit); });
+        connect(process, &QProcess::errorOccurred, this, [finish](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) finish(true);
+        });
+        process->start(text(windowToggle_, "program", QStringLiteral("python3")),
+                       {text(windowToggle_, "script"), QStringLiteral("spotify"), QStringLiteral("--socket"), text(windowToggle_, "socket"),
+                        QStringLiteral("--data"), text(windowToggle_, "data")});
+    }
     void loadImage(const QString& file, QString& previous, QImage& target, QSize maxSize)
     {
         if (file == previous && (!target.isNull() || file.isEmpty())) return;
@@ -1356,14 +1414,17 @@ private:
     }
     QPointer<CubeWidget> cube_;
     QPointer<RequestDesk> desk_;
+    QPointer<QWidget> returnFocus_;
+    QPointer<QProcess> toggleProcess_;
     QString originalTitle_, stateFile_, fileError_, qrPath_, bookPath_, lastTrack_, lastRequest_, missionText_, effectError_;
     QHash<QString, bool> effectBefore_;
-    QJsonObject state_, karaokeGeometry_;
+    QJsonObject state_, karaokeGeometry_, windowToggle_;
+    QString windowToggleError_;
     QByteArray bytes_;
     QImage qr_, book_;
     QElapsedTimer clock_;
     QTimer frame_, poll_;
-    QAction *requestAction_ = nullptr, *fullAction_ = nullptr, *escapeAction_ = nullptr;
+    QAction *requestAction_ = nullptr, *fullAction_ = nullptr, *escapeAction_ = nullptr, *spotifyAction_ = nullptr, *returnAction_ = nullptr;
     QRectF requestRect_;
     QSet<QString> seenCues_;
     QQueue<Cue> pending_;
@@ -1395,6 +1456,7 @@ void run(const RuntimeAgentHost* host)
     else if (request.contains(QStringLiteral("stateFile"))) stage->setStateFile(text(request, "stateFile"));
     if (request.contains(QStringLiteral("state"))) stage->applyState(request.value(QStringLiteral("state")).toObject());
     if (request.contains(QStringLiteral("requestBaseUrl"))) stage->setRequestBaseUrl(text(request, "requestBaseUrl"));
+    if (request.contains(QStringLiteral("windowToggle"))) stage->configureWindowToggle(request.value(QStringLiteral("windowToggle")).toObject());
     if (request.contains(QStringLiteral("composerDraft"))) stage->restoreComposerDraft(request.value(QStringLiteral("composerDraft")).toObject());
     if (request.contains(QStringLiteral("panel"))) stage->showRequests(request.value(QStringLiteral("panel")).toBool());
     if (request.contains(QStringLiteral("fullscreen"))) {

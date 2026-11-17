@@ -140,7 +140,9 @@ def main() -> int:
                 invoke(client, module, "render", {"events": True, "stateFile": str(state_file)})
             elif name in ("orbit_sphere", "mobius_ring") and newly_loaded:
                 invoke(client, module, "render", {"restore": True})
-        request = {"stateFile": str(state_file)}
+        toggle_script = ROOT / "tools/party_dj/window_toggle.py"
+        toggle_config = {"program": sys.executable, "script": str(toggle_script), "socket": str(socket), "data": str(runtime)}
+        request = {"stateFile": str(state_file), "windowToggle": toggle_config}
         if options.fullscreen:
             request["fullscreen"] = True
         if options.panel:
@@ -152,6 +154,13 @@ def main() -> int:
         client.request("object.invoke", {"objectName": "mainWindow", "method": "raise"})
         metadata = {"pid": hello["pid"], "socket": str(socket), "modules": modules,
                     "stateFile": str(state_file), "buildDir": str(build)}
+        if stage.get("windowToggleConfigured"):
+            try:
+                toggle = subprocess.run([sys.executable, str(toggle_script), "start", "--data", str(runtime), "--socket", str(socket)],
+                                        capture_output=True, text=True, timeout=8)
+                metadata["windowToggle"] = json.loads(toggle.stdout) if toggle.returncode == 0 else {"ok": False, "error": toggle.stderr.strip()}
+            except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                metadata["windowToggle"] = {"ok": False, "error": str(error)}
         if previous.get("pid") == hello["pid"] and previous.get("commit"):
             metadata["commit"] = previous["commit"]
         temporary = metadata_file.with_suffix(".new")
