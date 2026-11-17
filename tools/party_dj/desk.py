@@ -135,13 +135,22 @@ def concise_state(state):
     keys = ('uid', 'uri', 'title', 'artist', 'album', 'playing', 'paused', 'buffering',
             'progressMs', 'durationMs', 'observedAt', 'requestedBy')
     current = state.get('nowPlaying')
+    dj = state.get('dj') or {}
+    presence = {key: dj[key] for key in ('status', 'lastSeen', 'processingMessageIds') if key in dj}
+    work_counts = {}
+    for work in (dj.get('messageWork') or {}).values():
+        if isinstance(work, dict):
+            status = work.get('effectiveState', work.get('state', 'unconfirmed'))
+            work_counts[status] = work_counts.get(status, 0) + 1
+    if work_counts:
+        presence['workCounts'] = work_counts
     return {'spotify': state.get('spotify'),
             'nowPlaying': {key: current[key] for key in keys if key in current} if current else None,
             'device': (state.get('playbackState') or {}).get('device'),
             'front': [{key: item[key] for key in keys if key in item}
                       for item in state.get('queue', []) if item.get('source') == 'queue'][:3],
             'pending': [item for item in state.get('queue', []) if item.get('status') in ('pending', 'sending', 'uncertain')],
-            'dj': state.get('dj')}
+            'dj': presence}
 
 
 def write_json(value, path=None):

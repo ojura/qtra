@@ -112,6 +112,9 @@ Temporary read failures retry with the same cursor; malformed data stops with
 an error. Recalled messages are filtered from both concise and `--raw` output.
 `--raw` includes the full event payload and published state. Use `queue` whenever
 an operation needs the fresh full queue rather than the watcher's short preview.
+Concise state shows work counts; changed work records remain in their events,
+and `inbox`, `message-info` or raw state provide the details without repeating
+every historical outcome on every quiet poll.
 
 Song requests, mood changes and descriptions deserve a quick acknowledgement
 followed by the action they actually need. Send a reply using a stable request ID
