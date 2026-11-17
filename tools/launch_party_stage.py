@@ -21,6 +21,7 @@ NAMES = {
     "orbit_sphere": "draw a sphere orbiting the cube",
     "mobius_ring": "rotating translucent Mobius strip around the scene",
     "party_stage": "LARICS / LYRICS party stage",
+    "party_dance": "LARICS procedural party dance",
 }
 
 
@@ -150,6 +151,7 @@ def main() -> int:
         if options.base_url is not None:
             request["requestBaseUrl"] = options.base_url
         stage = invoke(client, modules["party_stage"], "gui", request)
+        dance = invoke(client, modules["party_dance"], "gui", {"stateFile": str(state_file), "agentSocket": str(socket)})
         client.request("object.invoke", {"objectName": "mainWindow", "method": "show"})
         client.request("object.invoke", {"objectName": "mainWindow", "method": "raise"})
         metadata = {"pid": hello["pid"], "socket": str(socket), "modules": modules,
@@ -167,7 +169,7 @@ def main() -> int:
         temporary.write_text(json.dumps(metadata, indent=2) + "\n")
         temporary.replace(metadata_file)
         (runtime / "qtra.pid").write_text(f"{hello['pid']}\n")
-        print(json.dumps({**metadata, "reused": process is None, "stage": stage}, ensure_ascii=False))
+        print(json.dumps({**metadata, "reused": process is None, "stage": stage, "dance": dance}, ensure_ascii=False))
         return 0
     except BaseException:
         if process is not None and process.poll() is None:

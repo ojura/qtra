@@ -465,6 +465,14 @@ set_target_properties(agent_snippet_party_stage PROPERTIES
     PREFIX "" OUTPUT_NAME "agent_snippet_party_stage")
 stamp_with_host_build_id(agent_snippet_party_stage)
 
+add_library(agent_snippet_party_dance MODULE snippets/party_dance.cpp)
+target_include_directories(agent_snippet_party_dance PRIVATE include src)
+target_link_libraries(agent_snippet_party_dance PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::OpenGL Qt6::OpenGLWidgets)
+set_target_properties(agent_snippet_party_dance PROPERTIES
+    PREFIX "" OUTPUT_NAME "agent_snippet_party_dance")
+stamp_with_host_build_id(agent_snippet_party_dance)
+
 add_library(agent_snippet_jack_in_the_box MODULE snippets/jack_in_the_box.cpp)
 target_include_directories(agent_snippet_jack_in_the_box PRIVATE include src)
 target_link_libraries(agent_snippet_jack_in_the_box PRIVATE

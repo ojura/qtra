@@ -16,7 +16,7 @@ Build the host-matched modules and the host's generated coverage report together
 
 ```sh
 cmake --build build/release --target runtime_agent_coverage \
-  agent_snippet_audio_pulse agent_snippet_party_stage \
+  agent_snippet_audio_pulse agent_snippet_party_stage agent_snippet_party_dance \
   agent_snippet_orbit_sphere agent_snippet_mobius_ring --parallel 3
 ```
 
@@ -146,6 +146,7 @@ error in its runtime status. It reads at most 1 MiB.
 | `scene` | `mode`, `energy` from 0 to 1, `palette`, `effect` from 0 to 7, `graphicsScale` from 0.75 to 2 |
 | `caption` | `id`, `text`, `seconds`, `createdAt` in epoch milliseconds |
 | `bookMoment` | `imagePath`, `title`, printed `page`, optional `expiresAt` in epoch milliseconds |
+| `bookEnabled` | Service photo switch; false clears the cue and suppresses scheduled and manual photos |
 | `requestUrl` | Guest address printed below the request affordance |
 | `requestLocalUrl` | Native API base, default `http://127.0.0.1:8787` |
 | `qrPath` | Local QR image path |
@@ -161,6 +162,9 @@ The service alternates `scene.audioStyle` between `city` and `waterfall` every
 ten minutes. Palette and energy changes retain the current act's timer. Book
 photos rotate independently about every 105 seconds; curated visual refreshes
 follow the guests' mood and requests.
+The current party mode has `bookEnabled:false`, following the guests' request
+for procedural visuals without photographs. Photo rotation remains available
+when the service setting is explicitly enabled again.
 
 `scene.graphicsScale` defaults to 1. It scales the robot fleet and delivered
 records immediately; 1.5 makes them fifty percent larger. The stage reports the
@@ -229,6 +233,31 @@ search replies, fixed Magic box bounds, real Enter/Shift+Enter/Escape keyboard b
 incoming replies, and complete stage release. The keyboard checks use `xdotool`
 on the test's private X display. Set
 `PARTY_STAGE_CAPTURE` to an absolute PNG path to inspect the actual window.
+
+## Procedural dance act
+
+`snippets/party_dance.cpp` is an independent GUI module with its own transparent
+layer beneath the stage. It follows the free main pane's bounds, leaving the
+permanent guest panel, captions and robot fleet in place. The first act combines
+a faceted disco ball, a perspective neon floor, slowly sweeping lights and up to
+48 confetti pieces. The alternate act uses flowing ribbons and orbiting records.
+
+The launcher loads it with `stateFile` and `agentSocket`. One asynchronous local
+socket subscribes to the existing `audio.beat` events; the module never opens an
+audio device or controls playback. Beat strength gently lifts the geometry's
+brightness, with a 0.55-second decay. Painting is limited to 30 frames per second
+and stops while the window is hidden. No full-screen flashes or blur passes are
+used. Status reports frames, received beats, connection state and paint time.
+
+`act:"auto"` advances the choreography when the service's ten-minute
+`scene.audioActStartedAt` anchor changes. `act:"disco"` and `act:"streamers"`
+select an act explicitly. Releasing or hot-reloading this module affects only
+its layer, timers and event connection; the audio and request-panel modules stay
+running. Use the GUI executor. The current choice survives a module reload in
+the host window's properties.
+
+Run `python3 -m unittest discover -s tests -p test_party_dance.py -v` for the
+private-display lifecycle and audio-event regression.
 
 ## Source context
 
