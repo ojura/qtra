@@ -21,7 +21,7 @@ can reach the laptop. Scan the QR on the display, or open the printed URL.
 On the laptop, press **R** or click **Zatraži pjesmu** for the native search and
 chat panel. The bottom Magic box accepts song searches or messages. Selecting a
 song turns that same box into an optional dedication; Cancel restores the search.
-Enter adds a line, and Ctrl+Enter or the labelled button sends. The panel uses
+Enter sends, and Shift+Enter adds a line. The labelled button also sends. The panel uses
 23-pixel text and keeps its result area and composer at fixed sizes.
 **Escape** closes that panel, then leaves fullscreen on the next
 press. **F11** toggles fullscreen. A name and song dedication are optional.
@@ -166,6 +166,58 @@ preview. The service rereads the catalog on every rotation. Captions have IDs
 and reading time proportional to their length, and incoming lines wait for the
 current line to finish.
 
+## Karaoke
+
+The native karaoke layer consumes a timed syllable sheet through `state.karaoke`.
+Load a UTF-8 JSON sheet with the DJ token; a sheet can be up to 256 KiB. Text
+fragments include their own spaces, so highlighting never changes the text layout.
+All cue intervals are absolute milliseconds from the beginning of the recording.
+Use the lyrics and timing file supplied for the selected performance.
+
+```sh
+python3 tools/party_dj/djctl.py karaoke --file /path/to/timed-song.json
+python3 tools/party_dj/djctl.py karaoke --json '{"command":"offset","offsetMs":250}'
+python3 tools/party_dj/djctl.py karaoke --json '{"command":"stop"}'
+```
+
+A short original fixture illustrates the format:
+
+```json
+{
+  "command": "load",
+  "title": "Roboti pjevaju",
+  "source": "manual",
+  "durationMs": 5000,
+  "lines": [{"syllables": [
+    {"text": "Ro", "startMs": 1000, "endMs": 1400},
+    {"text": "bo", "startMs": 1400, "endMs": 1800},
+    {"text": "ti ", "startMs": 1800, "endMs": 2200},
+    {"text": "pje", "startMs": 2400, "endMs": 2800},
+    {"text": "va", "startMs": 2800, "endMs": 3200},
+    {"text": "ju.", "startMs": 3200, "endMs": 3800}
+  ]}]
+}
+```
+
+For Spotify, set `source:"spotify"`, `trackUri` to the exact selected recording,
+and `durationMs` to its duration. The sheet waits for that recording, follows
+Spotify's play/pause and seek position, and returns to waiting when another song
+starts. Loading during the song binds its queue occurrence, including catalogue
+relinking. A preloaded request can match the service's `requestedUri`. A positive
+`offsetMs` advances the lyric cues; a negative value delays them.
+
+For an external recording, `source:"manual"` provides `start`, `pause`, `resume`
+and `seek` commands; `seek` takes `positionMs`. It starts paused unless
+`autoplay:true` is supplied. Sheets and transport anchors persist in SQLite.
+An invalid replacement leaves the loaded sheet intact.
+
+The renderer receives `status`, `positionMs` and `sampledAt`. Position already
+includes the offset; interpolate from `sampledAt` only while status is `playing`.
+The position anchor can be negative before a delayed lyric start; clamp to the
+display range only after interpolation, so the note holds until that start.
+`waiting`, `paused` and `finished` hold the note. Cue text and bounds stay fixed
+while the note and highlight progress through each syllable.
+
 ## State and recovery
 
 Runtime data lives in `~/.local/state/larics-dj/`:
@@ -198,6 +250,11 @@ this state.
 The request server listens on the local network. The intended deployment is the
 party laptop and its guest network. The browser controller and qtra socket use
 loopback and the user's runtime directory respectively.
+
+If Spotify control disconnects, the service clears the observed current track
+and external queue until a fresh observation arrives. It preserves guest requests
+for reconciliation. Guest chat accepts the native composer's full 1500 characters
+and rejects longer messages without silently truncating them.
 
 ## Verification and source context
 

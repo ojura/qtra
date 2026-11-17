@@ -137,7 +137,7 @@ def main() -> int:
                 module = client.request("snippet.load", {"path": str(build / f"agent_snippet_{name}.so")})["moduleId"]
             modules[name] = module
             if name == "audio_pulse":
-                invoke(client, module, "render", {"events": True})
+                invoke(client, module, "render", {"events": True, "stateFile": str(state_file)})
             elif name in ("orbit_sphere", "mobius_ring") and newly_loaded:
                 invoke(client, module, "render", {"restore": True})
         request = {"stateFile": str(state_file)}

@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import server
+from test_karaoke import sheet as karaoke_sheet
 from spotify_native import SpotifyError
 
 
@@ -294,6 +295,56 @@ class PartyTests(unittest.TestCase):
             self.party._advance_show()
         self.assertEqual(self.party.scene['audioStyle'], 'ring')
         self.assertEqual(self.party.scene['effect'], 6)
+
+    def test_karaoke_sheet_persists_and_follows_the_selected_spotify_occurrence(self):
+        self.client.current = {**track(TRACK_A), 'uid': 'karaoke-occurrence',
+                               'playing': True, 'progressMs': 1500, 'observedAt': self.stamp}
+        self.party._refresh()
+        self.party.admin('karaoke', karaoke_sheet())
+        self.assertEqual(self.party.snapshot()['karaoke']['trackUid'], 'karaoke-occurrence')
+        self.stamp += 250
+        self.assertEqual(self.party.snapshot()['karaoke']['positionMs'], 1750)
+        reopened = server.Party(Path(self.directory.name), client=self.client)
+        self.addCleanup(reopened.db.close)
+        reopened._refresh()
+        self.assertEqual(reopened.snapshot()['karaoke']['positionMs'], 1750)
+        self.client.current = {**self.client.current, 'uri': TRACK_B, 'uid': 'following-track'}
+        reopened._refresh()
+        self.assertEqual(reopened.snapshot()['karaoke']['status'], 'waiting')
+        reopened.admin('karaoke', {'command': 'stop'})
+        self.assertIsNone(reopened.snapshot()['karaoke'])
+        self.assertIsNone(reopened.setting('karaoke'))
+
+    def test_invalid_karaoke_replacement_preserves_the_persisted_sheet(self):
+        self.party.admin('karaoke', karaoke_sheet())
+        before = self.party.setting('karaoke')
+        bad = karaoke_sheet()
+        bad['lines'][0]['syllables'][0]['endMs'] = 0
+        with self.assertRaises(ValueError):
+            self.party.admin('karaoke', bad)
+        self.assertEqual(self.party.setting('karaoke'), before)
+        self.assertEqual(self.party.karaoke.saved(), before)
+
+    def test_disconnected_controller_stops_presenting_an_old_track_as_current(self):
+        self.party._refresh()
+        self.assertIsNotNone(self.party.snapshot()['nowPlaying'])
+        with patch.object(self.client, 'status', side_effect=SpotifyError('Browser closed')):
+            self.party._refresh()
+        state = self.party.snapshot()
+        self.assertFalse(state['spotify']['connected'])
+        self.assertIsNone(state['nowPlaying'])
+        self.assertEqual(state['queue'], [])
+        self.client.current = {**track(TRACK_A), 'playing': True}
+        self.party._refresh()
+        self.assertEqual(self.party.snapshot()['nowPlaying']['uri'], TRACK_A)
+
+    def test_native_sized_messages_are_preserved_and_oversize_is_rejected(self):
+        words = 'A' * 1499 + '!'
+        result = self.party.message({'requestId': 'full-native-message', 'text': words})
+        self.assertEqual(result['message']['text'], words)
+        with self.assertRaises(ValueError):
+            self.party.message({'requestId': 'too-long', 'text': words + 'x'})
+        self.assertEqual(len(self.party.chat()['messages']), 1)
 
 
 if __name__ == '__main__':

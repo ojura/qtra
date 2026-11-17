@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlsplit, unquote
 
 from spotify_native import SpotifyClient, SpotifyError
 from speech import DedicationAudio
+from karaoke import Karaoke
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA = Path.home() / '.local/state/larics-dj'
@@ -106,6 +107,7 @@ class Party:
         if self.scene['audioStyle'] in ('city', 'waterfall'):
             self.scene['effect'] = 0
         self.scene_manual_until = 0
+        self.karaoke = Karaoke(self.setting('karaoke'))
         self.mood_votes = {}
         self.captions = self._load_captions()
         self.caption_index = 0
@@ -230,6 +232,7 @@ class Party:
                 'requestUrl': self.request_url, 'qrPath': str(self.data / 'request-qr.png'),
                 'spotify': self.spotify.copy(), 'dj': self._dj(), 'bookMoment': self.book_moment,
                 'speech': self.audio.snapshot() if self.audio else {'available': False, 'enabled': False},
+                'karaoke': self.karaoke.snapshot(now_playing, self.spotify['connected'], now_ms()),
                 'title': 'LARICS / LYRICS'}
             return result
 
@@ -317,7 +320,9 @@ class Party:
             return {'messages': [self._chat_dict(r) for r in rows], 'dj': self._dj()}
 
     def message(self, body, role='user'):
-        text = clean(body.get('text', ''), 1200)
+        text = clean(body.get('text', ''), 1501)
+        if len(text) > 1500:
+            raise ValueError('A message can contain at most 1500 characters.')
         if not text:
             raise ValueError('Write a message first.')
         rid = clean(body.get('requestId', '') or secrets.token_hex(16), 100)
@@ -451,6 +456,12 @@ class Party:
                 self.set_setting('scene', self.scene)
                 self._event('scene', self.scene)
                 result = {'scene': self.scene}
+            elif action == 'karaoke':
+                self.karaoke.control(body, self.snapshot()['nowPlaying'], now_ms())
+                self.set_setting('karaoke', self.karaoke.saved())
+                self._event('karaoke', {'command': body.get('command', 'load'),
+                                       'title': self.karaoke.sheet['title'] if self.karaoke.sheet else None})
+                result = {'karaoke': self.snapshot()['karaoke']}
             elif action == 'configure':
                 if 'speechEnabled' in body:
                     if not isinstance(body['speechEnabled'], bool):
@@ -561,6 +572,9 @@ class Party:
                 message = str(error)[:300]
                 changed = self.spotify['connected'] or self.spotify.get('error') != message
                 self.spotify = {'connected': False, 'error': message}
+                # The last observation cannot identify what another Spotify
+                # process is now playing after a desktop or Connect restart.
+                self.playback = {'nowPlaying': None, 'queue': []}
                 if changed:
                     self._event('spotify', self.spotify)
 
@@ -696,7 +710,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            if length <= 0 or length > 16384:
+            maximum = 262144 if url.path == '/api/admin/karaoke' and self.authorized() else 16384
+            if length <= 0 or length > maximum:
                 raise ValueError('Invalid message size.')
             origin = self.headers.get('Origin')
             if origin and urlsplit(origin).netloc != self.headers.get('Host'):
