@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 6) return {ready: true};
+  if (window.__laricsDJ?.version === 7) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -39,6 +39,31 @@
   if (!player?.getQueue || !player?.getState || !player?.addToQueue) {
     return {ready: false, error: 'Spotify has not exposed its queue controls yet.'};
   }
+  const harmony = player._harmony;
+  const connectDevices = resolve('ConnectDevicesAPI');
+  const browserController = /spotify\.com$/.test(location.hostname);
+
+  const number = (...values) => values.find(value => typeof value === 'number' && Number.isFinite(value));
+  const deviceInfo = device => device ? {id: device.id, name: device.name, type: device.type,
+    isLocal: !!(device.isLocal ?? device.local)} : null;
+
+  function ensureActualState() {
+    // Harmony can claim synthetic state by transferring to its local streamer.
+    // A transport-only command must never enter that path.
+    if (harmony?._hasFakeState) throw new Error('Spotify is showing synthetic local state; reconnect to the active player first.');
+  }
+
+  async function activeTarget() {
+    ensureActualState();
+    if (typeof harmony?.getDevices !== 'function') throw new Error('Spotify has not exposed active-device transport.');
+    const devices = await harmony.getDevices();
+    const active = Array.isArray(devices) ? devices.filter(device => device.is_active === true && device.id) : [];
+    if (active.length !== 1) throw new Error('Spotify must identify one active playback device before transport control.');
+    if (active[0].is_controllable !== true || active[0].is_observable !== true) {
+      throw new Error('The active Spotify device cannot be controlled and observed from this controller.');
+    }
+    return active[0];
+  }
 
   function normalize(item) {
     if (!item) return null;
@@ -69,23 +94,50 @@
 
   const operations = window.__laricsDJ?.operations || new Map();
   const bridge = {
-    version: 6,
+    version: 7,
     operations,
     async status() {
+      if (browserController) ensureActualState();
       const state = await player.getState();
       const queue = await player.getQueue();
       if (!state || !queue) throw new Error('Spotify is connecting to the active player.');
-      const item = normalize(state.item || queue.current);
+      const raw = typeof harmony?.getCurrentState === 'function' && !harmony._hasFakeState
+        ? await harmony.getCurrentState() : null;
+      if (browserController) ensureActualState();
+      const rawTrack = raw?.track_window?.current_track;
+      let current = state.item || queue.current;
+      if (rawTrack?.uri) {
+        const matching = [state.item, queue.current].find(track => track?.uri === rawTrack.uri);
+        current = {...(matching || rawTrack), uri: rawTrack.uri, uid: rawTrack.uid ?? matching?.uid};
+      }
+      const item = normalize(current);
+      const useRaw = typeof raw?.paused === 'boolean' && number(raw.position) !== undefined
+        && !!rawTrack?.uri && rawTrack.uri === item?.uri;
+      const stateTrack = state.item || queue.current;
+      const sameStateOccurrence = stateTrack?.uri === item?.uri
+        && !(stateTrack?.uid && item?.uid && stateTrack.uid !== item.uid);
+      if (!sameStateOccurrence && !useRaw) throw new Error('Spotify changed playback occurrences before a complete clock was available.');
+      const normalizedClock = sameStateOccurrence ? state : {};
+      const paused = useRaw ? raw.paused : !!state.isPaused;
+      const buffering = useRaw ? !!raw.loading : !!state.isBuffering;
       const stamp = Date.now();
-      const playing = !!item && !state.isPaused && !state.isBuffering;
-      const duration = state.duration || item?.durationMs || 0;
-      const elapsed = playing ? Math.max(0, stamp - Number(state.timestamp || stamp)) * Number(state.speed || 1) : 0;
+      const playing = !!item && !paused && !buffering;
+      const duration = [useRaw ? raw.duration : null, normalizedClock.duration, item?.durationMs]
+        .find(value => typeof value === 'number' && Number.isFinite(value) && value > 0) || 0;
+      const position = Math.max(0, useRaw ? raw.position : number(state.positionAsOfTimestamp, state.position, 0));
+      const sourceTimestamp = number(useRaw ? raw.timestamp : null, normalizedClock.timestamp, stamp);
+      const speed = number(useRaw ? raw.playback_speed : null, normalizedClock.speed, 1);
+      const elapsed = playing && sourceTimestamp > 0 ? Math.max(0, stamp - sourceTimestamp) * Math.max(0, speed) : 0;
+      const progress = Math.max(0, position + elapsed);
+      const device = typeof connectDevices?.getActiveDevice === 'function' ? await connectDevices.getActiveDevice() : null;
       return {
-        nowPlaying: item ? {...item, playing, durationMs: duration,
-          progressMs: Math.max(0, Math.min(duration, Number(state.positionAsOfTimestamp || 0) + elapsed)),
+        nowPlaying: item ? {...item, playing, paused, buffering, durationMs: duration,
+          progressMs: duration > 0 ? Math.min(duration, progress) : progress,
           observedAt: stamp} : null,
         queue: [...(queue.queued || []), ...(queue.nextUp || []).slice(0, 8)].map(normalize).filter(Boolean),
         explicitQueueComplete: true,
+        playbackState: {source: useRaw ? 'harmony' : 'player-api', paused, buffering,
+          positionMs: position, sourceTimestamp, device: deviceInfo(device)},
         observedAt: stamp
       };
     },
@@ -157,11 +209,45 @@
       return result;
     },
     async control(action) {
-      if (action === 'next') await player.skipToNext();
-      else if (action === 'pause') await player.pause();
-      else if (action === 'resume') await player.resume();
-      else throw new Error('Unknown playback action.');
-      return {ok: true, action};
+      if (action === 'next') {
+        await player.skipToNext();
+        return {ok: true, action};
+      }
+      if (action !== 'pause' && action !== 'resume') throw new Error('Unknown playback action.');
+      let target = null;
+      if (typeof harmony?.[action] === 'function' && typeof harmony?.getCurrentState === 'function') {
+        target = deviceInfo(await activeTarget());
+        const before = await bridge.status();
+        if (before.playbackState.source !== 'harmony') throw new Error('The active Spotify device has no complete playback clock.');
+        if (before.playbackState.device && before.playbackState.device.id !== target.id) {
+          throw new Error('The observed Spotify device changed before transport dispatch.');
+        }
+        if ((await activeTarget()).id !== target.id) throw new Error('The active Spotify device changed before transport dispatch.');
+        ensureActualState();
+        // The page-level wrappers emit cancellable UI actions. Dispatch through
+        // the existing Connect controller for the explicitly selected device.
+        const accepted = await harmony[action](target.id, {forceRemoteAction: true});
+        if (accepted === false) throw new Error(`Spotify did not accept ${action} for the active device.`);
+      } else {
+        if (browserController) throw new Error('The Spotify web controller has no targeted transport connection.');
+        await player[action]();
+      }
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        if (target && (await activeTarget()).id !== target.id) {
+          throw new Error('The active Spotify device changed before transport could be confirmed.');
+        }
+        const status = await bridge.status();
+        const observed = status.playbackState;
+        if (target && observed.device && observed.device.id !== target.id) {
+          throw new Error('The observed Spotify device no longer matches the transport target.');
+        }
+        if ((!target || observed.source === 'harmony') && observed.paused === (action === 'pause') && !observed.buffering) {
+          return {ok: true, action, device: deviceInfo(target), status};
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      throw new Error(`Spotify ${action} was sent, but the active player's state did not confirm it.`);
     }
   };
   window.__laricsDJ = bridge;
