@@ -199,7 +199,8 @@ public:
         setFeatures(QDockWidget::DockWidgetClosable);
         setMinimumWidth(350); setMaximumWidth(480);
         setStyleSheet(QStringLiteral(
-            "QDockWidget { color:#f7f2ea; background:#101727; font:14px 'DejaVu Sans'; }"
+            "QDockWidget,QLabel,QLineEdit,QListWidget,QTextBrowser,QPushButton { font:18px 'DejaVu Sans'; }"
+            "QDockWidget { color:#f7f2ea; background:#101727; }"
             "QDockWidget::title { background:#202a3c; padding:12px; }"
             "QWidget#partyDeskBody { background:#101727; }"
             "QLabel { color:#c1cce0; } QLabel#partyDeskHeading { color:#ff9a58; font-size:24px; font-weight:600; }"

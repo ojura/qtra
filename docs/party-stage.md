@@ -70,7 +70,8 @@ status, panel state, and state-file or missing-effect errors.
   and dedication are optional.
 - The conversation displays messages returned by the live service. Enter a
   message and press Return or **Pošalji poruku**. The DJ's actual reply appears in
-  the same conversation.
+  the same conversation. The panel uses 18-pixel text for readable chat, inputs,
+  search results and buttons, with a larger heading.
 - **Escape** closes the panel first, then leaves fullscreen on the next press.
 - **F11** toggles fullscreen.
 - The QR opens the separate guest page on phones. The native panel uses the
