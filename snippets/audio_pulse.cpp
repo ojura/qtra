@@ -21,11 +21,13 @@
 
 #include "agent/agent_abi.h"
 #include "audio_analysis.h"
+#include "audio_acts.h"
 #include "cube_widget.h"
 #include "scene_toggle.h"
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QFile>
 #include <QMatrix4x4>
 #include <QMetaObject>
 #include <QOpenGLBuffer>
@@ -171,10 +173,7 @@ struct Particle {
 // view space, so the only transform left is the projection: the bars want to
 // face the camera and the rings want to sit in a world-space plane, and doing
 // both on the CPU means one buffer and one draw call instead of two of each.
-struct Vertex {
-    float x, y, z;
-    float r, g, b, a;
-};
+using Vertex = audio_acts::Vertex;
 
 struct PointVertex {
     float x, y, z;
@@ -252,6 +251,7 @@ struct VizState {
 
     std::vector<Vertex> triangles;
     std::vector<PointVertex> points;
+    audio_acts::History history;
 
     std::array<Shockwave, maxShockwaves> shockwaves{};
     std::array<Shell, maxShells> shells{};
@@ -281,11 +281,59 @@ struct VizState {
 
 VizState* viz = nullptr;
 QMetaObject::Connection drawConnection;
+QMetaObject::Connection hideCubeConnection;
 QAction* toggleAction = nullptr;
 RuntimeAgentHost hookHost{};
 bool hookHostValid = false;
 QString lastDeviceName;
 bool emitBeatEvents = true;
+enum class VisualStyle { Ring, City, Waterfall };
+VisualStyle visualStyle = VisualStyle::Ring;
+QString visualStateFile;
+QString visualStateError;
+std::chrono::steady_clock::time_point nextStyleRead{};
+
+QString styleName()
+{
+    if (visualStyle == VisualStyle::City) return QStringLiteral("city");
+    if (visualStyle == VisualStyle::Waterfall) return QStringLiteral("waterfall");
+    return QStringLiteral("ring");
+}
+
+bool selectStyle(const QString& name)
+{
+    if (name == QStringLiteral("ring")) visualStyle = VisualStyle::Ring;
+    else if (name == QStringLiteral("city")) visualStyle = VisualStyle::City;
+    else if (name == QStringLiteral("waterfall")) visualStyle = VisualStyle::Waterfall;
+    else return false;
+    return true;
+}
+
+void readVisualState()
+{
+    if (visualStateFile.isEmpty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < nextStyleRead) return;
+    nextStyleRead = now + std::chrono::milliseconds(500);
+    QFile file(visualStateFile);
+    if (!file.open(QIODevice::ReadOnly)) {
+        visualStateError = file.errorString();
+        return;
+    }
+    QJsonParseError error;
+    const QJsonObject object = QJsonDocument::fromJson(file.readAll(),&error).object();
+    if (error.error != QJsonParseError::NoError) {
+        visualStateError = error.errorString();
+        return;
+    }
+    const QString requested = object.value(QStringLiteral("scene")).toObject()
+        .value(QStringLiteral("audioStyle")).toString();
+    if (!requested.isEmpty() && !selectStyle(requested)) {
+        visualStateError = QStringLiteral("Unknown audioStyle: ") + requested;
+        return;
+    }
+    visualStateError.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Colour
@@ -918,6 +966,7 @@ void drawFrame(CubeWidget* cube)
         return;
     }
     VizState& state = *viz;
+    readVisualState();
 
     const auto now = std::chrono::steady_clock::now();
     float delta = std::chrono::duration<float>(now - state.lastFrame).count();
@@ -929,6 +978,7 @@ void drawFrame(CubeWidget* cube)
         frame = analyzer->snapshot();
     }
     advance(state, frame, delta, cube);
+    state.history.sample(frame);
 
     // Read the aspect back out of the projection instead of the widget size,
     // so a resized window keeps the ring circular on screen without this having
@@ -949,11 +999,17 @@ void drawFrame(CubeWidget* cube)
 
     state.triangles.clear();
     state.points.clear();
-    buildRoomLight(state.triangles, 0.22F + 0.45F * state.roomLight, aspect);
-    buildSpectrumRing(state.triangles, frame, state.flash, aspect);
-    buildShockwaves(state.triangles, state);
-    buildShells(state.triangles, state, pixelScale);
-    buildParticles(state.points, state.triangles, state, frame, state.flash, pixelScale);
+    if (visualStyle == VisualStyle::City) {
+        audio_acts::city(state.triangles,frame,state.clock,state.flash,aspect,viewportHeight);
+    } else if (visualStyle == VisualStyle::Waterfall) {
+        audio_acts::waterfall(state.triangles,frame,state.history,aspect,viewportHeight);
+    } else {
+        buildRoomLight(state.triangles, 0.22F + 0.45F * state.roomLight, aspect);
+        buildSpectrumRing(state.triangles, frame, state.flash, aspect);
+        buildShockwaves(state.triangles, state);
+        buildShells(state.triangles, state, pixelScale);
+        buildParticles(state.points, state.triangles, state, frame, state.flash, pixelScale);
+    }
 
     // paintGL() leaves blending off, depth writes on and back-face culling on.
     // All three are wrong for additive glow over a scene that is already drawn,
@@ -962,9 +1018,12 @@ void drawFrame(CubeWidget* cube)
     GLboolean blendWas = GL_FALSE;
     GLboolean depthMaskWas = GL_TRUE;
     GLboolean cullWas = GL_FALSE;
+    GLboolean depthTestWas = GL_FALSE;
     gl->glGetBooleanv(GL_BLEND, &blendWas);
     gl->glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMaskWas);
     gl->glGetBooleanv(GL_CULL_FACE, &cullWas);
+    gl->glGetBooleanv(GL_DEPTH_TEST, &depthTestWas);
+    if (visualStyle != VisualStyle::Ring) gl->glDisable(GL_DEPTH_TEST);
 
     gl->glEnable(GL_BLEND);
     // Additive. Overlapping glow accumulates toward white instead of the
@@ -1011,6 +1070,7 @@ void drawFrame(CubeWidget* cube)
         gl->glDisable(GL_BLEND);
     }
     gl->glDepthMask(depthMaskWas);
+    if (depthTestWas == GL_TRUE) gl->glEnable(GL_DEPTH_TEST);
     if (cullWas == GL_TRUE) {
         gl->glEnable(GL_CULL_FACE);
     }
@@ -1156,6 +1216,14 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
         cube, &CubeWidget::frameRendered, cube,
         [cube](qulonglong, float) { drawFrame(cube); },
         Qt::DirectConnection);
+    // advanceAnimation clamps step output to at least 0.05. Run after its
+    // timer slot, before the queued paint, to hide the base mesh completely.
+    // This hook leaves other scene widgets and their drawing untouched.
+    hideCubeConnection = QObject::connect(
+        &cube->m_timer, &QTimer::timeout, cube,
+        [cube] { if (visualStyle != VisualStyle::Ring) cube->m_scale = 0.0F; },
+        Qt::DirectConnection);
+    if (visualStyle != VisualStyle::Ring) cube->m_scale = 0.0F;
     cube->update();
     return true;
 }
@@ -1164,6 +1232,7 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
 void remove(CubeWidget* cube)
 {
     QObject::disconnect(drawConnection);
+    QObject::disconnect(hideCubeConnection);
 
     if (analyzer != nullptr) {
         analyzer->requestStop();
@@ -1346,9 +1415,33 @@ void run(const RuntimeAgentHost* host)
     if (request.contains(QStringLiteral("events"))) {
         emitBeatEvents = request.value(QStringLiteral("events")).toBool();
     }
+    if (request.contains(QStringLiteral("style"))
+        && !selectStyle(request.value(QStringLiteral("style")).toString())) {
+        host->fail(host->invocation_context,"style must be ring, city or waterfall");
+        return;
+    }
+    if (request.contains(QStringLiteral("stateFile"))) {
+        visualStateFile = request.value(QStringLiteral("stateFile")).toString();
+        nextStyleRead = {};
+        visualStateError.clear();
+    }
 
-    const auto complete = [host](QJsonObject result) {
+    if (viz != nullptr && visualStyle != VisualStyle::Ring) cube->m_scale = 0.0F;
+
+    const auto complete = [host,cube](QJsonObject result) {
         result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
+        result.insert(QStringLiteral("style"),styleName());
+        result.insert(QStringLiteral("stateFile"),visualStateFile);
+        result.insert(QStringLiteral("styleFileError"),visualStateError);
+        result.insert(QStringLiteral("captureHops"),analyzer ? static_cast<qint64>(analyzer->hopsAnalyzed()) : 0);
+        result.insert(QStringLiteral("historyRows"),viz ? viz->history.count : 0);
+        result.insert(QStringLiteral("historyCapacity"),audio_acts::History::capacity);
+        result.insert(QStringLiteral("vertices"),viz ? static_cast<qint64>(viz->triangles.size()) : 0);
+        result.insert(QStringLiteral("circularGeometry"),visualStyle == VisualStyle::Ring);
+        result.insert(QStringLiteral("cubeScale"),cube->m_scale);
+        result.insert(QStringLiteral("sensitivity"),currentOptions.sensitivity);
+        result.insert(QStringLiteral("dynamicRangeDb"),currentOptions.dynamicRangeDb);
+        result.insert(QStringLiteral("events"),emitBeatEvents);
         host->complete_json(host->invocation_context,
                             QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
     };
