@@ -82,12 +82,12 @@ Those three findings are resolved. Commit 754674b includes the append-position g
 | 182 | The thin scrollbar remains, with stronger thumb/track contrast. |
 | 185 | Smooth return to the bottom after approximately two minutes without interaction or a user/DJ reply, superseding 107's earlier interval. |
 | 202, 229 | F11 works through the scoped Spotify/qtra helper. Chat 229 clarified the intended feature after the unexplained wording in 217. |
-| 230, 233–235, 240–243, 254 | Reduced excess lower margin and compact status treatment, preserving composer geometry. The broader proposed redesign was not adopted; spoken audio stays disabled. |
+| 230, 233, 234, 235, 240, 241, 243, 254 | Reduced excess lower margin and compact status treatment, preserving composer geometry. |
 | 258 | The centered-dot separator was removed from the request acknowledgement. |
 | 260 | Spotify artwork is shown in Na repertoaru. |
 | 261 | A clickable global play/pause indicator follows actual state, uses explicit intent and guards the current occurrence/device; the progress clock holds when required. |
 | 263 | The upcoming-song preview is longer. |
-| 264–266 | Durable work states replace the mixed-purpose legacy marker. Completion requires an outcome and evidence; active lease expiry becomes unconfirmed. |
+| 264, 265, 266 | Durable work states replace the mixed-purpose legacy marker. Completion requires an outcome and evidence; active lease expiry becomes unconfirmed. |
 
 Stage 15 / dance 16 and the reviewed backend were verified after deployment without a live transport trial. The original 25 migrated records kept unknown historical acceptance times under aa73de1 even when their outcomes were recorded. The reconciliation verified 39 completed, one waiting, seven blocked and 13 cancelled IDs, with no active processing marker.
 
@@ -255,7 +255,7 @@ Origin: Laptop; 17/11/2026, 02:02:38 Europe/Zagreb; event 115; requestId `591159
 
 > što s ovim posveta? jel ide TTS interlude? stavi da bude seamless
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 23
 
@@ -319,7 +319,7 @@ Origin: Laptop; 17/11/2026, 02:37:43 Europe/Zagreb; event 161; requestId `72e397
 
 > složi karaoke (ono da nota ide slog po slog) za pjesmu koju ćeš dobiti za čas. zasad kreni pisati karaoke modul
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 41
 
@@ -355,7 +355,7 @@ Origin: Laptop; 17/11/2026, 02:41:05 Europe/Zagreb; event 169; requestId `e0b4ee
 
 > ruzinavi brod, daleka obala je izbor za karaoke
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 48
 
@@ -371,7 +371,7 @@ Origin: Laptop; 17/11/2026, 02:41:56 Europe/Zagreb; event 173; requestId `3f0b42
 
 > posveta ruzinavog broda je za antonija. reci mu da zgrabi mikrofon kad kreće.
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 54
 
@@ -517,7 +517,7 @@ Origin: Laptop; 17/11/2026, 03:07:01 Europe/Zagreb; event 234; requestId `357532
 
 > pripremi rasputina s prigodnim vizualima. posveta: arijan
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 91
 
@@ -533,7 +533,7 @@ Origin: Laptop; 17/11/2026, 03:09:17 Europe/Zagreb; event 237; requestId `b9c88c
 
 > drugim riječima: rasputin je isto karaoke zahtjev. ALI ZAPRAVO!
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 93
 
@@ -541,7 +541,7 @@ Origin: Laptop; 17/11/2026, 03:10:17 Europe/Zagreb; event 238; requestId `4354c1
 
 > daj neki vizualni feedback onom koji je napisao poruku da razmišljaš o njegovoj poruci
 
-Outcome: Initial processing dots were deployed during the party. The later structural requests 264–266 are now delivered as durable work states with real outcome/evidence and preserved historical acceptance uncertainty. See [decision](#listener-and-queue-events).
+Outcome: Initial processing dots were deployed during the party. The later structural requests 264, 265, 266 are now delivered as durable work states with real outcome/evidence and preserved historical acceptance uncertainty. See [decision](#listener-and-queue-events).
 
 ### Chat 96
 
@@ -583,7 +583,7 @@ Origin: Laptop; 17/11/2026, 03:17:28 Europe/Zagreb; event 250; requestId `a2e74c
 >
 > (i nekim hrvatskim koji nije sranje)
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 105
 
@@ -655,7 +655,7 @@ Origin: Laptop; 17/11/2026, 03:36:37 Europe/Zagreb; event 277; requestId `3c8c66
 
 > ovo se desinkroniziralo, daj opet
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 120
 
@@ -663,7 +663,7 @@ Origin: Laptop; 17/11/2026, 03:36:41 Europe/Zagreb; event 278; requestId `510bd1
 
 > brzo odma sada odma
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 121
 
@@ -687,7 +687,7 @@ Origin: Laptop; 17/11/2026, 03:37:15 Europe/Zagreb; event 281; requestId `a38cc8
 
 > pa prozovi arijana ponovno
 
-Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 124
 
@@ -1127,7 +1127,7 @@ Origin: Gost; 17/11/2026, 06:31:07 Europe/Zagreb; event 502.
 
 > zašto F11 radi samo hrabaru? standby funkcija frižidera također
 
-Outcome: Chat 229 clarified the intended F11 feature, which is now deployed for Spotify and qtra. The unexplained original wording remains part of the historical source question; no refrigerator feature was inferred. See [decision](#withdrawn-and-disputed-input).
+Outcome: Chat 229 clarified the intended F11 feature, which is now deployed for Spotify and qtra. The unexplained original wording remains part of the historical source question. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 221
 
@@ -1180,7 +1180,7 @@ Origin: Gost; 17/11/2026, 06:48:02 Europe/Zagreb; event 529; requestId `64ff3cac
 
 > zašto "magic box" koji je "pošalji poruku" strši u zraku?
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 231
 
@@ -1206,7 +1206,7 @@ Origin: Gost; 17/11/2026, 06:51:31 Europe/Zagreb; event 533; requestId `a1aff8d8
 
 > zapravo ne magic box, nego gumb za slanje, a na dnu je status (jesu li njegove akcije utjecale na stvari)
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 234
 
@@ -1214,7 +1214,7 @@ Origin: Gost; 17/11/2026, 06:51:44 Europe/Zagreb; event 534; requestId `33b2e96d
 
 > i taj status uzima malo previše praznog prostora
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 235
 
@@ -1222,7 +1222,7 @@ Origin: Gost; 17/11/2026, 06:51:50 Europe/Zagreb; event 535; requestId `9a98b74a
 
 > to je moja zamjerka
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 240
 
@@ -1232,7 +1232,7 @@ Origin: Gost; 17/11/2026, 06:53:13 Europe/Zagreb; event 540; requestId `e2b9df8a
 >
 > ne znam što misliš pod odvojen. samo ima malo prekomotnu donju marginu
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 241
 
@@ -1240,7 +1240,7 @@ Origin: Gost; 17/11/2026, 06:53:27 Europe/Zagreb; event 541; requestId `117bc518
 
 > ono što se pojavljuje tamo, mogu biti neki bubbleovi ili speech
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 243
 
@@ -1248,7 +1248,7 @@ Origin: Gost; 17/11/2026, 06:53:44 Europe/Zagreb; event 543; requestId `a29aa0aa
 
 > ili ako smisliš još nešto bolje, odlično
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 245
 
@@ -1299,7 +1299,7 @@ Origin: Gost; 17/11/2026, 07:03:29 Europe/Zagreb; event 555; requestId `a7be733e
 
 > zaključno s prostorom ispod, svakako ga malo stanjiti, a gdje će te poruke biti pokazane, prepuštam
 
-Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. See [decision](#post-party-interface-work).
 
 ### Chat 255
 
@@ -1363,7 +1363,7 @@ Origin: Gost; 17/11/2026, 07:09:46 Europe/Zagreb; event 571; requestId `32f90d8a
 
 > što znače jako stare narančaste točkice?
 
-Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation; old dots were not merely replaced by checks. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation. See [decision](#post-party-interface-work).
 
 ### Chat 265
 
@@ -1371,7 +1371,7 @@ Origin: Gost; 17/11/2026, 07:09:53 Europe/Zagreb; event 572; requestId `e764b076
 
 > bome ih ima
 
-Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation; old dots were not merely replaced by checks. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation. See [decision](#post-party-interface-work).
 
 ### Chat 266
 
@@ -1379,4 +1379,4 @@ Origin: Gost; 17/11/2026, 07:10:15 Europe/Zagreb; event 573; requestId `f2650db2
 
 > to je strukturna pogreška, nemoj ih sad označiti kvačicama i reći to je to
 
-Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation; old dots were not merely replaced by checks. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation. See [decision](#post-party-interface-work).
