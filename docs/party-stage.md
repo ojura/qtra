@@ -75,7 +75,7 @@ Qt's `plainText` property.
   press **R**, to focus its bottom **Magic box**, which accepts a song, artist, or a
   message to the DJ. Typing shows debounced results above it; **Pošalji poruku (Enter)** always
   sends chat until a song is explicitly selected.
-- Selecting a result shows the chosen song in the same reserved area and turns
+- Selecting a result shows the chosen song in the floating suggestion panel and turns
   the box into an optional dedication. **Pošalji pjesmu** sends that song and
   dedication. **Odustani od pjesme** restores the original query and cursor.
 - **Shift+Enter** adds a new line. **Enter** and the Send button submit the current
@@ -85,9 +85,11 @@ Qt's `plainText` property.
 - A grey check beside a guest message means the DJ has marked it read. Receipt
   refreshes update existing messages without adding duplicates or verbose send
   confirmations beneath the composer.
-- The sidebar is 600 pixels wide. Its suggestion area, composer, help and status
-  rows keep their allocated bounds through loading, selection, empty results and
-  errors. While typing, existing results stay in place with a quiet activity bar;
+- The sidebar is 600 pixels wide. Suggestions float over the bottom of the
+  conversation, directly above the composer, and disappear when there are no
+  results. The transcript and composer keep the same bounds throughout loading,
+  selection, empty results and errors. While typing, existing results stay in
+  place with a quiet activity bar;
   stale choices are disabled until the new results arrive. Hover highlights and
   pixel scrolling make the list easier to scan. Long titles are elided with full
   text available in tooltips.
@@ -127,13 +129,13 @@ stage's embellishments every 85 seconds. The service can select a mode at any ti
 Energy changes the strength of the extra light effects. `palette:"ice"` changes
 the main accent to cyan; other values use warm orange.
 
-`scene.graphicsScale` defaults to 1. It scales the robot fleet, delivered records,
-and book/photo cards immediately; 1.5 makes the graphics fifty percent larger.
-The stage reports the applied value as `graphicsScale` in runtime status. Photo
-cards fit below the header and extend to the bottom above the queue footer. Their
-titles and captions overlay the image. Idle robots move into the side margins
-while a book image is visible; robot paths retain fixed caption clearance.
-Labels grow with the robots. The request controls,
+`scene.graphicsScale` defaults to 1. It scales the robot fleet and delivered
+records immediately; 1.5 makes them fifty percent larger. The stage reports the
+applied value as `graphicsScale` in runtime status. Photographs take the entire
+main stage, scale to fit with their aspect ratio preserved, and meet its bottom
+edge. An opaque background covers the visualizer while the photo is visible.
+Titles and captions overlay the image. Robot paths retain fixed caption clearance
+when the visualizer returns. Labels grow with the robots. The request controls,
 QR and current-track panel keep their readable size.
 
 Book images and robot paths keep the same bounds when a caption appears,
@@ -206,3 +208,26 @@ The caption timing draws on `snippets/soliloquy_intermission.cpp` and the origin
 Claude dialogue in session `7041d14e-f0f1-4ff8-8ea6-47f6e1c84d75`, including its
 dramaturg review `agent-a39663083c88bd523`. The recovered direction favours sustained
 comic acts, readable payoff lines, changing motion, and smooth handovers.
+
+## Karaoke
+
+`state.karaoke` is either `null` or an enabled cue sheet with `title`, `source`,
+`status`, `positionMs`, `sampledAt`, `durationMs`, `offsetMs`, and `lines`. Each
+line supplies `text`, `startMs`, `endMs`, and ordered `syllables` with the same
+timing fields and text fragments. Spaces in those fragments are preserved.
+
+The native stage adds elapsed time only while `status` is `playing`. It keeps the
+signed `positionMs` anchor until after interpolation, then clamps to the song's
+duration. The service has already applied `offsetMs`. Paused and waiting clocks
+hold still; seeks select the corresponding line immediately.
+
+A fixed lyric panel shows the active and next lines. The current syllable changes
+color while a musical note travels across it and bounces. Text keeps the same
+layout during highlighting; gaps hold the note and show a count-in for the next
+cue. Long lines wrap and fit inside their allocated area. The karaoke panel sits
+between the header and subtitle band, leaving the guest desk and photo bounds
+unchanged. Native status includes its current line, syllable, clock, and geometry.
+
+The private-display test uses the original text “Roboti pjevaju.” to exercise
+pause, interpolation, negative anchors, gaps, seeks and stable lyric bounds.
+`PARTY_KARAOKE_CAPTURE=/absolute/path.png` saves its actual rendered frame.

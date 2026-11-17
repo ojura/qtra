@@ -178,8 +178,9 @@ class PartyStage(unittest.TestCase):
         return self.client.request("object.get", {"objectName": "partyMessage", "property": "plainText"})
 
     def magic_bounds(self):
-        return {name: self.client.request("object.get", {"objectName": name, "property": "geometry"})
-                for name in ("partyRequestPanel", "partySuggestions", "partyMessage", "partyMagicHelp", "partySendButton")}
+        # The generic property bridge does not serialize QRect; use the native
+        # panel's explicit measurements of the actual widgets.
+        return self.run_stage()["panelBounds"]
 
     def key(self, combination):
         windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
@@ -239,6 +240,8 @@ class PartyStage(unittest.TestCase):
         self.run_stage(panel=True)
         self.eventually(lambda: self.run_stage()["chatCount"] == 1, "actual DJ chat was not fetched")
         bounds = self.magic_bounds()
+        self.assertFalse(self.client.request("object.get", {"objectName": "partySuggestions", "property": "visible"}),
+                         "empty suggestions covered the conversation")
         self.set_text("partyName", "Guest test")
         self.set_text("partyMessage", "slow")
         self.eventually(lambda: "slow" in self.server.searches, "slow search did not start")
@@ -246,10 +249,17 @@ class PartyStage(unittest.TestCase):
         self.eventually(lambda: self.run_stage()["suggestionState"] == "results", "replacement search did not complete")
         time.sleep(.75)
         self.assertEqual(self.magic_bounds(), bounds, "search results changed the Magic box bounds")
+        self.assertTrue(self.client.request("object.get", {"objectName": "partySuggestions", "property": "visible"}),
+                        "search results did not appear above the composer")
+        popup, chat, composer = (bounds[name] for name in ("partySuggestions", "partyChat", "partyMessage"))
+        self.assertGreaterEqual(popup["y"], chat["y"])
+        self.assertLess(popup["y"], chat["y"] + chat["height"], "suggestions did not overlay the conversation")
+        self.assertLessEqual(popup["y"] + popup["height"], composer["y"], "suggestions covered the composer")
         self.client.request("object.set", {"objectName": "partyResults", "property": "currentRow", "value": 0})
         self.assertTrue(self.run_stage()["selectedTrack"].startswith("A very long song title"), "a stale search replaced current results")
         self.assertEqual(self.run_stage()["composerMode"], "dedication")
         self.assertEqual(self.composer_text(), "")
+        self.assertTrue(self.run_stage()["selectedCancelFits"], "the compact song popup clipped Cancel")
         self.assertFalse(self.server.requests, "selecting a song submitted it without consent")
         self.assertEqual(self.magic_bounds(), bounds, "song selection changed the Magic box bounds")
         self.client.request("widget.click", {"objectName": "partyCancelSong"})
@@ -282,6 +292,8 @@ class PartyStage(unittest.TestCase):
 
         self.set_text("partyMessage", "offline")
         self.eventually(lambda: self.run_stage()["suggestionState"] == "error", "search failure was not shown")
+        self.assertFalse(self.client.request("object.get", {"objectName": "partySuggestions", "property": "visible"}),
+                         "failed search left an empty popup covering the conversation")
         self.assertEqual(self.magic_bounds(), bounds, "search failure changed the Magic box bounds")
         prefix = "More groove, please <3"
         self.run_stage(composerDraft={"text": prefix, "cursor": len(prefix), "anchor": len(prefix)})
@@ -320,6 +332,84 @@ class PartyStage(unittest.TestCase):
         self.assertNotIn("partyRequestAction", names)
         self.eventually(lambda: not checked("actionOrbitSphere") and not checked("actionMobiusRing") and not checked("actionWireframe"), "release did not restore the prior scene actions")
         self.assertIn("pid", self.client.request("hello", {}))
+
+    def test_karaoke_clock_note_and_stable_lyric_area(self):
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
+        first = [{"text": word, "startMs": start, "endMs": end} for word, start, end in (
+            ("Ro", 1000, 1400), ("bo", 1400, 1800), ("ti ", 1800, 2200),
+            ("pje", 2400, 2800), ("va", 2800, 3200), ("ju.", 3200, 3800))]
+        second = [{"text": "Sad je red na vas.", "startMs": 5000, "endMs": 8000}]
+        self.state["karaoke"] = {"enabled": True, "title": "Roboti pjevaju", "source": "manual", "status": "paused",
+                                 "durationMs": 9000, "positionMs": 1500, "sampledAt": int(time.time() * 1000), "offsetMs": 1234,
+                                 "lines": [{"text": "Roboti pjevaju.", "startMs": 1000, "endMs": 3800, "syllables": first},
+                                           {"text": "Sad je red na vas.", "startMs": 5000, "endMs": 8000, "syllables": second}]}
+
+        def change(**fields):
+            self.state["karaoke"].update(fields)
+            self.state["revision"] += 1
+            self.write_state()
+            self.eventually(lambda: self.run_stage()["revision"] == self.state["revision"], "karaoke state did not arrive")
+            self.eventually(lambda: bool(self.run_stage()["karaoke"].get("bounds")), "karaoke was not painted")
+            return self.run_stage()["karaoke"]
+
+        frame = change()
+        self.assertEqual(frame["text"], "Roboti pjevaju.")
+        self.assertEqual(frame["nextText"], "Sad je red na vas.")
+        self.assertEqual(frame["syllableIndex"], 1)
+        self.assertEqual(frame["positionMs"], 1500, "the native renderer applied offset twice")
+        bounds, line_bounds = frame["bounds"], frame["lineBounds"]
+        self.assertGreater(bounds[2], 1500, "the karaoke panel did not use the full native stage width")
+        first_note = frame["note"]
+        time.sleep(.2)
+        self.assertEqual(self.run_stage()["karaoke"]["positionMs"], 1500, "paused lyrics continued advancing")
+        frame = change(positionMs=2000)
+        self.eventually(lambda: self.run_stage()["karaoke"]["note"][0] > first_note[0], "the note did not follow the next syllable")
+        self.assertEqual(frame["bounds"], bounds)
+        self.assertEqual(frame["lineBounds"], line_bounds, "highlighting moved the lyric area")
+        capture = os.environ.get("PARTY_KARAOKE_CAPTURE")
+        if capture:
+            self.run_stage(capture=capture)
+        photo = self.folder / "original-test-photo.ppm"
+        photo.write_bytes(b"P6\n16 9\n255\n" + bytes(component for y in range(9) for x in range(16)
+                                                    for component in (30 + x * 8, 55 + y * 14, 100)))
+        self.state["bookMoment"] = {"imagePath": str(photo), "title": "Originalna probna fotografija", "page": 1}
+        self.state["caption"] = {"id": "karaoke-photo", "text": "Fotografija i titl zadržavaju svoja mjesta.",
+                                 "seconds": 20, "createdAt": int(time.time() * 1000)}
+        frame = change()
+        self.assertEqual(frame["bounds"], bounds, "a photo moved the lyric area")
+        self.eventually(lambda: self.run_stage()["captionId"] == "karaoke-photo", "the photo caption was not shown")
+        self.assertTrue(self.run_stage()["bookLoaded"])
+        if capture:
+            self.run_stage(capture=str(Path(capture).with_name("karaoke-photo-test.png")))
+        frame = change(positionMs=-4000, status="paused")
+        self.assertEqual(frame["countInMs"], 5000, "count-in ignored the negative pre-roll")
+        frame = change(positionMs=-4000, status="playing", sampledAt=int(time.time() * 1000) - 1000)
+        self.assertEqual(frame["positionMs"], 0)
+        self.assertGreater(frame["countInMs"], 3500)
+        self.assertLessEqual(frame["countInMs"], 4000, "count-in did not advance through pre-roll")
+        time.sleep(.25)
+        self.assertEqual(self.run_stage()["karaoke"]["positionMs"], 0, "a negative anchor was clamped before interpolation")
+        frame = change(positionMs=1400, status="playing", sampledAt=int(time.time() * 1000))
+        self.eventually(lambda: self.run_stage()["karaoke"]["syllableIndex"] >= 2, "playing lyrics did not interpolate between state polls")
+        frame = change(positionMs=2300, status="paused")
+        self.assertEqual(frame["phase"], "gap")
+        self.assertEqual(frame["syllableIndex"], 2, "the note did not hold through the syllable gap")
+        frame = change(positionMs=5200)
+        self.assertEqual(frame["lineIndex"], 1, "seeking did not choose the right lyric line")
+        self.assertEqual(frame["bounds"], bounds, "the next lyric changed the panel bounds")
+        frame = change(positionMs=0, status="finished")
+        self.assertEqual(frame["positionMs"], 9000)
+        self.assertEqual(frame["phase"], "finished")
+        frame = change(positionMs=0, status="waiting")
+        self.assertEqual(frame["phase"], "waiting")
+        self.state["karaoke"] = None
+        self.state["revision"] += 1
+        self.write_state()
+        self.eventually(lambda: not self.run_stage()["karaoke"]["active"], "stopped karaoke remained active")
+        self.assertTrue(self.run_stage()["panelVisible"], "karaoke changed the guest panel")
 
 
 if __name__ == "__main__":

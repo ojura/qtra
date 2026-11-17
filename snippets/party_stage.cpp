@@ -45,6 +45,7 @@
 #include <QStatusBar>
 #include <QTextBrowser>
 #include <QTextCursor>
+#include <QTextLayout>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -209,6 +210,7 @@ public:
             "QDockWidget { color:#f7f2ea; background:#101727; }"
             "QDockWidget::title { background:#202a3c; padding:15px; }"
             "QWidget#partyDeskBody { background:#101727; }"
+            "QWidget#partySuggestions { background:#080f1d; border-radius:10px; }"
             "QLabel { color:#c1cce0; } QLabel#partyDeskHeading { color:#ff9a58; font-size:30px; font-weight:600; }"
             "QLineEdit,QPlainTextEdit,QListWidget,QTextBrowser,QLabel#partySuggestionHint,QWidget#partySelectedSong { background:#080f1d; color:#f7f2ea; border:1px solid #344158; border-radius:10px; padding:11px; }"
             "QLineEdit:focus,QPlainTextEdit:focus { border-color:#7de4ed; }"
@@ -236,7 +238,8 @@ public:
         presence_->setFixedHeight(73); presence_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         chat_ = new QTextBrowser(body); chat_->setObjectName(QStringLiteral("partyChat"));
         chat_->setOpenExternalLinks(false); chat_->setMinimumHeight(175); layout->addWidget(chat_, 1);
-        auto* suggestionArea = new QWidget(body); suggestionArea->setObjectName(QStringLiteral("partySuggestions"));
+        suggestionArea_ = new QWidget(body); auto* suggestionArea = suggestionArea_;
+        suggestionArea->setObjectName(QStringLiteral("partySuggestions"));
         suggestionArea->setFixedHeight(255); suggestionArea->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         auto* suggestionLayout = new QVBoxLayout(suggestionArea); suggestionLayout->setContentsMargins(0, 0, 0, 0); suggestionLayout->setSpacing(0);
         searchActivity_ = new QProgressBar(suggestionArea); searchActivity_->setObjectName(QStringLiteral("partySearchActivity"));
@@ -267,7 +270,7 @@ public:
         selectedLayout->addStretch(1);
         cancelSong_ = new QPushButton(QStringLiteral("Odustani od pjesme"), selectedPage_);
         cancelSong_->setObjectName(QStringLiteral("partyCancelSong")); selectedLayout->addWidget(cancelSong_);
-        suggestions_->addWidget(selectedPage_); layout->addWidget(suggestionArea);
+        suggestions_->addWidget(selectedPage_);
         message_ = new QPlainTextEdit(body); message_->setObjectName(QStringLiteral("partyMessage"));
         message_->setPlaceholderText(QStringLiteral("Magic box: pjesma, izvođač ili poruka DJ-u…"));
         message_->setLineWrapMode(QPlainTextEdit::WidgetWidth); message_->setTabChangesFocus(true);
@@ -291,7 +294,10 @@ public:
         chatPoll_.setInterval(1500);
         connect(&chatPoll_, &QTimer::timeout, this, [this] { fetchChat(); });
         connect(this, &QDockWidget::visibilityChanged, this, [this](bool visible) {
-            if (visible) { chatPoll_.start(); fetchChat(); message_->setFocus(); }
+            if (visible) {
+                chatPoll_.start(); fetchChat(); message_->setFocus();
+                QTimer::singleShot(0, this, [this] { updateSuggestionOverlay(); });
+            }
             else chatPoll_.stop();
         });
         window->addDockWidget(Qt::RightDockWidgetArea, this); hide();
@@ -305,7 +311,18 @@ public:
     }
     QJsonObject status() const
     {
+        const auto rect = [](const QWidget* widget) {
+            const QRect r = widget->geometry();
+            return QJsonObject{{QStringLiteral("x"), r.x()}, {QStringLiteral("y"), r.y()},
+                               {QStringLiteral("width"), r.width()}, {QStringLiteral("height"), r.height()}};
+        };
+        const QJsonObject bounds{{QStringLiteral("partyRequestPanel"), rect(this)},
+            {QStringLiteral("partySuggestions"), rect(suggestionArea_)}, {QStringLiteral("partyChat"), rect(chat_)},
+            {QStringLiteral("partyMessage"), rect(message_)}, {QStringLiteral("partyMagicHelp"), rect(magicHelp_)},
+            {QStringLiteral("partySendButton"), rect(send_)}};
         return {{QStringLiteral("panelVisible"), isVisible()}, {QStringLiteral("chatCount"), messages_.size()},
+                {QStringLiteral("panelBounds"), bounds},
+                {QStringLiteral("selectedCancelFits"), selectedPage_->rect().contains(cancelSong_->geometry())},
                 {QStringLiteral("searchCount"), results_->count()}, {QStringLiteral("panelNotice"), notice_->text()},
                 {QStringLiteral("composerMode"), selectedTrack_.isEmpty() ? QStringLiteral("message") : QStringLiteral("dedication")},
                 {QStringLiteral("suggestionState"), suggestionState_}, {QStringLiteral("selectedTrack"), text(selectedTrack_, "title")}};
@@ -332,6 +349,8 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (watched == message_ && (event->type() == QEvent::Move || event->type() == QEvent::Resize))
+            updateSuggestionOverlay();
         if (watched == message_ && event->type() == QEvent::KeyPress) {
             auto* key = static_cast<QKeyEvent*>(event);
             const auto modifiers = key->modifiers() & ~Qt::KeypadModifier;
@@ -344,6 +363,26 @@ protected:
 private:
     static QString uuid() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     QString name() const { return name_->text().trimmed().isEmpty() ? QStringLiteral("Gost") : name_->text().trimmed(); }
+    void updateSuggestionOverlay()
+    {
+        // This child floats over the transcript and never participates in its
+        // layout. Showing results or a selected song cannot move the composer.
+        const QRect composer = message_->geometry();
+        const QRect chat = chat_->geometry();
+        const int height = std::max(1, std::min(255, chat.height()));
+        suggestionArea_->setFixedHeight(height);
+        suggestionArea_->setGeometry(composer.x(), std::max(chat.y(), composer.y() - 11 - height), composer.width(), height);
+        const bool compact = height < 230;
+        selectedTitle_->setFixedHeight(compact ? 36 : 73);
+        auto* selectedLayout = selectedPage_->layout();
+        selectedLayout->setContentsMargins(15, compact ? 6 : 13, 15, compact ? 6 : 13);
+        selectedLayout->setSpacing(compact ? 4 : 6);
+        const bool selected = !selectedTrack_.isEmpty();
+        const bool results = results_->count() > 0 &&
+            (suggestionState_ == QStringLiteral("results") || suggestionState_ == QStringLiteral("loading"));
+        suggestionArea_->setVisible(selected || results);
+        if (selected || results) suggestionArea_->raise();
+    }
     void setNotice(const QString& words)
     {
         notice_->setToolTip(words);
@@ -353,6 +392,7 @@ private:
     {
         suggestionHint_->setText(words); suggestionHint_->setToolTip(words);
         suggestions_->setCurrentWidget(suggestionHint_); suggestionState_ = state;
+        updateSuggestionOverlay();
     }
     void setComposerText(const QString& words, int position, int anchor)
     {
@@ -383,6 +423,7 @@ private:
             selectedArtist_->setToolTip(text(selectedTrack_, "artist"));
             suggestions_->setCurrentWidget(selectedPage_); suggestionState_ = QStringLiteral("selected");
         }
+        updateSuggestionOverlay();
     }
     void composerChanged()
     {
@@ -399,6 +440,7 @@ private:
             results_->setEnabled(false); searchActivity_->setRange(0, 0);
             if (suggestions_->currentWidget() == selectedPage_) suggestions_->setCurrentWidget(results_);
             suggestionState_ = QStringLiteral("loading");
+            updateSuggestionOverlay();
             searchDelay_.start();
         }
     }
@@ -470,7 +512,10 @@ private:
                 item->setSizeHint(QSize(0, 95));
             }
             results_->setCurrentRow(-1);
-            if (results_->count()) { suggestions_->setCurrentWidget(results_); suggestionState_ = QStringLiteral("results"); }
+            if (results_->count()) {
+                suggestions_->setCurrentWidget(results_); suggestionState_ = QStringLiteral("results");
+                updateSuggestionOverlay();
+            }
             else suggestionHint(QStringLiteral("Nema pjesama za taj upit.\nPoruku možeš poslati DJ-u."), QStringLiteral("empty"));
         });
     }
@@ -579,7 +624,7 @@ private:
     QListWidget* results_;
     QStackedWidget* suggestions_;
     QProgressBar* searchActivity_;
-    QWidget* selectedPage_;
+    QWidget *selectedPage_, *suggestionArea_;
     QPushButton *send_, *cancelSong_;
     QLabel *presence_, *notice_, *suggestionHint_, *selectedTitle_, *selectedArtist_, *magicHelp_;
     QTextBrowser* chat_;
@@ -738,6 +783,14 @@ public:
             const auto values = desk_->status();
             for (auto it = values.begin(); it != values.end(); ++it) result.insert(it.key(), it.value());
         }
+        const auto karaoke = karaokeFrame();
+        QJsonObject singing{{QStringLiteral("active"), karaoke.visible}, {QStringLiteral("positionMs"), karaoke.position},
+            {QStringLiteral("status"), karaoke.status}, {QStringLiteral("phase"), karaoke.phase},
+            {QStringLiteral("countInMs"), karaoke.countIn},
+            {QStringLiteral("lineIndex"), karaoke.lineIndex}, {QStringLiteral("syllableIndex"), karaoke.syllableIndex},
+            {QStringLiteral("text"), text(karaoke.line, "text")}, {QStringLiteral("nextText"), text(karaoke.next, "text")}};
+        for (auto it = karaokeGeometry_.begin(); it != karaokeGeometry_.end(); ++it) singing.insert(it.key(), it.value());
+        result.insert(QStringLiteral("karaoke"), singing);
         return result;
     }
     QString requestUrl() const
@@ -798,113 +851,109 @@ protected:
         // instead of opening a second audio stream.
         const double pulse = cube_ ? unit((cube_->m_tint.y() - .5) * 2.2) : 0;
         const double reaction = .20 + energy * .8;
-        QLinearGradient top(0, 0, 0, h * .34);
-        top.setColorAt(0, QColor(6, 10, 22, 235)); top.setColorAt(1, QColor(6, 10, 22, 0));
-        p.fillRect(QRectF(0, 0, w, h * .34), top);
-        QLinearGradient bottom(0, h * .62, 0, h);
-        bottom.setColorAt(0, QColor(6, 10, 22, 0)); bottom.setColorAt(1, QColor(6, 10, 22, 235));
-        p.fillRect(QRectF(0, h * .62, w, h * .38), bottom);
-
-        if (mode == QStringLiteral("laser")) {
-            p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
-            for (int i = 0; i < 12; ++i) {
-                const double a = t * .11 + i * pi / 6;
-                const QPointF start(w * (i % 2 ? .92 : .08), h * .78);
-                const QPointF end(w * .5 + std::sin(a) * w * .62, h * (.19 + .18 * std::cos(a * 1.3)));
-                line(p, start, end, alpha(i % 2 ? cyan : orange, (.05 + pulse * .10) * reaction), 2 * u);
-            }
-            p.restore();
-        } else if (mode != QStringLiteral("quiet")) {
-            p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
-            for (int i = 0; i < 38; ++i) {
-                const double a = i * 2.399963 + t * (.04 + (i % 4) * .009);
-                const double r = .20 + .26 * ((i * 17) % 37) / 37.0;
-                const QPointF v(w * .5 + std::cos(a) * w * r, h * .49 + std::sin(a) * h * r * .7);
-                p.setPen(Qt::NoPen); p.setBrush(alpha(i % 3 ? cyan : orange, .18 + pulse * .22));
-                p.drawEllipse(v, (1.0 + i % 3 + pulse) * u, (1.0 + i % 3 + pulse) * u);
-            }
-            p.restore();
-        }
-
         const double margin = 34 * u;
-        p.setFont(stageFont(18 * u, true)); p.setPen(orange);
-        p.drawText(QRectF(margin, 22 * u, w * .55, 28 * u), Qt::AlignLeft | Qt::AlignVCenter,
-                   QStringLiteral("LARICS / LYRICS"));
-        p.setFont(stageFont(12 * u)); p.setPen(QColor("#b7bfd1"));
-        p.drawText(QRectF(margin, 49 * u, w * .55, 21 * u), Qt::AlignLeft | Qt::AlignVCenter,
-                   QStringLiteral("after hours   ·   robots have requests too"));
-
-        const auto now = state_.value(QStringLiteral("nowPlaying")).toObject();
-        const QString title = text(now, "title", QStringLiteral("The lab is warming up"));
-        const QString artist = text(now, "artist", QStringLiteral("Odaberi pjesmu. Roboti čekaju."));
-        const double infoWidth = std::min(w * .53, 690 * u);
-        const QRectF playing(margin, 89 * u, infoWidth, 105 * u);
-        panel(p, playing, orange);
-        p.setPen(orange); p.setFont(stageFont(11 * u, true));
-        p.drawText(playing.adjusted(19 * u, 12 * u, -19 * u, 0), Qt::AlignTop,
-                   now.value(QStringLiteral("playing")).toBool() ? QStringLiteral("Sada svira") : QStringLiteral("Na repertoaru"));
-        p.setPen(white); p.setFont(stageFont(25 * u, true));
-        p.drawText(playing.adjusted(19 * u, 33 * u, -19 * u, -30 * u), Qt::AlignLeft | Qt::AlignVCenter,
-                   QFontMetrics(p.font()).elidedText(title, Qt::ElideRight, qRound(infoWidth - 38 * u)));
-        p.setPen(QColor("#b9c7db")); p.setFont(stageFont(14 * u));
-        p.drawText(playing.adjusted(19 * u, 71 * u, -19 * u, 0), Qt::AlignTop,
-                   QFontMetrics(p.font()).elidedText(artist, Qt::ElideRight, qRound(infoWidth - 38 * u)));
-        const double duration = number(now, "durationMs", 0);
-        if (duration > 0) {
-            const double elapsed = now.value(QStringLiteral("playing")).toBool()
-                ? std::max(0.0, double(QDateTime::currentMSecsSinceEpoch()) - number(now, "observedAt", QDateTime::currentMSecsSinceEpoch())) : 0;
-            const double progress = unit((number(now, "progressMs", 0) + elapsed) / duration);
-            p.setPen(Qt::NoPen); p.setBrush(alpha(orange, .14)); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, infoWidth - 34 * u, 3 * u), 1.5, 1.5);
-            p.setBrush(orange); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, (infoWidth - 34 * u) * progress, 3 * u), 1.5, 1.5);
-        }
-
-        const double qrSide = 102 * u;
-        requestRect_ = QRectF(w - margin - 240 * u, 24 * u, 240 * u, 190 * u);
-        panel(p, requestRect_, cyan);
-        p.setFont(stageFont(16 * u, true)); p.setPen(white);
-        p.drawText(requestRect_.adjusted(16 * u, 12 * u, -8 * u, 0), Qt::AlignTop, QStringLiteral("Daj pjesmu."));
-        p.setFont(stageFont(11 * u)); p.setPen(QColor("#b9c7db"));
-        p.drawText(QRectF(requestRect_.x() + 16 * u, 60 * u, 94 * u, 80 * u),
-                   Qt::AlignLeft | Qt::TextWordWrap, QStringLiteral("Skeniraj, pronađi,\npošalji DJ-u."));
-        if (!qr_.isNull()) {
-            const QRectF qrRect(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide);
-            p.fillRect(qrRect.adjusted(-4 * u, -4 * u, 4 * u, 4 * u), Qt::white);
-            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-            p.drawImage(qrRect, qr_);
-        } else {
-            p.setPen(alpha(cyan, .45)); p.setBrush(Qt::NoBrush);
-            p.drawRoundedRect(QRectF(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide), 12, 12);
-            p.setFont(stageFont(28 * u, true)); p.setPen(cyan);
-            p.drawText(QRectF(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide), Qt::AlignCenter, QStringLiteral("♪"));
-        }
-        p.setFont(stageFont(11 * u, true)); p.setPen(cyan);
-        p.drawText(requestRect_.adjusted(16 * u, 148 * u, -4 * u, -4 * u), Qt::AlignTop, QStringLiteral("Zatraži pjesmu · R"));
-        const QString guestUrl = text(state_, "requestUrl");
-        if (!guestUrl.isEmpty()) {
-            p.setFont(stageFont(10 * u)); p.setPen(QColor("#95a5bf"));
-            p.drawText(requestRect_.adjusted(16 * u, 170 * u, -10 * u, 0), Qt::AlignTop,
-                       QFontMetrics(p.font()).elidedText(guestUrl, Qt::ElideMiddle, qRound(210 * u)));
-        }
-
         const QRectF bookCard = drawBook(p, w, h, u, orange);
-        const double mission = t - missionStart_;
-        if (mission >= 0 && mission < 17) drawDelivery(p, w, h, u, t, pulse, orange, mission);
-        if (mode == QStringLiteral("robots")) {
-            for (int i = 0; i < 3; ++i) {
-                double robotScale = (i == 0 ? 1.05 : 1.15) * u * graphicsScale();
-                double x = w * (.20 + i * .30) + std::sin(t * .5 + i) * 24 * u;
-                double y = h * (.68 + (i == 0 ? -.07 : .03));
-                if (!bookCard.isEmpty()) {
-                    // Leave the photograph unobscured while the fleet keeps dancing.
-                    const double gutter = bookCard.left();
-                    robotScale = std::min(robotScale, std::max(.65, (gutter - 20 * u) / 112));
-                    x = i == 2 ? w - gutter / 2 : gutter / 2;
-                    y = bookCard.top() + bookCard.height() * (i == 0 ? .28 : .76);
+        if (bookCard.isEmpty()) {
+            QLinearGradient top(0, 0, 0, h * .34);
+            top.setColorAt(0, QColor(6, 10, 22, 235)); top.setColorAt(1, QColor(6, 10, 22, 0));
+            p.fillRect(QRectF(0, 0, w, h * .34), top);
+            QLinearGradient bottom(0, h * .62, 0, h);
+            bottom.setColorAt(0, QColor(6, 10, 22, 0)); bottom.setColorAt(1, QColor(6, 10, 22, 235));
+            p.fillRect(QRectF(0, h * .62, w, h * .38), bottom);
+
+            if (mode == QStringLiteral("laser")) {
+                p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
+                for (int i = 0; i < 12; ++i) {
+                    const double a = t * .11 + i * pi / 6;
+                    const QPointF start(w * (i % 2 ? .92 : .08), h * .78);
+                    const QPointF end(w * .5 + std::sin(a) * w * .62, h * (.19 + .18 * std::cos(a * 1.3)));
+                    line(p, start, end, alpha(i % 2 ? cyan : orange, (.05 + pulse * .10) * reaction), 2 * u);
                 }
-                y = std::min(y, graphicsBottom(w, h, u) - 42 * robotScale - 36);
-                robot(p, i, QPointF(x, y), robotScale, t + i, t * 18, std::cos(t + i), pulse, false);
+                p.restore();
+            } else if (mode != QStringLiteral("quiet")) {
+                p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
+                for (int i = 0; i < 38; ++i) {
+                    const double a = i * 2.399963 + t * (.04 + (i % 4) * .009);
+                    const double r = .20 + .26 * ((i * 17) % 37) / 37.0;
+                    const QPointF v(w * .5 + std::cos(a) * w * r, h * .49 + std::sin(a) * h * r * .7);
+                    p.setPen(Qt::NoPen); p.setBrush(alpha(i % 3 ? cyan : orange, .18 + pulse * .22));
+                    p.drawEllipse(v, (1.0 + i % 3 + pulse) * u, (1.0 + i % 3 + pulse) * u);
+                }
+                p.restore();
+            }
+
+            p.setFont(stageFont(18 * u, true)); p.setPen(orange);
+            p.drawText(QRectF(margin, 22 * u, w * .55, 28 * u), Qt::AlignLeft | Qt::AlignVCenter,
+                       QStringLiteral("LARICS / LYRICS"));
+            p.setFont(stageFont(12 * u)); p.setPen(QColor("#b7bfd1"));
+            p.drawText(QRectF(margin, 49 * u, w * .55, 21 * u), Qt::AlignLeft | Qt::AlignVCenter,
+                       QStringLiteral("after hours   ·   robots have requests too"));
+
+            const auto now = state_.value(QStringLiteral("nowPlaying")).toObject();
+            const QString title = text(now, "title", QStringLiteral("The lab is warming up"));
+            const QString artist = text(now, "artist", QStringLiteral("Odaberi pjesmu. Roboti čekaju."));
+            const double infoWidth = std::min(w * .53, 690 * u);
+            const QRectF playing(margin, 89 * u, infoWidth, 105 * u);
+            panel(p, playing, orange);
+            p.setPen(orange); p.setFont(stageFont(11 * u, true));
+            p.drawText(playing.adjusted(19 * u, 12 * u, -19 * u, 0), Qt::AlignTop,
+                       now.value(QStringLiteral("playing")).toBool() ? QStringLiteral("Sada svira") : QStringLiteral("Na repertoaru"));
+            p.setPen(white); p.setFont(stageFont(25 * u, true));
+            p.drawText(playing.adjusted(19 * u, 33 * u, -19 * u, -30 * u), Qt::AlignLeft | Qt::AlignVCenter,
+                       QFontMetrics(p.font()).elidedText(title, Qt::ElideRight, qRound(infoWidth - 38 * u)));
+            p.setPen(QColor("#b9c7db")); p.setFont(stageFont(14 * u));
+            p.drawText(playing.adjusted(19 * u, 71 * u, -19 * u, 0), Qt::AlignTop,
+                       QFontMetrics(p.font()).elidedText(artist, Qt::ElideRight, qRound(infoWidth - 38 * u)));
+            const double duration = number(now, "durationMs", 0);
+            if (duration > 0) {
+                const double elapsed = now.value(QStringLiteral("playing")).toBool()
+                    ? std::max(0.0, double(QDateTime::currentMSecsSinceEpoch()) - number(now, "observedAt", QDateTime::currentMSecsSinceEpoch())) : 0;
+                const double progress = unit((number(now, "progressMs", 0) + elapsed) / duration);
+                p.setPen(Qt::NoPen); p.setBrush(alpha(orange, .14)); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, infoWidth - 34 * u, 3 * u), 1.5, 1.5);
+                p.setBrush(orange); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, (infoWidth - 34 * u) * progress, 3 * u), 1.5, 1.5);
+            }
+
+            const double qrSide = 102 * u;
+            requestRect_ = QRectF(w - margin - 240 * u, 24 * u, 240 * u, 190 * u);
+            panel(p, requestRect_, cyan);
+            p.setFont(stageFont(16 * u, true)); p.setPen(white);
+            p.drawText(requestRect_.adjusted(16 * u, 12 * u, -8 * u, 0), Qt::AlignTop, QStringLiteral("Daj pjesmu."));
+            p.setFont(stageFont(11 * u)); p.setPen(QColor("#b9c7db"));
+            p.drawText(QRectF(requestRect_.x() + 16 * u, 60 * u, 94 * u, 80 * u),
+                       Qt::AlignLeft | Qt::TextWordWrap, QStringLiteral("Skeniraj, pronađi,\npošalji DJ-u."));
+            if (!qr_.isNull()) {
+                const QRectF qrRect(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide);
+                p.fillRect(qrRect.adjusted(-4 * u, -4 * u, 4 * u, 4 * u), Qt::white);
+                p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+                p.drawImage(qrRect, qr_);
+            } else {
+                p.setPen(alpha(cyan, .45)); p.setBrush(Qt::NoBrush);
+                p.drawRoundedRect(QRectF(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide), 12, 12);
+                p.setFont(stageFont(28 * u, true)); p.setPen(cyan);
+                p.drawText(QRectF(requestRect_.right() - qrSide - 14 * u, 58 * u, qrSide, qrSide), Qt::AlignCenter, QStringLiteral("♪"));
+            }
+            p.setFont(stageFont(11 * u, true)); p.setPen(cyan);
+            p.drawText(requestRect_.adjusted(16 * u, 148 * u, -4 * u, -4 * u), Qt::AlignTop, QStringLiteral("Zatraži pjesmu · R"));
+            const QString guestUrl = text(state_, "requestUrl");
+            if (!guestUrl.isEmpty()) {
+                p.setFont(stageFont(10 * u)); p.setPen(QColor("#95a5bf"));
+                p.drawText(requestRect_.adjusted(16 * u, 170 * u, -10 * u, 0), Qt::AlignTop,
+                           QFontMetrics(p.font()).elidedText(guestUrl, Qt::ElideMiddle, qRound(210 * u)));
+            }
+
+            const double mission = t - missionStart_;
+            if (mission >= 0 && mission < 17) drawDelivery(p, w, h, u, t, pulse, orange, mission);
+            if (mode == QStringLiteral("robots")) {
+                for (int i = 0; i < 3; ++i) {
+                    double robotScale = (i == 0 ? 1.05 : 1.15) * u * graphicsScale();
+                    double x = w * (.20 + i * .30) + std::sin(t * .5 + i) * 24 * u;
+                    double y = h * (.68 + (i == 0 ? -.07 : .03));
+                    y = std::min(y, graphicsBottom(w, h, u) - 42 * robotScale - 36);
+                    robot(p, i, QPointF(x, y), robotScale, t + i, t * 18, std::cos(t + i), pulse, false);
+                }
             }
         }
+        drawKaraoke(p, w, h, u, orange);
         drawCaption(p, w, h, u, white, orange);
 
         p.setFont(stageFont(11 * u)); p.setPen(QColor("#a3b3c9"));
@@ -924,6 +973,157 @@ protected:
                    moodLabel + QStringLiteral("  ·  F11"));
     }
 private:
+    struct KaraokeFrame {
+        bool visible = false;
+        QJsonObject sheet, line, next;
+        QString status, phase;
+        double position = 0, progress = 0, countIn = 0;
+        int lineIndex = -1, syllableIndex = -1;
+    };
+    KaraokeFrame karaokeFrame() const
+    {
+        KaraokeFrame frame;
+        frame.sheet = state_.value(QStringLiteral("karaoke")).toObject();
+        const auto lines = frame.sheet.value(QStringLiteral("lines")).toArray();
+        if (!frame.sheet.value(QStringLiteral("enabled")).toBool() || lines.isEmpty()) return frame;
+        frame.visible = true; frame.status = text(frame.sheet, "status", QStringLiteral("waiting"));
+        const double stamp = QDateTime::currentMSecsSinceEpoch();
+        const double elapsed = frame.status == QStringLiteral("playing")
+            ? std::max(0.0, stamp - number(frame.sheet, "sampledAt", stamp)) : 0;
+        // The backend already applies the offset. A negative anchor must stay
+        // signed until elapsed time has been added, or delayed lyrics jump early.
+        const double duration = std::max(1.0, number(frame.sheet, "durationMs", 1));
+        const double signedPosition = number(frame.sheet, "positionMs", 0) + elapsed;
+        frame.position = std::clamp(signedPosition, 0.0, duration);
+        if (frame.status == QStringLiteral("finished")) frame.position = duration;
+        const double cueClock = frame.status == QStringLiteral("finished") ? frame.position : std::min(frame.position, signedPosition);
+        frame.lineIndex = 0;
+        for (qsizetype i = 1; i < lines.size(); ++i) {
+            if (frame.position < number(lines[i].toObject(), "startMs", duration)) break;
+            frame.lineIndex = static_cast<int>(i);
+        }
+        frame.line = lines[frame.lineIndex].toObject();
+        if (frame.lineIndex + 1 < lines.size()) frame.next = lines[frame.lineIndex + 1].toObject();
+        const auto syllables = frame.line.value(QStringLiteral("syllables")).toArray();
+        frame.phase = QStringLiteral("gap");
+        if (!syllables.isEmpty()) {
+            frame.syllableIndex = 0;
+            for (qsizetype i = 0; i < syllables.size(); ++i) {
+                const auto syllable = syllables[i].toObject();
+                const double start = number(syllable, "startMs", 0), end = number(syllable, "endMs", start + 1);
+                if (cueClock < start) {
+                    frame.countIn = start - cueClock;
+                    frame.phase = i == 0 ? QStringLiteral("count-in") : QStringLiteral("gap");
+                    break;
+                }
+                frame.syllableIndex = static_cast<int>(i);
+                frame.progress = unit((frame.position - start) / std::max(1.0, end - start));
+                if (frame.position < end) { frame.phase = QStringLiteral("syllable"); break; }
+            }
+        }
+        if (frame.position >= number(frame.line, "endMs", duration)) {
+            frame.phase = frame.next.isEmpty() ? QStringLiteral("outro") : QStringLiteral("gap");
+            if (!frame.next.isEmpty()) frame.countIn = std::max(0.0, number(frame.next, "startMs", duration) - frame.position);
+        }
+        if (frame.status == QStringLiteral("waiting") || frame.status == QStringLiteral("finished")) frame.phase = frame.status;
+        return frame;
+    }
+    static double layOutLyrics(QTextLayout& layout, double width, double gap)
+    {
+        layout.clearLayout();
+        QTextOption option; option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere); option.setAlignment(Qt::AlignHCenter);
+        layout.setTextOption(option); layout.beginLayout();
+        double height = 0;
+        while (true) {
+            QTextLine row = layout.createLine();
+            if (!row.isValid()) break;
+            row.setLineWidth(width); row.setPosition(QPointF(0, height)); height += row.height() + gap;
+        }
+        layout.endLayout();
+        return std::max(0.0, height - gap);
+    }
+    void drawKaraoke(QPainter& p, double w, double h, double u, QColor orange)
+    {
+        karaokeGeometry_ = {};
+        const auto frame = karaokeFrame();
+        if (!frame.visible) return;
+        const QRectF card(34 * u, 240 * u, w - 68 * u,
+                          std::min(390 * u, graphicsBottom(w, h, u) - 258 * u));
+        if (card.height() < 230 * u || card.width() < 240 * u) return;
+        const double v = card.height() / 390;
+        const QRectF current = card.adjusted(28 * u, 92 * v, -28 * u, -124 * v);
+        const QRectF next(card.x() + 28 * u, card.y() + 308 * v, card.width() - 56 * u, 62 * v);
+        p.save(); p.setClipRect(card); panel(p, card, QColor("#7de4ed"), .95);
+        p.setFont(stageFont(16 * u, true)); p.setPen(QColor("#7de4ed"));
+        const QRectF titleRect = card.adjusted(24 * u, 18 * v, -24 * u, -330 * v);
+        p.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
+                   QFontMetrics(p.font()).elidedText(QStringLiteral("KARAOKE · ") + text(frame.sheet, "title"), Qt::ElideRight, qRound(titleRect.width() * .68)));
+        QString stateLabel;
+        if (frame.status == QStringLiteral("waiting")) stateLabel = QStringLiteral("Čekamo pjesmu");
+        else if (frame.status == QStringLiteral("paused")) stateLabel = QStringLiteral("Pauza");
+        else if (frame.phase == QStringLiteral("finished")) stateLabel = QStringLiteral("Bravo, ekipa!");
+        else if (frame.countIn > 0) stateLabel = QStringLiteral("Za %1 s").arg(static_cast<int>(std::ceil(frame.countIn / 1000)));
+        else if (frame.phase == QStringLiteral("outro")) stateLabel = QStringLiteral("Završni taktovi");
+        p.setFont(stageFont(13 * u)); p.setPen(QColor("#b6c5dc"));
+        p.drawText(titleRect, Qt::AlignRight | Qt::AlignVCenter, stateLabel);
+
+        const QString words = text(frame.line, "text");
+        QFont font = stageFont(58 * u, true);
+        QTextLayout layout(words, font);
+        double height = layOutLyrics(layout, current.width(), 30 * v);
+        while (height > current.height() && font.pixelSize() > std::max(16, qRound(16 * u))) {
+            font.setPixelSize(font.pixelSize() - 1); layout.setFont(font);
+            height = layOutLyrics(layout, current.width(), 30 * v);
+        }
+        const QPointF origin(current.left(), current.top() + std::max(0.0, (current.height() - height) / 2));
+        QList<QTextLayout::FormatRange> formats;
+        const auto syllables = frame.line.value(QStringLiteral("syllables")).toArray();
+        int offset = 0, noteOffset = 0, noteLength = 0;
+        for (qsizetype i = 0; i < syllables.size(); ++i) {
+            const auto syllable = syllables[i].toObject(); const int length = text(syllable, "text").size();
+            QTextLayout::FormatRange range; range.start = offset; range.length = length;
+            const bool passed = frame.position >= number(syllable, "endMs", 0);
+            range.format.setForeground(passed ? QColor("#f7f2ea") : QColor("#97a8c1"));
+            if (i == frame.syllableIndex) {
+                noteOffset = offset; noteLength = length;
+                if (frame.phase == QStringLiteral("syllable")) range.format.setForeground(orange);
+            }
+            formats.append(range); offset += length;
+        }
+        layout.setFormats(formats); layOutLyrics(layout, current.width(), 30 * v);
+        p.setPen(QColor("#d5e0ee")); layout.draw(&p, origin);
+        QPointF note;
+        if (!words.isEmpty() && noteLength > 0) {
+            const double cursor = std::clamp(noteOffset + noteLength * frame.progress, 0.0, double(words.size()));
+            const int left = std::min(static_cast<int>(std::floor(cursor)), static_cast<int>(words.size()) - 1);
+            const QTextLine row = layout.lineForTextPosition(left);
+            if (row.isValid()) {
+                const int right = std::min(left + 1, row.textStart() + row.textLength());
+                const double x0 = row.cursorToX(left), x1 = row.cursorToX(right);
+                const double bounce = frame.phase == QStringLiteral("syllable") ? std::sin(frame.progress * pi) * 16 * v : 0;
+                note = origin + QPointF(x0 + (x1 - x0) * (cursor - left), row.y() - 7 * v - bounce);
+                p.setFont(stageFont(32 * u, true)); p.setPen(orange);
+                p.drawText(QRectF(note.x() - 25 * u, note.y() - 40 * v, 50 * u, 40 * v), Qt::AlignCenter, QStringLiteral("♪"));
+            }
+        }
+        line(p, QPointF(card.left() + 28 * u, card.top() + 282 * v), QPointF(card.right() - 28 * u, card.top() + 282 * v), QColor("#34475f"), u);
+        if (!frame.next.isEmpty()) {
+            p.setFont(stageFont(11 * u, true)); p.setPen(QColor("#8496b0"));
+            p.drawText(QRectF(next.x(), card.top() + 286 * v, next.width(), 19 * v), Qt::AlignCenter, QStringLiteral("SLJEDEĆE"));
+            QFont nextFont = stageFont(30 * u);
+            QTextLayout nextLayout(text(frame.next, "text"), nextFont);
+            double nextHeight = layOutLyrics(nextLayout, next.width(), 4 * v);
+            while (nextHeight > next.height() && nextFont.pixelSize() > std::max(14, qRound(13 * u))) {
+                nextFont.setPixelSize(nextFont.pixelSize() - 1); nextLayout.setFont(nextFont);
+                nextHeight = layOutLyrics(nextLayout, next.width(), 4 * v);
+            }
+            p.setPen(QColor("#aebcd0")); nextLayout.draw(&p, QPointF(next.x(), next.y() + std::max(0.0, (next.height() - nextHeight) / 2)));
+        }
+        p.restore();
+        const auto rectangle = [](const QRectF& r) { return QJsonArray{r.x(), r.y(), r.width(), r.height()}; };
+        karaokeGeometry_ = {{QStringLiteral("bounds"), rectangle(card)}, {QStringLiteral("lineBounds"), rectangle(current)},
+                            {QStringLiteral("note"), QJsonArray{note.x(), note.y()}}};
+    }
     double seconds() const { return clock_.elapsed() / 1000.0; }
     QString palette() const { return text(state_.value(QStringLiteral("scene")).toObject(), "palette"); }
     QString sceneMode() const
@@ -1081,26 +1281,22 @@ private:
         const auto book = state_.value(QStringLiteral("bookMoment")).toObject();
         const qint64 expires = static_cast<qint64>(number(book, "expiresAt", 0));
         if (book_.isNull() || (expires > 0 && QDateTime::currentMSecsSinceEpoch() >= expires)) return {};
-        const double top = 230 * u;
-        const double cardWidth = std::min(w - 68 * u, w * .44 * graphicsScale());
-        const double bottom = h - 45 * u;
-        const QSizeF available(cardWidth - 26 * u, bottom - top - 26 * u);
-        if (available.height() < 100 * u || available.width() <= 0) return {};
-        const QSizeF imageSize = QSizeF(book_.size()).scaled(available, Qt::KeepAspectRatio);
-        const QRectF destination((w - imageSize.width()) / 2, bottom - 13 * u - imageSize.height(), imageSize.width(), imageSize.height());
-        const QRectF card = destination.adjusted(-13 * u, -13 * u, 13 * u, 13 * u);
+        const QRectF card(0, 0, w, h);
+        const QSizeF imageSize = QSizeF(book_.size()).scaled(card.size(), Qt::KeepAspectRatio);
+        const QRectF destination((w - imageSize.width()) / 2, h - imageSize.height(), imageSize.width(), imageSize.height());
         p.save();
-        panel(p, card, orange, .97);
+        Q_UNUSED(orange);
+        p.fillRect(card, QColor("#05070d"));
         p.setRenderHint(QPainter::SmoothPixmapTransform); p.drawImage(destination, book_);
-        QLinearGradient labelShade(0, card.bottom() - 76 * u, 0, card.bottom());
+        QLinearGradient labelShade(0, h - 108 * u, 0, h);
         labelShade.setColorAt(0, QColor(6, 10, 22, 0)); labelShade.setColorAt(1, QColor(6, 10, 22, 245));
-        p.fillRect(QRectF(card.left(), card.bottom() - 76 * u, card.width(), 76 * u), labelShade);
+        p.fillRect(QRectF(0, h - 108 * u, w, 108 * u), labelShade);
         p.setPen(QColor("#f9e6d5")); p.setFont(stageFont(14 * u, true));
-        p.drawText(QRectF(card.x() + 16 * u, card.bottom() - 42 * u, card.width() - 32 * u, 23 * u),
-                   Qt::AlignCenter, QFontMetrics(p.font()).elidedText(text(book, "title"), Qt::ElideRight, qRound(card.width() - 32 * u)));
+        p.drawText(QRectF(16 * u, h - 80 * u, w - 32 * u, 23 * u),
+                   Qt::AlignCenter, QFontMetrics(p.font()).elidedText(text(book, "title"), Qt::ElideRight, qRound(w - 32 * u)));
         p.setFont(stageFont(10 * u)); p.setPen(QColor("#a6b6ca"));
         const QString page = book.value(QStringLiteral("page")).toVariant().toString();
-        p.drawText(QRectF(card.x(), card.bottom() - 22 * u, card.width(), 17 * u), Qt::AlignCenter,
+        p.drawText(QRectF(0, h - 54 * u, w, 17 * u), Qt::AlignCenter,
                    QStringLiteral("30 godina LARICS-a") + (page.isEmpty() ? QString() : QStringLiteral(" · str. ") + page));
         p.restore();
         return card;
@@ -1109,7 +1305,7 @@ private:
     QPointer<RequestDesk> desk_;
     QString originalTitle_, stateFile_, fileError_, qrPath_, bookPath_, lastTrack_, lastRequest_, missionText_, effectError_;
     QHash<QString, bool> effectBefore_;
-    QJsonObject state_;
+    QJsonObject state_, karaokeGeometry_;
     QByteArray bytes_;
     QImage qr_, book_;
     QElapsedTimer clock_;
