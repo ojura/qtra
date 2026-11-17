@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import hmac
 import json
 import math
@@ -23,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit, unquote
 from spotify_native import SpotifyClient, SpotifyError, SpotifySearchCancelled
 from speech import DedicationAudio
 from karaoke import Karaoke
+from lyrics import LyricsReader, LyricsReadError, validate_result
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA = Path.home() / '.local/state/larics-dj'
@@ -77,6 +79,22 @@ def search_identifier(value):
     if not isinstance(value, str) or not SEARCH_ID.fullmatch(value):
         raise ValueError('searchId must be an 8 to 128 character letters/digits/._:- identifier.')
     return value
+
+
+def lyrics_request(query):
+    fields = {'requestId', 'expectedCurrentUid', 'expectedUri', 'expectedDeviceId'}
+    values = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=4)
+    if set(values) != fields or any(len(value) != 1 for value in values.values()):
+        raise ValueError('Supply requestId and the expected current occurrence, actual URI and device exactly once.')
+    result = {key: value[0] for key, value in values.items()}
+    if not SEARCH_ID.fullmatch(result['requestId']):
+        raise ValueError('requestId must be an 8 to 128 character letters/digits/._:- identifier.')
+    if not all(value.strip() and len(value) <= 512
+               for value in (result['expectedCurrentUid'], result['expectedDeviceId'])):
+        raise ValueError('Supply nonblank expected current occurrence and device IDs of at most 512 characters.')
+    if not TRACK.fullmatch(result['expectedUri']):
+        raise ValueError('expectedUri must be the actual canonical Spotify track URI.')
+    return result
 
 
 class SearchRejected(ValueError):
@@ -139,7 +157,7 @@ def atomic_json(filename, value):
 
 
 class Party:
-    def __init__(self, data=DEFAULT_DATA, port=8787, client=None, audio=None):
+    def __init__(self, data=DEFAULT_DATA, port=8787, client=None, audio=None, *, lyrics_reader=None):
         self.data = Path(data)
         self.data.mkdir(parents=True, exist_ok=True)
         self.port = port
@@ -147,6 +165,7 @@ class Party:
         self.changed = threading.Condition(self.lock)
         self.stop = threading.Event()
         self.client = client or SpotifyClient()
+        self.lyrics_reader = lyrics_reader if lyrics_reader is not None else LyricsReader(self.client)
         self.audio = audio
         self.db = sqlite3.connect(self.data / 'party.sqlite3', check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -612,6 +631,45 @@ class Party:
     def _publish(self):
         self.revision += 1
         atomic_json(self.data / 'state.json', self.snapshot())
+
+    def _lyrics_recording(self, target, generation=None):
+        """Check the accepted observation while the caller holds Party.lock."""
+        current = self.playback.get('nowPlaying')
+        playback = self.playback.get('playbackState')
+        device = playback.get('device') if isinstance(playback, dict) else None
+        stamp = now_ms()
+        def fresh(value):
+            return (type(value) in (int, float) and math.isfinite(value)
+                    and stamp - OBSERVATION_TTL_MS <= value <= stamp + 1000)
+        if (self.spotify.get('connected') is not True or not isinstance(current, dict)
+                or not isinstance(device, dict) or current.get('uid') != target['uid']
+                or current.get('uri') != target['uri'] or device.get('id') != target['deviceId']
+                or not fresh(self.spotify.get('observedAt')) or not fresh(current.get('observedAt'))
+                or (generation is not None and generation != self._control_generation)):
+            raise LyricsReadError('The recording or device changed, or its observation is stale.',
+                                  status=409, code='stale_target')
+        return copy.deepcopy(current)
+
+    def read_lyrics(self, request):
+        target = {'uid': request['expectedCurrentUid'], 'uri': request['expectedUri'],
+                  'deviceId': request['expectedDeviceId']}
+        with self.lock:
+            recording = self._lyrics_recording(target)
+            generation = self._control_generation
+        result, failure = None, None
+        try:
+            # The provider wait and bounded result validation do not block
+            # observations or another legitimate reader of the same occurrence.
+            result = validate_result(self.lyrics_reader.read(copy.deepcopy(target), recording), target)
+        except LyricsReadError as error:
+            failure = error
+        except Exception:
+            failure = LyricsReadError('Lyrics could not be read from the current provider.')
+        with self.lock:
+            self._lyrics_recording(target, generation)
+            if failure is not None:
+                raise failure
+            return {**result, 'requestId': request['requestId']}
 
     def visit(self, guest):
         if guest:
@@ -1565,10 +1623,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlsplit(self.path)
         query = parse_qs(url.query)
+        lyrics_request_id = None
         try:
             if url.path.startswith('/api/admin/'):
                 if not self.authorized():
                     self.send_json({'error': 'DJ access required.'}, 401)
+                elif url.path == '/api/admin/lyrics':
+                    request = lyrics_request(url.query)
+                    lyrics_request_id = request['requestId']
+                    self.send_json(self.party.read_lyrics(request))
                 elif url.path == '/api/admin/events':
                     self.send_json(self.party.events(int(query.get('after', ['0'])[0]), float(query.get('wait', ['0'])[0])))
                 elif url.path == '/api/admin/message-info':
@@ -1600,6 +1663,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.file(self.party.data, 'request-qr.png')
             else:
                 self.file(ROOT / 'web', 'index.html' if url.path == '/' else url.path.lstrip('/'))
+        except LyricsReadError as error:
+            detail = {'error': str(error), 'code': error.code}
+            if lyrics_request_id is not None:
+                detail['requestId'] = lyrics_request_id
+            self.send_json(detail, error.status)
         except SearchRejected as error:
             self.send_json({'tracks': [], 'searchId': error.search_id, 'error': str(error)}, error.status)
         except ValueError as error:

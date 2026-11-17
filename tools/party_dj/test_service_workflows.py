@@ -108,6 +108,24 @@ class ServiceWorkflows(unittest.TestCase):
     def presence_body(self, session='fixture-agent', sequence=1, state='online', **extra):
         return {'agentSessionId': session, 'sequence': sequence, 'state': state, **extra}
 
+    def lyrics_query(self, **changes):
+        return {'requestId': 'lyrics-fixture-1', 'expectedCurrentUid': self.client.current['uid'],
+                'expectedUri': self.client.current['uri'], 'expectedDeviceId': 'fixture-device', **changes}
+
+    def lyrics_path(self, **changes):
+        return '/api/admin/lyrics?' + urlencode(self.lyrics_query(**changes))
+
+    def lyrics_result(self, availability='ready', timing='line'):
+        result = {'target': {'uid': self.client.current['uid'], 'uri': self.client.current['uri'],
+                             'deviceId': 'fixture-device'},
+                  'availability': availability, 'timing': timing,
+                  'provider': {'name': 'Fixture provider', 'attribution': 'Private synthetic fixture', 'sourceUrl': None},
+                  'lines': [{'text': 'Private lyric fixture one.', 'startMs': 0 if timing == 'line' else None},
+                            {'text': 'Private lyric fixture two.', 'startMs': 1250 if timing == 'line' else None}]}
+        if availability != 'ready':
+            result.update(timing='none', lines=[], reason='fixture_' + availability)
+        return result
+
     def skip_body(self, direction='next'):
         return {'direction': direction, 'expectedCurrentUid': self.client.current['uid'],
                 'expectedDeviceId': 'fixture-device', 'source': 'native'}
@@ -611,6 +629,250 @@ class ServiceWorkflows(unittest.TestCase):
         self.assertTrue(self.party.search_requests['transport-cancel']['cancelled'])
         self.assertEqual(self.party.search_cache, {})
         self.assertEqual(self.party.track_cache, {})
+
+    def test_lyrics_get_is_private_read_only_and_preserves_manual_sheet_and_presence(self):
+        self.client.current['fixtureMetadata'] = {'values': [1]}
+        self.party._refresh()
+        self.party.admin('karaoke', karaoke_sheet('manual'))
+        self.party.admin('presence', self.presence_body())
+        sent = self.message()
+        self.party.events(-1, 0)
+        before = (copy.deepcopy(self.party.playback), self.party.karaoke.saved(),
+                  self.party.last_seen, self.party.watcher_last_seen, self.party.revision,
+                  copy.deepcopy(self.party.agent_presence), self.party._control_generation,
+                  (self.party.data / 'state.json').read_bytes(),
+                  self.party.db.execute('SELECT COUNT(*) FROM events').fetchone()[0])
+        reply, seen = self.lyrics_result(), []
+        def read(target, recording):
+            seen.append((copy.deepcopy(target), copy.deepcopy(recording)))
+            recording['fixtureMetadata']['values'].append(2)
+            return reply
+        with patch.object(self.party.lyrics_reader, 'read', side_effect=read) as provider, \
+             patch.object(self.client, 'status', side_effect=AssertionError('No status fallback.')):
+            self.assertEqual(self.http(self.lyrics_path())[0], 401)
+            provider.assert_not_called()
+            status, result = self.http(self.lyrics_path(), authorized=True)
+            self.assertEqual((status, result), (200, {**reply, 'requestId': 'lyrics-fixture-1'}))
+            provider.assert_called_once()
+        self.assertEqual(seen, [(reply['target'], before[0]['nowPlaying'])])
+        self.assertEqual((self.party.playback, self.party.karaoke.saved(),
+                          self.party.last_seen, self.party.watcher_last_seen, self.party.revision,
+                          self.party.agent_presence, self.party._control_generation,
+                          (self.party.data / 'state.json').read_bytes(),
+                          self.party.db.execute('SELECT COUNT(*) FROM events').fetchone()[0]), before)
+        self.assertIsNone(self.party.message_info(sent['id'])['message']['readAt'])
+        for path in ('/api/state', '/api/chat', '/health'):
+            self.assertNotIn('Private lyric fixture', json.dumps(self.http(path)[1]))
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_lyrics_get_rejects_invalid_duplicate_and_unknown_guards_before_reader(self):
+        self.party._refresh()
+        sent = self.message()
+        before = (self.party.last_seen, self.party.revision, self.party._control_generation,
+                  self.party.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],
+                  (self.party.data / 'state.json').read_bytes())
+        query = self.lyrics_query()
+        variants = [urlencode({key: value for key, value in query.items() if key != missing}) for missing in query]
+        variants += [urlencode({**query, key: ''}) for key in query]
+        variants += [urlencode(query) + '&' + urlencode({key: value}) for key, value in query.items()]
+        variants += [urlencode({**query, key: value}) for key, value in (
+            ('requestId', 'short'), ('requestId', 'x' * 129), ('requestId', 'č' * 8),
+            ('expectedCurrentUid', ' '), ('expectedCurrentUid', 'x' * 513),
+            ('expectedDeviceId', ' '), ('expectedDeviceId', 'x' * 513),
+            ('expectedUri', 'https://open.spotify.com/track/example'),
+            ('expectedUri', TRACK_A + ' '), ('readThrough', sent['id']), ('source', 'native'))]
+        with patch.object(self.party.lyrics_reader, 'read') as provider, \
+             patch.object(self.client, 'status', side_effect=AssertionError('No status fallback.')):
+            for value in variants:
+                with self.subTest(query=value):
+                    self.assertEqual(self.http('/api/admin/lyrics?' + value, authorized=True)[0], 400)
+            provider.assert_not_called()
+        self.assertEqual((self.party.last_seen, self.party.revision, self.party._control_generation,
+                          self.party.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],
+                          (self.party.data / 'state.json').read_bytes()), before)
+        self.assertIsNone(self.party.message_info(sent['id'])['message']['readAt'])
+
+    def test_lyrics_get_requires_fresh_exact_actual_occurrence_uri_and_device(self):
+        self.party._refresh()
+        self.party.playback['nowPlaying']['requestedUri'] = TRACK_A
+        with patch.object(self.party.lyrics_reader, 'read') as provider:
+            for changes in ({'expectedCurrentUid': 'other-occurrence'}, {'expectedUri': TRACK_A},
+                            {'expectedDeviceId': 'other-device'}):
+                with self.subTest(changes=changes):
+                    status, result = self.http(self.lyrics_path(**changes), authorized=True)
+                    self.assertEqual((status, result['code']), (409, 'stale_target'))
+            original_playback, original_spotify = copy.deepcopy(self.party.playback), self.party.spotify.copy()
+            for failure in ('disconnected', 'no-current', 'status-stale', 'current-stale', 'future', 'invalid-stamp'):
+                self.party.playback, self.party.spotify = copy.deepcopy(original_playback), original_spotify.copy()
+                if failure == 'disconnected':
+                    self.party.spotify['connected'] = False
+                elif failure == 'no-current':
+                    self.party.playback['nowPlaying'] = None
+                elif failure == 'status-stale':
+                    self.party.spotify['observedAt'] = self.stamp - 10001
+                elif failure == 'current-stale':
+                    self.party.playback['nowPlaying']['observedAt'] = self.stamp - 10001
+                elif failure == 'future':
+                    self.party.spotify['observedAt'] = self.stamp + 1001
+                else:
+                    self.party.playback['nowPlaying']['observedAt'] = True
+                with self.subTest(failure=failure):
+                    status, result = self.http(self.lyrics_path(), authorized=True)
+                    self.assertEqual((status, result['code']), (409, 'stale_target'))
+            provider.assert_not_called()
+
+    def test_lyrics_get_rechecks_identity_generation_and_freshness_after_provider_wait(self):
+        self.party._refresh()
+        baseline = copy.deepcopy(self.party.playback), self.party.spotify.copy(), self.stamp
+        for change in ('uid', 'uri', 'device', 'control', 'disconnected', 'aged', 'error-after-change'):
+            with self.subTest(change=change):
+                self.party.playback, self.party.spotify = copy.deepcopy(baseline[0]), baseline[1].copy()
+                self.party._control_generation, self.stamp = 0, baseline[2]
+                entered, release, result = threading.Event(), threading.Event(), []
+                reply = self.lyrics_result()
+                def read(target, recording):
+                    entered.set()
+                    self.assertTrue(release.wait(3))
+                    if change == 'error-after-change':
+                        raise RuntimeError('Private provider failure.')
+                    return reply
+                def fetch():
+                    try:
+                        result.append(self.http(self.lyrics_path(), authorized=True))
+                    except BaseException as error:
+                        result.append(error)
+                with patch.object(self.party.lyrics_reader, 'read', side_effect=read) as provider:
+                    worker = threading.Thread(target=fetch)
+                    worker.start()
+                    acquired = False
+                    try:
+                        self.assertTrue(entered.wait(3))
+                        acquired = self.party.lock.acquire(timeout=1)
+                        self.assertTrue(acquired, 'Provider wait must not hold Party.lock.')
+                        if change in ('uid', 'error-after-change'):
+                            self.party.playback['nowPlaying']['uid'] = 'new-occurrence-same-recording'
+                        elif change == 'uri':
+                            self.party.playback['nowPlaying']['uri'] = TRACK_A
+                        elif change == 'device':
+                            self.party.playback['playbackState']['device']['id'] = 'new-device'
+                        elif change == 'control':
+                            self.party._control_generation += 1
+                        elif change == 'disconnected':
+                            self.party.spotify['connected'] = False
+                        else:
+                            self.stamp += 10001
+                    finally:
+                        if acquired:
+                            self.party.lock.release()
+                        release.set()
+                        worker.join(3)
+                    self.assertFalse(worker.is_alive())
+                    provider.assert_called_once()
+                self.assertEqual(len(result), 1)
+                if isinstance(result[0], BaseException):
+                    raise result[0]
+                self.assertEqual((result[0][0], result[0][1]['code']), (409, 'stale_target'))
+                self.assertEqual(result[0][1]['requestId'], 'lyrics-fixture-1')
+                self.assertNotIn('lines', result[0][1])
+
+    def test_lyrics_get_independent_readers_do_not_supersede_each_other(self):
+        self.party._refresh()
+        first_entered, entered, count_lock = threading.Event(), threading.Event(), threading.Lock()
+        releases, calls, results = [threading.Event(), threading.Event()], [], [None, None]
+        reply = self.lyrics_result()
+        def read(target, recording):
+            with count_lock:
+                index = len(calls)
+                calls.append(copy.deepcopy(target))
+                if len(calls) == 1:
+                    first_entered.set()
+                if len(calls) == 2:
+                    entered.set()
+            self.assertTrue(releases[index].wait(3))
+            return copy.deepcopy(reply)
+        def fetch(index):
+            try:
+                results[index] = self.http(self.lyrics_path(requestId='lyrics-reader-' + str(index)), authorized=True)
+            except BaseException as error:
+                results[index] = error
+        with patch.object(self.party.lyrics_reader, 'read', side_effect=read) as provider:
+            workers = [threading.Thread(target=fetch, args=(index,)) for index in range(2)]
+            started = []
+            try:
+                workers[0].start()
+                started.append(workers[0])
+                self.assertTrue(first_entered.wait(3))
+                workers[1].start()
+                started.append(workers[1])
+                self.assertTrue(entered.wait(3), 'Both independent reads must reach the provider.')
+                releases[1].set()
+                workers[1].join(3)
+                self.assertFalse(workers[1].is_alive())
+                releases[0].set()
+            finally:
+                for release in releases:
+                    release.set()
+                for worker in started:
+                    worker.join(3)
+            self.assertFalse(any(worker.is_alive() for worker in workers))
+            self.assertEqual(provider.call_count, 2)
+        for index, outcome in enumerate(results):
+            if isinstance(outcome, BaseException):
+                raise outcome
+            self.assertEqual(outcome, (200, {**reply, 'requestId': 'lyrics-reader-' + str(index)}))
+        self.assertEqual(self.party._control_generation, 0)
+
+    def test_lyrics_get_reader_failures_and_malformed_results_do_not_publish_or_retry(self):
+        self.party._refresh()
+        before = (copy.deepcopy(self.party.playback), self.party.revision, self.party.last_seen,
+                  self.party.karaoke.saved(), (self.party.data / 'state.json').read_bytes())
+        valid = self.lyrics_result()
+        outcomes = [None, {}, RuntimeError('private-provider-detail'), TimeoutError('private-provider-detail'),
+                    server.LyricsReadError('Provider temporarily unavailable.'),
+                    server.LyricsReadError('The attachment changed.', status=409, code='stale_target')]
+        for path, value in ((('target', 'uri'), TRACK_A), (('target', 'uid'), 'old-occurrence'),
+                            (('timing',), 'syllable'), (('lines',), None),
+                            (('lines',), [{'text': 'Private fixture.', 'startMs': float('nan')}]),
+                            (('availability',), 'guessed'), (('provider',), 'unvalidated')):
+            changed = copy.deepcopy(valid)
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            outcomes.append(changed)
+        with patch.object(self.client, 'status', side_effect=AssertionError('No status fallback.')), \
+             patch.object(server, 'print', create=True) as logger:
+            for outcome in outcomes:
+                options = {'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome}
+                with self.subTest(outcome=type(outcome).__name__), \
+                     patch.object(self.party.lyrics_reader, 'read', **options) as provider:
+                    status, result = self.http(self.lyrics_path(), authorized=True)
+                    expected = outcome.status if isinstance(outcome, server.LyricsReadError) else 503
+                    self.assertEqual(status, expected)
+                    self.assertNotIn('private-provider-detail', json.dumps(result))
+                    self.assertNotIn('lines', result)
+                    provider.assert_called_once()
+                    self.assertEqual((self.party.playback, self.party.revision, self.party.last_seen,
+                                      self.party.karaoke.saved(), (self.party.data / 'state.json').read_bytes()), before)
+            logger.assert_not_called()
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_lyrics_get_keeps_line_plain_unavailable_and_instrumental_distinct(self):
+        self.party._refresh()
+        for availability, timing in (('ready', 'line'), ('ready', 'none'), ('unavailable', 'none'), ('instrumental', 'none')):
+            reply = self.lyrics_result(availability, timing)
+            with self.subTest(availability=availability, timing=timing), \
+                 patch.object(self.party.lyrics_reader, 'read', return_value=reply) as provider:
+                status, result = self.http(self.lyrics_path(), authorized=True)
+                self.assertEqual((status, result), (200, {**reply, 'requestId': 'lyrics-fixture-1'}))
+                provider.assert_called_once()
+                for line in result['lines']:
+                    self.assertEqual(set(line), {'text', 'startMs'})
+                if availability != 'ready':
+                    self.assertEqual((result['timing'], result['lines']), ('none', []))
+                    self.assertEqual(result['reason'], 'fixture_' + availability)
 
     def test_guarded_skip_publishes_next_previous_and_interrupts_speech_before_transport(self):
         order = []

@@ -229,6 +229,54 @@ preview. The service rereads the catalog on every rotation. Captions have IDs
 and reading time proportional to their length, and incoming lines wait for the
 current line to finish.
 
+## Current-track lyrics
+
+Press **Ctrl+L** for the native LYRICS view of the current Spotify occurrence.
+The read uses the actual current track URI, queue UID and playback device from
+the observed player state. A requested catalogue URI may differ after relinking;
+use the actual URI for this read.
+
+Clients call `GET /api/admin/lyrics` with `Authorization: Bearer <admin-token>`
+and only these URL-encoded query fields, each supplied exactly once:
+
+| Field | Value |
+| --- | --- |
+| `requestId` | Reader-local generation token, 8-128 ASCII letters/digits or `._:-`, starting with a letter or digit |
+| `expectedCurrentUid` | Exact current queue occurrence UID |
+| `expectedUri` | Actual current Spotify track URI |
+| `expectedDeviceId` | Exact current playback device ID |
+
+A successful response echoes `requestId` and `target:{uid,uri,deviceId}`, then
+returns `availability:"ready"|"unavailable"|"instrumental"`, `timing:"line"|"none"`,
+`provider:{name,attribution,sourceUrl}|null`, `lines:[{text,startMs}]` and an
+optional `reason`. Each line has string text and a numeric millisecond start or
+`null`. The request ID belongs to that reader; a later request from another
+reader does not supersede it. Consumers discard responses for their own older
+generation or a changed target.
+
+For the observed native `LINE_SYNCED` and `SYLLABLE_SYNCED` source values,
+`timing:"line"` preserves the supplied line starts. Other source sync values
+yield static text with `timing:"none"` and null starts. The response supplies no
+invented line ends or syllable timings. Provider attribution follows the source;
+the source URL is nullable. A missing capability or a source 404 produces
+`availability:"unavailable"`. The envelope reserves `instrumental` for an
+explicit source indication; the current adapter has no observed instrumental
+flag and does not emit that state.
+
+| HTTP result | Meaning |
+| --- | --- |
+| `400` | Malformed or repeated query fields |
+| `401` | Missing or invalid Bearer token |
+| `409 stale_target` | The occurrence, device or control generation changed, or the observation became stale |
+| `503 lyrics_read_failed` | The bounded source read failed or its connected client changed |
+
+The service uses the same connected native client and RequestBuilder, with a
+bounded begin/poll read and exact UID/URI/device checks before and after it.
+Service freshness and control-generation checks reject results that no longer
+belong to the current observation. Reading lyrics preserves the connection,
+navigation, transport and queue, does not renew agent presence, and leaves
+public state, persisted settings and the manual karaoke sheet unchanged.
+
 ## Karaoke
 
 The native karaoke layer consumes a timed syllable sheet through `state.karaoke`.
