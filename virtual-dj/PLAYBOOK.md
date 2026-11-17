@@ -8,7 +8,7 @@ This directory is a nonexclusive seed. Reuse its controls, selection methods and
 
 The ordinary musical action is to maintain the next two or three songs while the current song plays. A guest should feel the response in that next sequence. Acknowledging a mood request without changing an unsuitable queue does not complete it.
 
-The current low-level commands are documented in the [party desk guide](../tools/party_dj/README.md). The [Spotify transport guide](../docs/spotify-transport.md) describes occurrence identity, confirmed moves and playback clocks. Use the [reconnect helper](../docs/spotify-reconnect.md) for connection recovery. The [lessons and acceptance scenarios](LESSONS.md) explain which audience failures these procedures must prevent. The maintained [decision inventory](DECISIONS.md) preserves the requests, later corrections and unresolved work.
+Start with the [operator entry](README.md) for the reusable commands. The [party desk guide](../tools/party_dj/README.md) retains the lower-level API reference, and the [Spotify transport guide](../docs/spotify-transport.md) describes occurrence identity, confirmed moves and playback clocks. Use the [reconnect helper](../docs/spotify-reconnect.md) for connection recovery. The [lessons and acceptance scenarios](LESSONS.md) explain which audience failures these procedures must prevent. The maintained [decision inventory](DECISIONS.md) preserves the requests, later corrections and unresolved work.
 
 ## Start a session
 
@@ -22,7 +22,7 @@ The current low-level commands are documented in the [party desk guide](../tools
 
 ## The live loop
 
-The event listener stays blocked on the existing events endpoint and wakes for chat, track, request, queue-change and connection events. Save its cursor after reading each batch. Acknowledge a new request before starting research or a build, using a stable request ID. Keep the listener responsive while another worker handles longer work; never create a second competing watcher. Mark a message as being processed while its concrete work is active, and clear the marker when the work is actually available.
+The event listener stays blocked on the existing events endpoint and wakes for chat, track, request, queue-change and connection events. Save its cursor after delivering each batch. Acknowledge a new request before starting research or a build, using a stable request ID. Keep the listener responsive while another worker handles longer work; never create a second competing watcher. Record active work with a useful summary. Move it to waiting or blocked when that is the actual state, and record an outcome with evidence before completion. A reply or an expired active lease does not finish the request.
 
 For each useful event:
 
@@ -90,13 +90,22 @@ An exact artist/title query should go straight to catalogue search. It must not 
 
 Handle a `search_description` event as a request to identify a song. Keep its description ID and the current UI query so a late answer cannot replace results for a newer description.
 
-The guest submits `POST /api/search/describe` with `guestId`, a stable `requestId` and `text`. The event carries the description's `id` and `text`. The guest polls `GET /api/search/describe?id=...` for pending or resolved results. After identifying exact catalogue candidates, the DJ resolves that same ID through `POST /api/admin/resolve-search` with `id`, `uris` and a short `note`. For example:
+The guest submits `POST /api/search/describe` with `guestId`, a stable `requestId` and `text`. The event carries the description's `id` and `text`. The guest polls `GET /api/search/describe?id=...` for pending or resolved results. After identifying exact catalogue candidates, the DJ resolves that same ID through `POST /api/admin/resolve-search` with `id`, `uris`, a short `note` and per-candidate `matches` when an explanation is useful. For example:
 
 ```json
 {
   "id": "the-description-id-from-the-event",
   "uris": ["spotify:track:2QQYG5M39oAaxz3hbzfCB8"],
-  "note": "High-confidence title match; studio recording on Niko više ne sanja."
+  "note": "Željko Bebek, Sinoć sam pola kafane popio, album Niko više ne sanja.",
+  "matches": [{
+    "uri": "spotify:track:2QQYG5M39oAaxz3hbzfCB8",
+    "basis": "literal_lyrics",
+    "rationale": "The published lyrics contain the kafana, sleeplessness and love clues.",
+    "sources": [{
+      "url": "https://tekstovi.net/2%2C18%2C1288.html",
+      "label": "Published lyric text used to check the remembered clues"
+    }]
+  }]
 }
 ```
 
@@ -109,7 +118,7 @@ Resolve only candidates actually found in the current catalogue. The UI keeps th
 5. Ask one focused question if it would distinguish the candidates. Keep ordinary catalogue results usable during that exchange.
 6. Let the guest choose a result and submit the request. Identifying a song does not enqueue it.
 
-Use the resolution's `note` to preserve that explanation alongside the candidates. A title resemblance, verified remembered words and an interpretation of a song's story are different kinds of evidence; do not present a semantic guess as a literal lyric match. The user clarified this distinction in chats 249/250.
+Use `matches` for each candidate's explanation; the resolved track retains it as `track.match`. The allowed `basis` values are `title`, `literal_lyrics` and `semantic`. Optional `confidence` is a judgment from 0 to 1. Sources contain the actual HTTP(S) links and labels used during identification; the server retains them without verifying their contents. The resolution's `note` can give an overall explanation or a focused clarification question. A title resemblance, verified remembered words and an interpretation of a song's story are different kinds of evidence. The user clarified this distinction in chats 249/250.
 
 For the description about Bebek, a kafana, love and being unable to sleep, the verified candidate is **Sinoć sam pola kafane popio**, **Željko Bebek**, album **Niko više ne sanja**, URI `spotify:track:2QQYG5M39oAaxz3hbzfCB8`, duration **233880 ms**. The [release page](https://music.apple.com/us/song/1768443385) confirms the title, performer and album; the [published lyric text](https://tekstovi.net/2%2C18%2C1288.html) matches the described clues. This is a high-confidence identification, offered for selection. Its existence is not a reason to cross a session's musical boundary.
 
@@ -119,35 +128,30 @@ Use the actual explicit queue as the starting point. The context preview, servic
 
 ### Add a searched recording
 
-Read state, check history and confirm that the short front needs the track. Then use a stable request ID for that intended request:
+Read fresh state and history, then confirm that the short front needs the track. Use the exact searched URI and a stable request ID for that intended request:
 
 ```sh
-python3 tools/party_dj/djctl.py sync --json '{}'
-python3 tools/party_dj/djctl.py search 'artist title'
-python3 tools/party_dj/djctl.py request --file request.json
+python3 virtual-dj/dj.py status
+python3 virtual-dj/dj.py history
+python3 virtual-dj/dj.py search 'artist title'
+python3 virtual-dj/dj.py add 'spotify:track:EXACT_SEARCH_RESULT_ID' --request-id 'set-next-001'
 ```
 
-The sync operation reads the actual player and returns its observation, reconciled state and recent track history. The `state` operation is a cached inspection and cannot substitute for that fresh read. The request file contains `requestId`, the exact searched `uri`, `requestedBy` and an optional `dedication`. Keep an empty dedication for an ordinary music request. Wait for the confirmed `queued` event and its occurrence UID before treating the track as part of the actual front.
+The desk's `status` and `history` commands read the actual player. `status --cached` and the lower-level `djctl.py state` inspect published state and cannot substitute for that fresh read. The add command checks observed history by URI and normalized artist/title; use `--allow-repeat` only for an intentional repeat. Keep an empty dedication for an ordinary music request. Wait for the confirmed `queued` event and its occurrence UID before treating the track as part of the actual front. A saved request or lost response is inspected under the same request ID rather than submitted as a new intention.
 
 ### Promote an existing occurrence
 
-Read the full current explicit UID order. Select the occurrence and the occurrence it should precede. Submit all three values together:
-
-```json
-{
-  "uid": "q-selected",
-  "beforeUid": "q-anchor",
-  "expectedQueuedUids": ["q-anchor", "q-other", "q-selected"]
-}
-```
+Read the full current explicit UID order, including artist and album metadata. Select the next two or three existing occurrences, then preview their promotion:
 
 ```sh
-python3 tools/party_dj/djctl.py move --file move.json
+python3 virtual-dj/dj.py queue
+python3 virtual-dj/dj.py front 'ACTUAL_QUEUE_UID_1' 'ACTUAL_QUEUE_UID_2' --save /tmp/dj-front.json
+python3 virtual-dj/dj.py apply /tmp/dj-front.json
 ```
 
-Replace the illustrative UIDs with the real fresh order. This operation preserves the occurrence, the current song and Spotify's context. After one move, use its confirmed returned state or a new observation before preparing another move.
+Replace the illustrative UIDs with actual fresh occurrences. The saved plan includes the complete expected order, current occurrence and active device. Apply compares those conditions immediately before one write and preserves the order of unselected entries. A changed queue or player requires a new decision. Use the confirmed returned state or a new observation before another change. The lower-level `move` operation remains available for one exact occurrence and anchor in the [service reference](../tools/party_dj/README.md).
 
-If a move is refused with `dispatched:false`, refresh and reconsider the plan. If dispatch may have occurred, inspect the real queue and report uncertainty; do not send the same musical action again automatically. See the [confirmed-move details](../docs/spotify-transport.md#moving-an-existing-queue-occurrence).
+If an order or move is refused with `dispatched:false`, refresh and reconsider the plan. If dispatch may have occurred, inspect the real queue and report uncertainty; do not send the same musical action again automatically. See the [confirmed-move details](../docs/spotify-transport.md#moving-an-existing-queue-occurrence).
 
 ### React to a manual edit
 
