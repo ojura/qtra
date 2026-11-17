@@ -44,7 +44,7 @@ SEARCH_ACTIVE_LIMIT = 16
 SEARCH_RETENTION_MS = 120000
 MESSAGE_SOURCES = ('native', 'web', 'api', 'test')
 MATCH_BASES = ('title', 'literal_lyrics', 'semantic')
-COMMAND_ACTIONS = ('next', 'pause', 'resume', 'move', 'reorder', 'playback')
+COMMAND_ACTIONS = ('next', 'pause', 'resume', 'move', 'reorder', 'playback', 'skip')
 WORK_STATES = ('active', 'waiting', 'blocked', 'completed', 'cancelled')
 SONG_THEMES = ('record', 'speaker', 'headphones', 'microphone', 'bottles',
                'cocktail', 'compass', 'dandelion', 'embers')
@@ -981,7 +981,7 @@ class Party:
 
     def _new_command(self, action, body, origin):
         target = {}
-        for key in ('uid', 'beforeUid', 'expectedCurrentUid', 'expectedDeviceId', 'requestId', 'uri'):
+        for key in ('uid', 'beforeUid', 'expectedCurrentUid', 'expectedDeviceId', 'requestId', 'uri', 'direction'):
             if isinstance(body.get(key), str):
                 target[key] = body[key][:512]
         for key in ('orderedQueuedUids', 'expectedQueuedUids'):
@@ -1017,7 +1017,8 @@ class Party:
             record.update(error=str(error)[:500], errorType=type(error).__name__)
         if isinstance(result, dict):
             record['returnedStatus'] = isinstance(result.get('status'), dict)
-            record['result'] = {key: result[key] for key in ('ok', 'action', 'queued', 'moved', 'changed', 'paused', 'uid', 'uri', 'requestId')
+            record['result'] = {key: result[key] for key in ('ok', 'action', 'queued', 'moved', 'changed', 'paused', 'uid', 'uri', 'requestId',
+                                                           'direction', 'outcome', 'fromUid', 'toUid')
                                 if key in result and type(result[key]) in (str, bool, int, float, type(None))}
         self._event('command', record)
 
@@ -1046,6 +1047,58 @@ class Party:
                  and fresh(status.get('observedAt')) and fresh(current.get('observedAt')))
         if not valid:
             raise SpotifyError('The playback command did not return a fresh verified target observation.', dispatched=True)
+        return status
+
+    def _verified_skip_status(self, result, direction, current_uid, device_id):
+        status = result.get('status') if isinstance(result, dict) else None
+        current = status.get('nowPlaying') if isinstance(status, dict) else None
+        playback = status.get('playbackState') if isinstance(status, dict) else None
+        queue = status.get('queue') if isinstance(status, dict) else None
+        device = playback.get('device') if isinstance(playback, dict) else None
+        returned_device = result.get('device') if isinstance(result, dict) else None
+        before = result.get('before') if isinstance(result, dict) else None
+        dispatched_at = result.get('dispatchedAt') if isinstance(result, dict) else None
+        stamp = now_ms()
+        def fresh(value):
+            return (type(value) in (int, float) and stamp - OBSERVATION_TTL_MS <= value <= stamp + 1000
+                    and math.isfinite(value))
+        def position(value):
+            return type(value) in (int, float) and math.isfinite(value) and value >= 0
+        valid = (isinstance(result, dict) and result.get('ok') is True and result.get('action') == 'skip'
+                 and result.get('direction') == direction and result.get('changed') is True
+                 and result.get('fromUid') == current_uid
+                 and ('dispatched' not in result or result['dispatched'] is True)
+                 and isinstance(status, dict) and isinstance(current, dict) and isinstance(playback, dict)
+                 and isinstance(device, dict) and device.get('id') == device_id
+                 and isinstance(returned_device, dict) and returned_device.get('id') == device_id
+                 and isinstance(before, dict) and before.get('currentUid') == current_uid
+                 and before.get('deviceId') == device_id
+                 and isinstance(before.get('uri'), str) and bool(before['uri'].strip())
+                 and position(before.get('positionMs')) and fresh(before.get('observedAt'))
+                 and before.get('clockValid') is True and before.get('buffering') is False
+                 and fresh(dispatched_at) and before['observedAt'] <= dispatched_at
+                 and isinstance(queue, list) and all(isinstance(item, dict) and
+                     all(item.get(key) is None or isinstance(item.get(key), str) for key in ('uid', 'uri', 'source'))
+                     for item in queue)
+                 and isinstance(current.get('uid'), str) and bool(current['uid'].strip()) and len(current['uid']) <= 512
+                 and result.get('toUid') == current['uid']
+                 and isinstance(current.get('uri'), str) and bool(current['uri'].strip())
+                 and type(current.get('paused')) is bool and playback.get('paused') is current['paused']
+                 and playback.get('source') == 'harmony'
+                 and current.get('clockValid') is True and playback.get('clockValid') is True
+                 and current.get('buffering') is False and playback.get('buffering') is False
+                 and fresh(status.get('observedAt')) and fresh(current.get('observedAt'))
+                 and dispatched_at <= status['observedAt'] and dispatched_at <= current['observedAt'])
+        if valid and result.get('outcome') == 'restarted':
+            progress = current.get('progressMs')
+            valid = (direction == 'previous' and current['uid'] == current_uid
+                     and current['uri'] == before['uri']
+                     and position(progress) and before['positionMs'] - progress >= 1000
+                     and progress <= max(0, status['observedAt'] - dispatched_at) + 1000)
+        else:
+            valid = (valid and result.get('outcome') == direction and current['uid'] != current_uid)
+        if not valid:
+            raise SpotifyError('The skip command did not return a fresh verified transition.', dispatched=True)
         return status
 
     def admin(self, action, body, *, context=None):
@@ -1097,6 +1150,12 @@ class Party:
                 if type(paused) is not bool or not all(isinstance(value, str) and value.strip() and len(value) <= 512
                                                        for value in (current_uid, device_id)):
                     raise ValueError('Supply paused as a boolean and the expected current occurrence/device IDs.')
+            if action == 'skip':
+                direction = body.get('direction')
+                current_uid, device_id = body.get('expectedCurrentUid'), body.get('expectedDeviceId')
+                if direction not in ('next', 'previous') or not all(isinstance(value, str) and value.strip() and len(value) <= 512
+                                                                  for value in (current_uid, device_id)):
+                    raise ValueError('Supply next or previous direction and the expected current occurrence/device IDs.')
             if action == 'scene' and 'songVisual' in body:
                 visual = body['songVisual']
                 if visual is not None and (not isinstance(visual, dict) or set(visual) != {'trackUid', 'theme'}
@@ -1239,6 +1298,22 @@ class Party:
                 observed = self._verified_playback_status(result, paused, current_uid, device_id)
                 self._apply_observation(observed)
                 self._event('playback', {'action': 'setPaused', 'paused': paused})
+            elif action == 'skip':
+                if self.audio:
+                    self.audio.interrupt()
+                self._control_generation += 1
+                self._start_command(command)
+                try:
+                    result = self.client.skip(direction, current_uid, device_id)
+                except SpotifyError as error:
+                    if type(error.dispatched) is bool:
+                        raise
+                    raise SpotifyError(str(error), dispatched=True) from error
+                except Exception as error:
+                    raise SpotifyError(f'The skip command could not be verified: {error}', dispatched=True) from error
+                observed = self._verified_skip_status(result, direction, current_uid, device_id)
+                self._apply_observation(observed)
+                self._event('playback', {'action': 'skip', 'direction': direction, 'outcome': result['outcome']})
             elif action in ('next', 'pause', 'resume'):
                 if self.audio and action in ('next', 'pause'):
                     self.audio.interrupt()
@@ -1581,7 +1656,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({'error': str(error)}, 400)
         except SpotifyError as error:
             detail = {'error': str(error)}
-            if url.path in ('/api/admin/move', '/api/admin/reorder', '/api/admin/sync', '/api/admin/playback',
+            if url.path in ('/api/admin/move', '/api/admin/reorder', '/api/admin/sync', '/api/admin/playback', '/api/admin/skip',
                             '/api/admin/next', '/api/admin/pause', '/api/admin/resume'):
                 detail['dispatched'] = error.dispatched
             if url.path == '/api/admin/sync':

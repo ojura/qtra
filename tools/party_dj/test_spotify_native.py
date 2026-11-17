@@ -240,7 +240,8 @@ class SpotifyTransportTests(unittest.TestCase):
         for operation, arguments in (
                 ('move_queue', ('second', 'first', ['first', 'second'])),
                 ('reorder_queue', (['second', 'first'], ['first', 'second'], 'current', 'device')),
-                ('set_paused', (True, 'current', 'device'))):
+                ('set_paused', (True, 'current', 'device')),
+                ('skip', ('next', 'current', 'device'))):
             for failure in ({'ready': False, 'error': 'Player loading'}, None, 'loading',
                             native.SpotifyTransportError('Bootstrap response lost')):
                 with self.subTest(operation=operation, failure=str(failure)):
@@ -300,6 +301,44 @@ class SpotifyTransportTests(unittest.TestCase):
                 client.set_paused(True, 'current', 'device')
         self.assertTrue(caught.exception.dispatched)
         self.assertEqual(evaluate.call_count, 2)
+
+    def test_skip_preserves_arguments_confirmation_and_single_dispatch_errors(self):
+        for direction in ('next', 'previous'):
+            success = {'ok': True, 'action': 'skip', 'direction': direction, 'changed': True,
+                       'outcome': direction, 'fromUid': 'current', 'toUid': 'new',
+                       'device': {'id': 'device'}, 'before': {'currentUid': 'current'},
+                       'status': {'nowPlaying': {'uid': 'new'}}}
+            for result in (success, {'error': 'Current changed', 'dispatched': False},
+                           {'error': 'Unconfirmed', 'dispatched': True}):
+                with self.subTest(direction=direction, result=result):
+                    client = native.SpotifyClient()
+                    def evaluate(expression):
+                        self.assertTrue(client.lock._is_owned(), 'Skip left the shared operation lock.')
+                        return {'ready': True} if expression.startswith('(async') else result
+                    with patch.object(client, 'evaluate', side_effect=evaluate) as called:
+                        if 'error' in result:
+                            with self.assertRaises(native.SpotifyError) as caught:
+                                client.skip(direction, 'current', 'device')
+                            self.assertEqual(caught.exception.dispatched, result['dispatched'])
+                        else:
+                            self.assertEqual(client.skip(direction, 'current', 'device'), result)
+                    self.assertEqual(called.call_count, 2)
+                    expression = called.call_args_list[-1].args[0]
+                    self.assertTrue(expression.startswith('window.__laricsDJ["skip"]('))
+                    self.assertEqual(json.loads(expression.split('...', 1)[1][:-1]), [direction, 'current', 'device'])
+
+    def test_skip_rejects_invalid_input_before_bootstrap_and_malformed_or_lost_success_once(self):
+        for args in (('forward', 'current', 'device'), ('next', '', 'device'), ('previous', 'current', None)):
+            client = native.SpotifyClient()
+            with patch.object(client, 'evaluate') as evaluate, self.assertRaises(native.SpotifyError) as caught:
+                client.skip(*args)
+            self.assertFalse(caught.exception.dispatched); evaluate.assert_not_called()
+        for result in (None, {'ok': True}, native.SpotifyTransportError('Skip response lost')):
+            client = native.SpotifyClient()
+            with patch.object(client, 'evaluate', side_effect=[{'ready': True}, result]) as evaluate:
+                with self.assertRaises(native.SpotifyError) as caught:
+                    client.skip('next', 'current', 'device')
+            self.assertTrue(caught.exception.dispatched); self.assertEqual(evaluate.call_count, 2)
 
     def test_reorder_holds_the_shared_client_lock_through_confirmation(self):
         client = native.SpotifyClient()

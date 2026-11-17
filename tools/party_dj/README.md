@@ -113,10 +113,12 @@ system audio monitor and QtNetwork support.
 `virtual-dj/dj.py` provides fresh status, full queue, guarded ordering, request
 and event-watching workflows. `djctl.py` remains the low-level API entry. Both
 read the local admin token and call the running service. The guest
-page receives the public state and chat only. Reading the event stream or
-sending an admin action records the DJ as present for 90 seconds; a live operator
-should poll regularly. If the operator stops, the interface invites guests to
-leave a message, and the automatic visual show continues.
+page receives the public state and chat only. `dj.llm` reports the live agent's
+explicitly renewed 30-120 second presence lease; `dj.watcher` reports event
+polling separately. Polling, ordinary admin actions and work records do not renew
+agent availability. The native and web badges expire the lease locally even
+when updates stop or the state file remains unchanged. A service restart clears
+the in-memory leases. See the [Virtual DJ presence commands](../../virtual-dj/README.md#stay-present-and-respond-quickly).
 
 ```sh
 python3 tools/party_dj/djctl.py events --after 0 --wait 25
@@ -174,9 +176,22 @@ python3 tools/party_dj/djctl.py request --json '{"requestId":"dj-dino-001","uri"
 button uses authenticated `playback` with an explicit desired `paused` boolean,
 `expectedCurrentUid` and `expectedDeviceId`; the bridge rechecks and verifies the
 actual state around one command. The UI never retries an uncertain control.
-Request additions
-append to its explicit queue. Existing Spotify queue entries appear alongside
-guest requests. A guest's repeated click retains the same request ID; active
+
+Authenticated `POST /api/admin/skip` accepts `direction:"next"|"previous"`,
+`expectedCurrentUid` and `expectedDeviceId`. The bridge checks the fresh current
+occurrence and device before dispatching one navigation command. A verified
+response has `ok:true`, `action:"skip"`, the requested `direction`, `changed:true`,
+`outcome:"next"|"previous"|"restarted"`, `fromUid`, `toUid`, `device`, the
+pre-command `before` observation, mandatory `dispatchedAt` and fresh `status`.
+Next/previous outcomes identify a different occurrence. A restarted
+outcome retains the occurrence and verifies a backwards jump near the beginning
+using valid playback clocks. Stale preconditions are rejected before dispatch.
+An unverified or lost result remains uncertain, leaves the published observation
+unchanged and never triggers another write; inspect fresh state before deciding
+on another action.
+
+Request additions append to its explicit queue. Existing Spotify queue entries
+appear alongside guest requests. A guest's repeated click retains the same request ID; active
 requests for the same URI share a queue entry.
 
 The native scene modes are `auto`, `orbit`, `laser`, `robots` and `quiet`.

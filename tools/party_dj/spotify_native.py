@@ -372,6 +372,22 @@ class SpotifyClient:
     def set_paused(self, paused, expected_current_uid, expected_device_id):
         return self._guarded_change('setPaused', paused, expected_current_uid, expected_device_id)
 
+    def skip(self, direction, expected_current_uid, expected_device_id):
+        if (direction not in ('next', 'previous')
+                or any(not isinstance(value, str) or not value.strip()
+                       for value in (expected_current_uid, expected_device_id))):
+            raise SpotifyError('Skip requires a direction, current occurrence UID and active device ID.', dispatched=False)
+        result = self._guarded_change('skip', direction, expected_current_uid, expected_device_id)
+        if (not isinstance(result, dict) or result.get('ok') is not True or result.get('action') != 'skip'
+                or result.get('direction') != direction or result.get('changed') is not True
+                or result.get('fromUid') != expected_current_uid
+                or result.get('outcome') not in ((direction, 'restarted') if direction == 'previous' else ('next',))
+                or not isinstance(result.get('toUid'), str) or not result['toUid'].strip()
+                or not isinstance(result.get('device'), dict) or result['device'].get('id') != expected_device_id
+                or not isinstance(result.get('before'), dict) or not isinstance(result.get('status'), dict)):
+            raise SpotifyError('Spotify returned an incomplete skip confirmation; inspect the actual player.', dispatched=True)
+        return result
+
 
 def main():
     p = argparse.ArgumentParser()

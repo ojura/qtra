@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 10) return {ready: true};
+  if (window.__laricsDJ?.version === 11) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -246,7 +246,7 @@
     catch { return false; }
   };
   const bridge = {
-    version: 10,
+    version: 11,
     operations,
     async status() {
       if (browserController) ensureActualState();
@@ -530,6 +530,102 @@
           await new Promise(resolve => setTimeout(resolve, 250));
         }
         throw new Error(`Spotify ${action} was sent, but the actual player's state did not confirm it.`);
+      } catch (error) {
+        return {error: String(error?.message || error), dispatched};
+      }
+    },
+    async skip(direction, expectedCurrentUid, expectedDeviceId) {
+      let dispatched = false;
+      try {
+        const validId = value => typeof value === 'string' && value.trim().length > 0;
+        if (!['next', 'previous'].includes(direction) || !validId(expectedCurrentUid) || !validId(expectedDeviceId)) {
+          throw new Error('Skip requires next or previous, the current occurrence UID and the active device ID.');
+        }
+        const method = direction === 'next' ? 'nextTrack' : 'smartPreviousTrack';
+        if (typeof harmony?.[method] !== 'function' || typeof harmony?.getCurrentState !== 'function'
+            || typeof player._queue?.getInternalQueue !== 'function') {
+          throw new Error('Spotify has no targeted, occurrence-checked skip connection.');
+        }
+        const target = deviceInfo(await activeTarget());
+        if (target.id !== expectedDeviceId) throw new Error('The active Spotify device differs from the expected skip device.');
+        let uri;
+        const checkStatus = (status, admission = false) => {
+          const current = status?.nowPlaying, playback = status?.playbackState;
+          if (playback?.source !== 'harmony' || typeof playback.paused !== 'boolean'
+              || typeof current?.paused !== 'boolean' || playback.paused !== current.paused
+              || !validId(current.uid) || !validId(current.uri)) {
+            throw new Error('The active Spotify device has no complete actual playback state.');
+          }
+          if (playback.device?.id !== expectedDeviceId) throw new Error('The observed Spotify device changed during skip.');
+          if (admission && (current.uid !== expectedCurrentUid || (uri && current.uri !== uri))) {
+            throw new Error('The current Spotify occurrence changed before skip.');
+          }
+          if (current.uid === expectedCurrentUid && uri && current.uri !== uri) {
+            throw new Error('Spotify reused the current occurrence with another recording during skip.');
+          }
+          if (admission && (current.buffering || playback.buffering || current.clockValid !== true
+              || playback.clockValid !== true)) {
+            throw new Error('Spotify is buffering or has no valid actual clock; observe it again before skipping.');
+          }
+          if (!Number.isFinite(status.observedAt) || status.observedAt > Date.now() + 1000
+              || status.observedAt < Date.now() - 10000 || !Number.isFinite(current.progressMs) || current.progressMs < 0) {
+            throw new Error('Spotify has no fresh position observation for skip.');
+          }
+          return current;
+        };
+        const first = await bridge.status();
+        uri = checkStatus(first, true).uri;
+        const raw = await harmony.getCurrentState();
+        if (raw?.track_window?.current_track?.uid !== expectedCurrentUid
+            || raw.track_window.current_track.uri !== uri || !Number.isFinite(raw.position) || raw.position < 0) {
+          throw new Error('The current Spotify occurrence changed before the skip restriction check.');
+        }
+        const disallows = raw.disallows || {};
+        if (direction === 'next' ? disallows.skipping_next
+            : (disallows.seeking || raw.position < 3000) && disallows.skipping_prev) {
+          throw new Error('Spotify currently disallows the requested skip.');
+        }
+        const latest = await bridge.status();
+        const initial = checkStatus(latest, true);
+        if ((await activeTarget()).id !== expectedDeviceId) throw new Error('The active Spotify device changed before skip dispatch.');
+        ensureActualState();
+        const current = player._queue.getInternalQueue()?.current_track;
+        if (current?.uid !== expectedCurrentUid || current.uri !== uri) {
+          throw new Error('The current Spotify occurrence changed before skip dispatch.');
+        }
+        const before = {currentUid: expectedCurrentUid, uri, deviceId: expectedDeviceId,
+          positionMs: initial.progressMs, observedAt: latest.observedAt, clockValid: true, buffering: false};
+        const dispatchedAt = Date.now();
+        dispatched = true;
+        // Keep Spotify's own previous behavior: smartPreviousTrack either goes
+        // to the previous item or seeks this one to zero at its native threshold.
+        const accepted = await harmony[method](target.id, {forceRemoteAction: true});
+        if (accepted === false) throw new Error(`Spotify did not accept ${direction} for the active device.`);
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          const status = await bridge.status();
+          const observed = checkStatus(status);
+          if ((await activeTarget()).id !== expectedDeviceId) throw new Error('The active Spotify device changed before skip could be confirmed.');
+          ensureActualState();
+          const live = player._queue.getInternalQueue()?.current_track;
+          if (live?.uid !== observed.uid || live.uri !== observed.uri) {
+            throw new Error('The current Spotify occurrence changed during skip confirmation.');
+          }
+          if (!observed.buffering && !status.playbackState.buffering && observed.clockValid === true
+              && status.playbackState.clockValid === true && status.observedAt >= dispatchedAt) {
+            let outcome;
+            if (observed.uid !== expectedCurrentUid) outcome = direction;
+            else if (direction === 'previous' && observed.uri === uri
+                && before.positionMs - observed.progressMs >= 1000
+                && observed.progressMs <= Math.max(0, status.observedAt - dispatchedAt) + 1000) {
+              outcome = 'restarted';
+            }
+            if (outcome) return {ok: true, action: 'skip', direction, changed: true, outcome,
+              fromUid: expectedCurrentUid, toUid: observed.uid, device: target, before, dispatchedAt, status};
+          }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        throw new Error(`Spotify ${direction} was sent, but no occurrence change or restart was confirmed.`);
       } catch (error) {
         return {error: String(error?.message || error), dispatched};
       }

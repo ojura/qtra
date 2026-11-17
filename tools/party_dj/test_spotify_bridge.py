@@ -24,7 +24,7 @@ async function fixture(options = {}) {
     metadata: {title: 'Current track', artist_name: 'Current artist', duration: '127050'}};
   const state = {item: track, isPaused: false, isBuffering: false,
     timestamp: clock - 2000, positionAsOfTimestamp: 10000, duration: 127050, speed: 1, ...options.state};
-  const raw = {track_window: {current_track: track}, paused: false, loading: false,
+  const raw = {track_window: {current_track: track}, paused: false, loading: false, disallows: {},
     timestamp: clock - 2000, position: 10000, duration: 127050, playback_speed: 1, ...options.raw};
   const devices = options.devices || [{id: 'standalone', name: 'Native Spotify', type: 'computer',
     local: false, is_active: true, is_controllable: true, is_observable: true}];
@@ -52,6 +52,20 @@ async function fixture(options = {}) {
       return true;
     }};
   let api, harmony;
+  const skipCalls = [];
+  const advanceTo = item => {
+    internal.current_track = item; state.item = item; raw.track_window.current_track = item;
+    raw.position = 0; raw.timestamp = clock; raw.loading = false; syncQueue();
+  };
+  const executeSkip = async (action, id, parameters) => {
+    calls.push({action, id, parameters: plain(parameters)});
+    if (options.onSkipCommand) return options.onSkipCommand({action, id, parameters, state, raw,
+      devices, harmony, internal, queue, syncQueue, advanceTo, clock});
+    if (action === 'seek') { raw.position = 0; raw.timestamp = clock; }
+    else advanceTo(action === 'nextTrack' ? internal.next_items.find(item => !item.hidden_in_queue)
+      || queuedTrack('after-next') : internal.previous_items.at(-1));
+    return true;
+  };
   const execute = async (action, id, parameters) => {
     calls.push({action, id, parameters: plain(parameters)});
     if (options.onCommand) return options.onCommand({action, id, parameters, state, raw, devices, harmony});
@@ -68,7 +82,16 @@ async function fixture(options = {}) {
       if (options.onRawRead) options.onRawRead({harmony, state, raw, devices, internal, queue, syncQueue, read: ++rawReads});
       return structuredClone(raw);
     }, pause: (id, parameters) => execute('pause', id, parameters),
-    resume: (id, parameters) => execute('resume', id, parameters)};
+    resume: (id, parameters) => execute('resume', id, parameters),
+    nextTrack: (id, parameters) => { skipCalls.push('next'); return executeSkip('nextTrack', id, parameters); },
+    smartPreviousTrack: async (id, parameters) => {
+      skipCalls.push('previous');
+      // Match the inspected native Harmony decision, including its raw-position
+      // threshold rather than a UI-extrapolated clock or an invented policy.
+      const current = await harmony.getCurrentState();
+      return current.disallows.seeking || current.position < 3000
+        ? executeSkip('previousTrack', id, parameters) : executeSkip('seek', id, {position: 0});
+    }};
   api = {_harmony: options.withHarmony === false ? undefined : harmony,
     _queue: {getInternalQueue: () => {
       if (options.onInternalRead) options.onInternalRead({internal, queue, state, raw, read: ++internalReads});
@@ -121,7 +144,7 @@ async function fixture(options = {}) {
   assert.equal(ready.ready, true);
   return {bridge: window.__laricsDJ, calls, raw, state, devices, harmony, api, manager, queue, internal, syncQueue,
     lastQueuePayload: () => lastQueuePayload,
-    advance: milliseconds => { clock += milliseconds; }, catalogue, showSearch, location, timerCalls};
+    advance: milliseconds => { clock += milliseconds; }, catalogue, showSearch, location, timerCalls, skipCalls};
 }
 '''
 
@@ -242,6 +265,125 @@ class BridgeTransportTests(unittest.TestCase):
           assert.equal(metadata.uri, found.uri);
           assert.equal(f.catalogue.pushes.length, 2);
           assert.deepEqual(f.calls, []);
+        ''')
+
+    def test_guarded_skip_next_confirms_new_occurrence_even_for_the_same_recording(self):
+        self.run_js(r'''
+const f = await fixture({queued: [queuedTrack('same-recording-next', 'a')]});
+const result = await f.bridge.skip('next', 'occurrence-a', 'standalone');
+assert.equal(result.ok, true); assert.equal(result.action, 'skip'); assert.equal(result.direction, 'next');
+assert.equal(result.outcome, 'next'); assert.equal(result.changed, true);
+assert.equal(result.fromUid, 'occurrence-a'); assert.equal(result.toUid, 'same-recording-next');
+assert.equal(result.status.nowPlaying.uri, result.before.uri);
+assert.equal(result.device.id, 'standalone'); assert.equal(result.status.playbackState.device.id, 'standalone');
+assert.deepEqual(plain(result.before), {currentUid: 'occurrence-a', uri: 'spotify:track:' + 'a'.repeat(22),
+  deviceId: 'standalone', positionMs: 12000, observedAt: 1000000, clockValid: true, buffering: false});
+assert.equal(result.dispatchedAt, 1000000); assert.equal(result.status.observedAt, 1000000);
+assert.deepEqual(f.skipCalls, ['next']);
+assert.deepEqual(f.calls, [{action: 'nextTrack', id: 'standalone', parameters: {forceRemoteAction: true}}]);
+        ''')
+
+    def test_guarded_previous_preserves_native_threshold_seeking_rules_and_restart(self):
+        self.run_js(r'''
+for (const [position, disallows, outcome, command] of [
+  [0, {}, 'previous', 'previousTrack'], [2999, {}, 'previous', 'previousTrack'],
+  [3000, {}, 'restarted', 'seek'], [12000, {}, 'restarted', 'seek'],
+  [12000, {seeking: true}, 'previous', 'previousTrack'],
+  [12000, {skipping_prev: true}, 'restarted', 'seek']]) {
+  const f = await fixture({raw: {position, disallows}});
+  const result = await f.bridge.skip('previous', 'occurrence-a', 'standalone');
+  assert.equal(result.ok, true); assert.equal(result.outcome, outcome);
+  assert.equal(result.toUid, outcome === 'restarted' ? 'occurrence-a' : 'previous');
+  assert.equal(result.status.nowPlaying.progressMs, 0);
+  assert.deepEqual(f.skipCalls, ['previous']); assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls[0], {action: command, id: 'standalone',
+    parameters: command === 'seek' ? {position: 0} : {forceRemoteAction: true}});
+  if (outcome === 'restarted') {
+    assert.ok(result.before.positionMs - result.status.nowPlaying.progressMs >= 1000);
+    assert.ok(result.status.nowPlaying.progressMs <= result.status.observedAt - result.dispatchedAt + 1000);
+  }
+}
+const paused = await fixture({raw: {position: 5000, paused: true}});
+const restarted = await paused.bridge.skip('previous', 'occurrence-a', 'standalone');
+assert.equal(restarted.outcome, 'restarted'); assert.equal(restarted.status.nowPlaying.paused, true);
+        ''')
+
+    def test_guarded_skip_rejects_invalid_preconditions_restrictions_and_unavailable_methods(self):
+        self.run_js(r'''
+for (const args of [['forward', 'occurrence-a', 'standalone'], ['next', '', 'standalone'],
+  ['next', 'occurrence-a', ''], ['next', 'another', 'standalone'], ['next', 'occurrence-a', 'another']]) {
+  const f = await fixture(); const result = await f.bridge.skip(...args);
+  assert.ok(result.error); assert.equal(result.dispatched, false); assert.deepEqual(f.calls, []);
+}
+for (const [direction, options, remove] of [
+  ['next', {fakeState: true}], ['next', {raw: {disallows: {skipping_next: true}}}],
+  ['previous', {raw: {position: 1000, disallows: {skipping_prev: true}}}],
+  ['previous', {raw: {position: 12000, disallows: {seeking: true, skipping_prev: true}}}],
+  ['next', {raw: {loading: true}}], ['next', {raw: {position: undefined}, state: {positionAsOfTimestamp: undefined}}],
+  ['next', {}, 'nextTrack'], ['previous', {}, 'smartPreviousTrack']]) {
+  const f = await fixture(options); if (remove) delete f.harmony[remove];
+  const result = await f.bridge.skip(direction, 'occurrence-a', 'standalone');
+  assert.ok(result.error); assert.equal(result.dispatched, false);
+  assert.deepEqual(f.calls, []); assert.deepEqual(f.skipCalls, []);
+}
+        ''')
+
+    def test_guarded_skip_rechecks_current_and_device_immediately_before_dispatch(self):
+        self.run_js(r'''
+for (const options of [
+  {onRawRead: ({read, raw, internal}) => {if (read === 3) {
+    const changed = {...internal.current_track, uid: 'manual-current'};
+    raw.track_window.current_track = changed; internal.current_track = changed;
+  }}},
+  {onDevicesRead: ({read, devices}) => {if (read === 2) devices[0].id = 'manual-device';}},
+  {onDevicesRead: ({read, internal}) => {if (read === 2) internal.current_track = {...internal.current_track, uid: 'late-current'};}},
+  {onDevicesRead: ({read, harmony}) => {if (read === 2) harmony._hasFakeState = true;}}
+]) {
+  const f = await fixture(options); const result = await f.bridge.skip('next', 'occurrence-a', 'standalone');
+  assert.ok(result.error); assert.equal(result.dispatched, false); assert.deepEqual(f.calls, []);
+}
+        ''')
+
+    def test_guarded_skip_ack_lost_response_and_post_dispatch_races_are_uncertain_once(self):
+        self.run_js(r'''
+for (const onSkipCommand of [() => false, () => {throw new Error('Lost response');}, () => true,
+  ({advanceTo, devices}) => {advanceTo(queuedTrack('advanced')); devices[0].id = 'manual-device'; return true;},
+  ({advanceTo, harmony}) => {advanceTo(queuedTrack('advanced')); harmony._hasFakeState = true; return true;}
+]) {
+  const f = await fixture({onSkipCommand});
+  const result = await f.bridge.skip('next', 'occurrence-a', 'standalone');
+  assert.ok(result.error); assert.equal(result.dispatched, true);
+  assert.deepEqual(f.skipCalls, ['next']); assert.equal(f.calls.length, 1);
+}
+        ''')
+
+    def test_guarded_previous_needs_a_real_backwards_jump_close_to_zero(self):
+        self.run_js(r'''
+for (const [position, after] of [[10000, 8500], [700, 0], [10000, 10000]]) {
+  const f = await fixture({raw: {position, timestamp: 1000000},
+    onSkipCommand: ({raw, clock}) => {raw.position = after; raw.timestamp = clock; return true;}});
+  const result = await f.bridge.skip('previous', 'occurrence-a', 'standalone');
+  assert.ok(result.error); assert.equal(result.dispatched, true);
+  assert.deepEqual(f.skipCalls, ['previous']); assert.equal(f.calls.length, 1);
+}
+let f;
+f = await fixture({onSkipCommand: ({raw}) => {
+  f.advance(1500); raw.position = 1500; raw.timestamp = 1001500; return true;
+}});
+const delayed = await f.bridge.skip('previous', 'occurrence-a', 'standalone');
+assert.equal(delayed.outcome, 'restarted'); assert.equal(delayed.status.nowPlaying.progressMs, 1500);
+assert.equal(delayed.dispatchedAt, 1000000); assert.equal(delayed.status.observedAt, 1001500);
+        ''')
+
+    def test_guarded_skip_waits_through_buffering_but_never_reissues_the_command(self):
+        self.run_js(r'''
+const f = await fixture({onSkipCommand: ({advanceTo, raw}) => {
+  advanceTo(queuedTrack('next-buffering')); raw.loading = true; return true;
+}, onRawRead: ({raw, read}) => {if (read >= 5) raw.loading = false;}});
+const result = await f.bridge.skip('next', 'occurrence-a', 'standalone');
+assert.equal(result.outcome, 'next'); assert.equal(result.toUid, 'next-buffering');
+assert.equal(result.status.nowPlaying.buffering, false); assert.equal(result.status.nowPlaying.clockValid, true);
+assert.deepEqual(f.skipCalls, ['next']); assert.equal(f.calls.length, 1); assert.ok(f.timerCalls.length > 0);
         ''')
 
     def test_targeted_pause_and_resume_return_the_observed_device_state(self):

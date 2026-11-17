@@ -108,6 +108,26 @@ class ServiceWorkflows(unittest.TestCase):
     def presence_body(self, session='fixture-agent', sequence=1, state='online', **extra):
         return {'agentSessionId': session, 'sequence': sequence, 'state': state, **extra}
 
+    def skip_body(self, direction='next'):
+        return {'direction': direction, 'expectedCurrentUid': self.client.current['uid'],
+                'expectedDeviceId': 'fixture-device', 'source': 'native'}
+
+    def skip_result(self, direction='next', *, outcome=None, before_position=12000, progress=0, elapsed=0):
+        status = self.client.status()
+        current = status['nowPlaying']
+        original_uid, uri = current['uid'], current['uri']
+        outcome = outcome or direction
+        current.update(uid=original_uid if outcome == 'restarted' else direction + '-occurrence',
+                       progressMs=progress, clockValid=True, buffering=False)
+        status['playbackState'].update(positionMs=progress, clockValid=True, buffering=False)
+        before = {'currentUid': original_uid, 'uri': uri, 'deviceId': 'fixture-device',
+                  'positionMs': before_position, 'observedAt': self.stamp - elapsed,
+                  'clockValid': True, 'buffering': False}
+        return {'ok': True, 'action': 'skip', 'direction': direction, 'changed': True,
+                'outcome': outcome, 'fromUid': original_uid, 'toUid': current['uid'],
+                'device': {'id': 'fixture-device', 'name': 'Test player', 'type': 'computer', 'isLocal': True},
+                'before': before, 'dispatchedAt': self.stamp - elapsed, 'status': status}
+
     def parallel(self, *calls):
         barrier = threading.Barrier(len(calls))
         results = [None] * len(calls)
@@ -591,6 +611,197 @@ class ServiceWorkflows(unittest.TestCase):
         self.assertTrue(self.party.search_requests['transport-cancel']['cancelled'])
         self.assertEqual(self.party.search_cache, {})
         self.assertEqual(self.party.track_cache, {})
+
+    def test_guarded_skip_publishes_next_previous_and_interrupts_speech_before_transport(self):
+        order = []
+        self.party.audio = SimpleNamespace(interrupt=lambda: order.append('interrupt'),
+            observe=lambda *args, **kwargs: order.append('observe'), snapshot=lambda: {})
+        for direction in ('next', 'previous'):
+            with self.subTest(direction=direction):
+                self.party._refresh()
+                order.clear()
+                body, reply = self.skip_body(direction), self.skip_result(direction)
+                def skip(*args):
+                    self.assertEqual(order, ['interrupt'])
+                    order.append('transport')
+                    return reply
+                with patch.object(self.client, 'skip', create=True, side_effect=skip) as transport:
+                    status, result = self.http('/api/admin/skip', body, authorized=True, operator='Fixture operator')
+                    self.assertEqual((status, result), (200, reply))
+                    transport.assert_called_once_with(direction, body['expectedCurrentUid'], body['expectedDeviceId'])
+                self.assertEqual(order, ['interrupt', 'transport', 'observe'])
+                published = json.loads((self.party.data / 'state.json').read_text())
+                self.assertEqual(published['nowPlaying']['uid'], reply['toUid'])
+                self.assertNotEqual(reply['fromUid'], reply['toUid'])
+                # A different occurrence of the same recording is a real transition.
+                self.assertEqual(published['nowPlaying']['uri'], reply['before']['uri'])
+                event = self.command_events()[-1]
+                self.assertEqual((event['action'], event['phase'], event['dispatched'], event['dispatchUncertain']),
+                                 ('skip', 'returned', True, False))
+                self.assertEqual(event['target']['direction'], direction)
+                self.assertEqual(event['result']['outcome'], direction)
+                self.assertEqual(event['attribution']['source'], 'native')
+                self.assertEqual(event['attribution']['operatorLabel'], 'Fixture operator')
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_guarded_previous_requires_exact_fresh_restart_evidence(self):
+        body = self.skip_body('previous')
+        valid = self.skip_result('previous', outcome='restarted', before_position=3000, progress=2000, elapsed=1000)
+        with patch.object(self.client, 'skip', create=True, return_value=valid):
+            self.assertEqual(self.http('/api/admin/skip', body, authorized=True), (200, valid))
+        published = (self.party.data / 'state.json').read_bytes()
+        observed = copy.deepcopy(self.party.playback)
+        variants = []
+        def changed(path, value):
+            result = copy.deepcopy(valid)
+            target = result
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            variants.append(result)
+        changed(('before', 'positionMs'), 2999)
+        too_far = copy.deepcopy(valid)
+        too_far['before']['positionMs'] = 5000
+        too_far['status']['nowPlaying']['progressMs'] = 2001
+        variants.append(too_far)
+        for path, value in ((('before', 'uri'), TRACK_A), (('before', 'clockValid'), False),
+                            (('before', 'buffering'), True), (('before', 'observedAt'), self.stamp - 10001),
+                            (('before', 'positionMs'), True), (('status', 'nowPlaying', 'clockValid'), False),
+                            (('status', 'nowPlaying', 'buffering'), True), (('status', 'playbackState', 'buffering'), True),
+                            (('status', 'playbackState', 'clockValid'), False),
+                            (('status', 'nowPlaying', 'progressMs'), float('nan')),
+                            (('dispatchedAt',), None)):
+            changed(path, value)
+        missing_clock = copy.deepcopy(valid)
+        del missing_clock['status']['playbackState']['clockValid']
+        variants.append(missing_clock)
+        wrong_occurrence = copy.deepcopy(valid)
+        wrong_occurrence['toUid'] = wrong_occurrence['status']['nowPlaying']['uid'] = 'different-occurrence'
+        variants.append(wrong_occurrence)
+        for result in variants:
+            with self.subTest(result=result), patch.object(self.client, 'skip', create=True, return_value=result) as transport:
+                status, error = self.http('/api/admin/skip', body, authorized=True)
+                self.assertEqual(status, 503)
+                self.assertIs(error['dispatched'], True)
+                transport.assert_called_once()
+                self.assertEqual(self.party.playback, observed)
+                self.assertEqual((self.party.data / 'state.json').read_bytes(), published)
+        invalid_next = {**valid, 'direction': 'next'}
+        with patch.object(self.client, 'skip', create=True, return_value=invalid_next):
+            self.assertEqual(self.http('/api/admin/skip', self.skip_body('next'), authorized=True)[0], 503)
+
+    def test_guarded_skip_schema_and_auth_fail_before_receipts_speech_or_transport(self):
+        sent = self.message()
+        interruptions = []
+        self.party.audio = SimpleNamespace(interrupt=lambda: interruptions.append(1), snapshot=lambda: {})
+        valid = {**self.skip_body(), 'readThrough': sent['id']}
+        before = (self.party.last_seen, self.party.revision, self.party._control_generation,
+                  (self.party.data / 'state.json').read_bytes())
+        changes = [{'direction': value} for value in (None, False, 'back', '', [])]
+        changes += [{key: value} for key in ('expectedCurrentUid', 'expectedDeviceId')
+                    for value in (None, False, '', '   ', 'x' * 513)]
+        with patch.object(self.client, 'skip', create=True) as transport:
+            self.assertEqual(self.http('/api/admin/skip', valid)[0], 401)
+            for change in changes:
+                with self.subTest(change=change):
+                    self.assertEqual(self.http('/api/admin/skip', {**valid, **change}, authorized=True)[0], 400)
+                    self.assertEqual((self.party.last_seen, self.party.revision, self.party._control_generation,
+                                      (self.party.data / 'state.json').read_bytes()), before)
+            transport.assert_not_called()
+        self.assertEqual(interruptions, [])
+        self.assertIsNone(self.party.message_info(sent['id'])['message']['readAt'])
+        self.assertTrue(all(event['phase'] == 'rejected' and event['dispatched'] is False for event in self.command_events()))
+
+    def test_guarded_skip_stale_occurrence_or_device_is_once_and_explicitly_unsent(self):
+        self.party._refresh()
+        before = copy.deepcopy(self.party.playback)
+        for field in ('expectedCurrentUid', 'expectedDeviceId'):
+            body = {**self.skip_body(), field: 'stale-value'}
+            with self.subTest(field=field), patch.object(self.client, 'skip', create=True,
+                    side_effect=SpotifyError('The occurrence or device changed.', dispatched=False)) as transport:
+                status, result = self.http('/api/admin/skip', body, authorized=True)
+                self.assertEqual(status, 503)
+                self.assertIs(result['dispatched'], False)
+                transport.assert_called_once_with('next', body['expectedCurrentUid'], body['expectedDeviceId'])
+                self.assertEqual(self.party.playback, before)
+                self.assertIs(self.command_events()[-1]['dispatched'], False)
+        self.assertEqual(self.client.control_calls, [])
+
+    def test_guarded_skip_uncertain_or_malformed_results_preserve_state_without_retry(self):
+        self.party._refresh()
+        self.party._publish()
+        body, valid = self.skip_body(), self.skip_result()
+        before = (copy.deepcopy(self.party.playback), copy.deepcopy(self.party.spotify),
+                  (self.party.data / 'state.json').read_bytes())
+        outcomes = [None, {}, SpotifyError('Lost response.', dispatched=True),
+                    SpotifyError('Unknown dispatch.', dispatched=None), SpotifyError('Untyped dispatch.', dispatched=0),
+                    TimeoutError('Fixture transport timeout.')]
+        changes = [(('ok',), False), (('action',), 'next'), (('direction',), 'previous'),
+                   (('changed',), False), (('fromUid',), 'different'), (('toUid',), 'different'),
+                   (('device',), 'fixture-device'), (('dispatched',), False), (('before',), None),
+                   (('before', 'deviceId'), 'different'), (('dispatchedAt',), self.stamp - 10001),
+                   (('before', 'clockValid'), False), (('before', 'buffering'), True),
+                   (('status',), {}), (('status', 'queue'), None), (('status', 'queue'), [False]),
+                   (('status', 'playbackState', 'device', 'id'), 'different'),
+                   (('status', 'nowPlaying', 'clockValid'), False), (('status', 'nowPlaying', 'buffering'), True),
+                   (('status', 'playbackState', 'clockValid'), False), (('status', 'playbackState', 'buffering'), True),
+                   (('status', 'playbackState', 'source'), 'browser'),
+                   (('status', 'observedAt'), self.stamp + 1001),
+                   (('status', 'observedAt'), self.stamp - 1),
+                   (('status', 'nowPlaying', 'observedAt'), self.stamp - 1),
+                   (('status', 'nowPlaying', 'observedAt'), self.stamp - 10001)]
+        for path, value in changes:
+            changed = copy.deepcopy(valid)
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            outcomes.append(changed)
+        missing_clock = copy.deepcopy(valid)
+        del missing_clock['status']['playbackState']['clockValid']
+        outcomes.append(missing_clock)
+        unchanged = copy.deepcopy(valid)
+        unchanged['toUid'] = unchanged['status']['nowPlaying']['uid'] = unchanged['fromUid']
+        outcomes.append(unchanged)
+        for outcome in outcomes:
+            options = {'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome}
+            with self.subTest(outcome=outcome), patch.object(self.client, 'skip', create=True, **options) as transport:
+                status, result = self.http('/api/admin/skip', body, authorized=True)
+                self.assertEqual(status, 503)
+                self.assertIs(result['dispatched'], True)
+                transport.assert_called_once()
+                self.assertEqual((self.party.playback, self.party.spotify, (self.party.data / 'state.json').read_bytes()), before)
+                self.assertTrue(self.command_events()[-1]['dispatchUncertain'])
+        self.assertEqual(self.client.control_calls, [])
+        self.assertEqual(self.client.enqueue_calls, [])
+
+    def test_guarded_skip_prevents_older_poll_success_or_error_overwriting_the_result(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                started, release = threading.Event(), threading.Event()
+                old, reply = self.client.status(), self.skip_result()
+                old['nowPlaying']['uid'] = 'obsolete-occurrence'
+                def status():
+                    started.set()
+                    self.assertTrue(release.wait(3))
+                    if fail:
+                        raise SpotifyError('Old poll failed.')
+                    return old
+                with patch.object(self.client, 'status', side_effect=status) as poll, \
+                     patch.object(self.client, 'skip', create=True, return_value=reply) as transport:
+                    worker = threading.Thread(target=self.party._refresh)
+                    worker.start()
+                    try:
+                        self.assertTrue(started.wait(3))
+                        self.assertEqual(self.http('/api/admin/skip', self.skip_body(), authorized=True)[0], 200)
+                    finally:
+                        release.set(); worker.join(3)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(self.party.snapshot()['nowPlaying']['uid'], reply['toUid'])
+                    self.assertTrue(self.party.spotify['connected'])
+                    transport.assert_called_once()
+                    poll.assert_called_once()
 
     def test_sync_exposes_only_actual_observation_and_history_without_transport(self):
         self.party.request({'requestId': 'pending-request', 'uri': TRACK_A})
