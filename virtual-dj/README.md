@@ -47,7 +47,13 @@ Exact searches have no reasoning step. Escape or the small × recalls the latest
 own message only before the DJ has accepted it, preserving another draft.
 **Ctrl+K** focuses the Magic box and explicitly searches its current text;
 **Ctrl+P** requests the opposite of the freshly observed playback state.
-The top strip shows both shortcuts and **Tab** for switching to native Spotify.
+Matching header controls beside the playback indicator show those shortcuts and
+**Tab** for switching to native Spotify. **Ctrl+N** requests the next song;
+**Ctrl+B** uses Spotify's previous behavior: near the start it returns to the
+previous song, while later it restarts the current song when seeking is allowed.
+The labels and key bindings share one native shortcut definition. Playback,
+next and previous share a pending-command guard and wait for a fresh confirmed
+observation before reporting success.
 
 ## Keep the next two or three songs intentional
 

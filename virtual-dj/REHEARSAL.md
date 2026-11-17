@@ -87,6 +87,51 @@ The default phrase rendered without shortening on 2026-11-17, using the local es
 
 The measured bed gain was -9.99984 dB during speech and 0 dB before ducking and after restoration. The 0.48-second duck and 0.88-second restore ended at gain 1.0, with a maximum per-sample envelope step of 0.00004662. The voice-to-ducked-bed RMS ratio was 12.3782 dB. The mix required zero sample limiting. These measurements establish the file levels and timing; pronunciation and speaker intelligibility remain unperformed listening observations.
 
+## Observed morning dedication: request 302
+
+On 2026-11-17, the audience renewed the missed Zdenko dedication. The exact line
+“Zdenko, ova je za tebe!” was rendered with `hr-HR-GabrijelaNeural` and played once,
+for **2.904 seconds**, over **q162, The Selecter, On My Radio**. q161 was initially
+considered, but its natural transition happened before any mixer invocation.
+Fresh preflight bound the only playback to q162 and the actual `juraj-legion`
+device. The speech process exited with code 0. Spotify stream 2279 stayed on the
+same Bluetooth sink 2329; both channel levels followed **65536 → 44649 → 65536**
+through the existing 10 dB duck and restoration. Global speech remained disabled.
+
+The completed MP3/WAV were removed after the outcome was recorded; the natural-voice environment remains
+available for the current live session. The earlier silent espeak-ng measurements
+retain their separate results, and the overnight cancelled performances remain
+cancelled.
+
+### Reuse the natural Croatian preparation path
+
+For a newly requested line, set `dedication_text` to its exact wording and render
+quietly into a new temporary directory:
+
+```sh
+dedication_dir=$(mktemp -d /tmp/larics-dedication-XXXXXX)
+/tmp/larics-zdenko-dedication/venv/bin/python -m edge_tts \
+  --voice hr-HR-GabrijelaNeural --text "$dedication_text" \
+  --write-media "$dedication_dir/voice.mp3"
+ffmpeg -nostdin -loglevel error -i "$dedication_dir/voice.mp3" \
+  -af 'highpass=f=80,lowpass=f=8500,loudnorm=I=-19:TP=-3:LRA=6,afade=t=in:st=0:d=0.03' \
+  -ar 48000 -ac 1 -c:a pcm_s16le "$dedication_dir/voice.wav"
+```
+
+The retained environment supplies the Edge neural renderer; it has no automatic
+connection to the service's speech scheduler. Measure the WAV before admission
+and retain the existing maximum of 12 seconds. From the repository root with
+`PYTHONPATH=tools/party_dj`, use `speech.PreparedSpeech` for the prepared file and
+the existing runtime call
+`SpotifyMixer().play(prepared, valid, stop, on_started=...)`.
+The `valid` callback must keep checking the exact current UID and device, a fresh
+actual source observation within ten seconds, valid clocks, playing status, and
+explicit false pause/buffering. Keep global speech disabled for a one-off. The
+mixer selects the existing Spotify stream/output, scales speech to its original
+level, ducks only that stream, and preserves a newer host volume change. Read its
+process result before reporting completion, record the request's outcome in the
+maintained session notes, and remove its completed audio and temporary result files.
+
 ## Prepare a dedication
 
 1. Keep the host's current playback decision. An explicit pause remains in force throughout silent rehearsal.
@@ -125,4 +170,4 @@ Pass accepted source observations and the playback state to `DedicationAudio.obs
 
 Spotify is the normal music source. A preparation failure is a reason to inspect the failure; it does not automatically open YouTube or another player. Use an external source only for an explicitly coordinated need with prepared material, participant order, visibility, timing and a return plan.
 
-The [playbook's source-handoff procedure](PLAYBOOK.md#a-rare-external-source) assigns one owner and requires observed player state at each transition. Rehearse those decisions with fixtures. This command never opens a provider, contacts the production controller, pauses or resumes Spotify, or changes audio routing. The user's end-of-party pause remains the starting state for further work.
+The [playbook's source-handoff procedure](PLAYBOOK.md#a-rare-external-source) assigns one owner and requires observed player state at each transition. Rehearse those decisions with fixtures. This command never opens a provider, contacts the production controller, pauses or resumes Spotify, or changes audio routing. Preserve the host's current playback decision while rehearsing.
