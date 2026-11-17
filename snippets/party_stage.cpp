@@ -30,6 +30,7 @@
 #include <QNetworkRequest>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QQueue>
 #include <QPushButton>
@@ -37,8 +38,11 @@
 #include <QSet>
 #include <QSettings>
 #include <QShowEvent>
+#include <QSignalBlocker>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTextBrowser>
+#include <QTextCursor>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -197,15 +201,15 @@ public:
         setObjectName(QStringLiteral("partyRequestPanel"));
         setAllowedAreas(Qt::RightDockWidgetArea);
         setFeatures(QDockWidget::DockWidgetClosable);
-        setMinimumWidth(350); setMaximumWidth(480);
+        setFixedWidth(480);
         setStyleSheet(QStringLiteral(
-            "QDockWidget,QLabel,QLineEdit,QListWidget,QTextBrowser,QPushButton { font:18px 'DejaVu Sans'; }"
+            "QDockWidget,QLabel,QLineEdit,QPlainTextEdit,QListWidget,QTextBrowser,QPushButton { font:23px 'DejaVu Sans'; }"
             "QDockWidget { color:#f7f2ea; background:#101727; }"
             "QDockWidget::title { background:#202a3c; padding:12px; }"
             "QWidget#partyDeskBody { background:#101727; }"
             "QLabel { color:#c1cce0; } QLabel#partyDeskHeading { color:#ff9a58; font-size:24px; font-weight:600; }"
-            "QLineEdit,QListWidget,QTextBrowser { background:#080f1d; color:#f7f2ea; border:1px solid #344158; border-radius:8px; padding:9px; }"
-            "QLineEdit:focus { border-color:#7de4ed; }"
+            "QLineEdit,QPlainTextEdit,QListWidget,QTextBrowser,QLabel#partySuggestionHint,QWidget#partySelectedSong { background:#080f1d; color:#f7f2ea; border:1px solid #344158; border-radius:8px; padding:9px; }"
+            "QLineEdit:focus,QPlainTextEdit:focus { border-color:#7de4ed; }"
             "QListWidget::item { padding:8px 3px; border-bottom:1px solid #202d43; }"
             "QListWidget::item:selected { background:#3b3040; color:#fff3e5; }"
             "QPushButton { background:#ff8a42; color:#121725; border:0; border-radius:8px; padding:11px; font-weight:600; }"
@@ -225,36 +229,60 @@ public:
             QSettings(QStringLiteral("qtra"), QStringLiteral("party")).setValue(QStringLiteral("name"), name_->text().trimmed());
         });
         layout->addWidget(name_);
-        search_ = new QLineEdit(body); search_->setObjectName(QStringLiteral("partySearch"));
-        search_->setPlaceholderText(QStringLiteral("Pjesma ili izvođač…")); search_->setMaxLength(160); layout->addWidget(search_);
-        searchDelay_.setSingleShot(true); searchDelay_.setInterval(330);
-        connect(search_, &QLineEdit::textChanged, this, [this] { ++searchVersion_; searchDelay_.start(); });
-        connect(&searchDelay_, &QTimer::timeout, this, [this] { search(); });
-        connect(search_, &QLineEdit::returnPressed, this, [this] { searchDelay_.stop(); search(); });
-        results_ = new QListWidget(body); results_->setObjectName(QStringLiteral("partyResults"));
-        results_->setMinimumHeight(115); results_->setMaximumHeight(195); layout->addWidget(results_);
-        dedication_ = new QLineEdit(body); dedication_->setObjectName(QStringLiteral("partyDedication"));
-        dedication_->setPlaceholderText(QStringLiteral("Posveta (po želji)")); dedication_->setMaxLength(240); layout->addWidget(dedication_);
-        request_ = new QPushButton(QStringLiteral("Pošalji pjesmu DJ-u"), body);
-        request_->setObjectName(QStringLiteral("partyRequestButton")); request_->setEnabled(false); layout->addWidget(request_);
-        connect(results_, &QListWidget::itemSelectionChanged, this, [this] { request_->setEnabled(results_->currentItem() && !requestBusy_); });
-        connect(results_, &QListWidget::itemDoubleClicked, this, [this] { requestTrack(); });
-        connect(request_, &QPushButton::clicked, this, [this] { requestTrack(); });
         presence_ = new QLabel(QStringLiteral("Razgovor s DJ-em"), body); presence_->setWordWrap(true); layout->addWidget(presence_);
+        presence_->setFixedHeight(58); presence_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         chat_ = new QTextBrowser(body); chat_->setObjectName(QStringLiteral("partyChat"));
         chat_->setOpenExternalLinks(false); chat_->setMinimumHeight(140); layout->addWidget(chat_, 1);
-        message_ = new QLineEdit(body); message_->setObjectName(QStringLiteral("partyMessage"));
-        message_->setPlaceholderText(QStringLiteral("Što želiš čuti? Kako je ekipi?")); message_->setMaxLength(1500); layout->addWidget(message_);
+        suggestions_ = new QStackedWidget(body); suggestions_->setObjectName(QStringLiteral("partySuggestions"));
+        suggestions_->setFixedHeight(204); suggestions_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        results_ = new QListWidget(suggestions_); results_->setObjectName(QStringLiteral("partyResults"));
+        results_->setWordWrap(false); results_->setTextElideMode(Qt::ElideRight);
+        results_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        results_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+        suggestions_->addWidget(results_);
+        suggestionHint_ = new QLabel(suggestions_); suggestionHint_->setObjectName(QStringLiteral("partySuggestionHint"));
+        suggestionHint_->setWordWrap(true); suggestionHint_->setTextFormat(Qt::PlainText);
+        suggestionHint_->setAlignment(Qt::AlignCenter); suggestionHint_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        suggestions_->addWidget(suggestionHint_);
+        selectedPage_ = new QWidget(suggestions_); selectedPage_->setObjectName(QStringLiteral("partySelectedSong"));
+        auto* selectedLayout = new QVBoxLayout(selectedPage_); selectedLayout->setContentsMargins(12, 10, 12, 10); selectedLayout->setSpacing(5);
+        selectedTitle_ = new QLabel(selectedPage_); selectedTitle_->setObjectName(QStringLiteral("partySelectedTitle"));
+        selectedTitle_->setTextFormat(Qt::PlainText); selectedTitle_->setWordWrap(true); selectedTitle_->setFixedHeight(58);
+        selectedTitle_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); selectedLayout->addWidget(selectedTitle_);
+        selectedArtist_ = new QLabel(selectedPage_); selectedArtist_->setObjectName(QStringLiteral("partySelectedArtist"));
+        selectedArtist_->setTextFormat(Qt::PlainText); selectedArtist_->setFixedHeight(29);
+        selectedArtist_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); selectedLayout->addWidget(selectedArtist_);
+        selectedLayout->addStretch(1);
+        cancelSong_ = new QPushButton(QStringLiteral("Odustani od pjesme"), selectedPage_);
+        cancelSong_->setObjectName(QStringLiteral("partyCancelSong")); selectedLayout->addWidget(cancelSong_);
+        suggestions_->addWidget(selectedPage_); layout->addWidget(suggestions_);
+        message_ = new QPlainTextEdit(body); message_->setObjectName(QStringLiteral("partyMessage"));
+        message_->setPlaceholderText(QStringLiteral("Magic box: pjesma, izvođač ili poruka DJ-u…"));
+        message_->setLineWrapMode(QPlainTextEdit::WidgetWidth); message_->setTabChangesFocus(true);
+        message_->setFixedHeight(142); layout->addWidget(message_);
+        magicHelp_ = new QLabel(body); magicHelp_->setObjectName(QStringLiteral("partyMagicHelp"));
+        magicHelp_->setWordWrap(true); magicHelp_->setTextFormat(Qt::PlainText); magicHelp_->setFixedHeight(58);
+        magicHelp_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); layout->addWidget(magicHelp_);
         send_ = new QPushButton(QStringLiteral("Pošalji poruku"), body); send_->setObjectName(QStringLiteral("partySendButton")); layout->addWidget(send_);
-        connect(message_, &QLineEdit::returnPressed, this, [this] { sendMessage(); });
-        connect(send_, &QPushButton::clicked, this, [this] { sendMessage(); });
+        searchDelay_.setSingleShot(true); searchDelay_.setInterval(330);
+        connect(message_, &QPlainTextEdit::textChanged, this, [this] { composerChanged(); });
+        connect(&searchDelay_, &QTimer::timeout, this, [this] { search(); });
+        connect(results_, &QListWidget::itemSelectionChanged, this, [this] { chooseSong(); });
+        connect(cancelSong_, &QPushButton::clicked, this, [this] { cancelSong(); });
+        connect(send_, &QPushButton::clicked, this, [this] { sendMagic(); });
+        auto* submit = new QAction(message_); submit->setObjectName(QStringLiteral("partySubmitAction"));
+        submit->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Return), QKeySequence(Qt::CTRL | Qt::Key_Enter)});
+        submit->setShortcutContext(Qt::WidgetWithChildrenShortcut); message_->addAction(submit);
+        connect(submit, &QAction::triggered, this, [this] { sendMagic(); });
         notice_ = new QLabel(QStringLiteral("Escape zatvara ovaj panel. Glazba ide dalje."), body);
-        notice_->setWordWrap(true); layout->addWidget(notice_);
+        notice_->setWordWrap(true); notice_->setTextFormat(Qt::PlainText); notice_->setFixedHeight(58);
+        notice_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); layout->addWidget(notice_);
+        updateComposerMode(); composerChanged();
         setWidget(body);
         chatPoll_.setInterval(1500);
         connect(&chatPoll_, &QTimer::timeout, this, [this] { fetchChat(); });
         connect(this, &QDockWidget::visibilityChanged, this, [this](bool visible) {
-            if (visible) { chatPoll_.start(); fetchChat(); search_->setFocus(); }
+            if (visible) { chatPoll_.start(); fetchChat(); message_->setFocus(); }
             else chatPoll_.stop();
         });
         window->addDockWidget(Qt::RightDockWidgetArea, this); hide();
@@ -269,11 +297,106 @@ public:
     QJsonObject status() const
     {
         return {{QStringLiteral("panelVisible"), isVisible()}, {QStringLiteral("chatCount"), messages_.size()},
-                {QStringLiteral("searchCount"), results_->count()}, {QStringLiteral("panelNotice"), notice_->text()}};
+                {QStringLiteral("searchCount"), results_->count()}, {QStringLiteral("panelNotice"), notice_->text()},
+                {QStringLiteral("composerMode"), selectedTrack_.isEmpty() ? QStringLiteral("message") : QStringLiteral("dedication")},
+                {QStringLiteral("suggestionState"), suggestionState_}, {QStringLiteral("selectedTrack"), text(selectedTrack_, "title")}};
+    }
+    QJsonObject draft() const
+    {
+        const auto cursor = message_->textCursor();
+        return {{QStringLiteral("text"), message_->toPlainText()}, {QStringLiteral("cursor"), cursor.position()},
+                {QStringLiteral("anchor"), cursor.anchor()}, {QStringLiteral("query"), savedQuery_},
+                {QStringLiteral("queryCursor"), savedQueryCursor_}, {QStringLiteral("queryAnchor"), savedQueryAnchor_},
+                {QStringLiteral("selectedTrack"), selectedTrack_}};
+    }
+    void restoreDraft(const QJsonObject& draft)
+    {
+        selectedTrack_ = draft.value(QStringLiteral("selectedTrack")).toObject();
+        if (text(selectedTrack_, "uri").isEmpty()) selectedTrack_ = {};
+        savedQuery_ = text(draft, "query");
+        savedQueryCursor_ = static_cast<int>(number(draft, "queryCursor", savedQuery_.size()));
+        savedQueryAnchor_ = static_cast<int>(number(draft, "queryAnchor", savedQueryCursor_));
+        setComposerText(text(draft, "text"), static_cast<int>(number(draft, "cursor", text(draft, "text").size())),
+                        static_cast<int>(number(draft, "anchor", number(draft, "cursor", text(draft, "text").size()))));
+        updateComposerMode(); composerChanged();
     }
 private:
     static QString uuid() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     QString name() const { return name_->text().trimmed().isEmpty() ? QStringLiteral("Gost") : name_->text().trimmed(); }
+    void setNotice(const QString& words)
+    {
+        notice_->setToolTip(words);
+        notice_->setText(QFontMetrics(stageFont(23)).elidedText(words, Qt::ElideRight, 820));
+    }
+    void suggestionHint(const QString& words, const QString& state)
+    {
+        suggestionHint_->setText(words); suggestionHint_->setToolTip(words);
+        suggestions_->setCurrentWidget(suggestionHint_); suggestionState_ = state;
+    }
+    void setComposerText(const QString& words, int position, int anchor)
+    {
+        const QSignalBlocker block(message_);
+        message_->setPlainText(words);
+        auto cursor = message_->textCursor();
+        cursor.setPosition(std::clamp(anchor, 0, static_cast<int>(words.size())));
+        cursor.setPosition(std::clamp(position, 0, static_cast<int>(words.size())), QTextCursor::KeepAnchor);
+        message_->setTextCursor(cursor);
+    }
+    void updateComposerMode()
+    {
+        const bool song = !selectedTrack_.isEmpty();
+        message_->setPlaceholderText(song ? QStringLiteral("Posveta uz pjesmu (po želji)…")
+                                         : QStringLiteral("Magic box: pjesma, izvođač ili poruka DJ-u…"));
+        magicHelp_->setText(song ? QStringLiteral("Posveta uz pjesmu (po želji).\nCtrl+Enter ili gumb šalju pjesmu.")
+                                : QStringLiteral("Odaberi pjesmu ili piši DJ-u.\nEnter: novi red · Ctrl+Enter: slanje"));
+        send_->setText(song ? QStringLiteral("Pošalji pjesmu") : QStringLiteral("Pošalji poruku"));
+        const bool busy = requestBusy_ || messageBusy_;
+        send_->setEnabled(!busy && (song || !message_->toPlainText().trimmed().isEmpty()));
+        cancelSong_->setEnabled(!busy);
+        if (song) {
+            const QFontMetrics fm(stageFont(23));
+            selectedTitle_->setText(fm.elidedText(text(selectedTrack_, "title"), Qt::ElideRight, 400));
+            selectedTitle_->setToolTip(text(selectedTrack_, "title"));
+            selectedArtist_->setText(fm.elidedText(text(selectedTrack_, "artist"), Qt::ElideRight, 400));
+            selectedArtist_->setToolTip(text(selectedTrack_, "artist"));
+            suggestions_->setCurrentWidget(selectedPage_); suggestionState_ = QStringLiteral("selected");
+        }
+    }
+    void composerChanged()
+    {
+        ++searchVersion_; updateComposerMode();
+        if (!selectedTrack_.isEmpty()) { searchDelay_.stop(); return; }
+        { const QSignalBlocker block(results_); results_->clear(); }
+        if (message_->toPlainText().trimmed().size() < 2) {
+            searchDelay_.stop();
+            suggestionHint(QStringLiteral("Ovdje se pojavljuju pjesme.\nPoruku možeš odmah poslati DJ-u."), QStringLiteral("empty"));
+        } else {
+            suggestionHint(QStringLiteral("Tražim pjesme…\nPoruku možeš odmah poslati DJ-u."), QStringLiteral("loading"));
+            searchDelay_.start();
+        }
+    }
+    void chooseSong()
+    {
+        if (requestBusy_ || messageBusy_ || !selectedTrack_.isEmpty() || !results_->currentItem() || results_->selectedItems().isEmpty()) return;
+        const auto track = QJsonObject::fromVariantMap(results_->currentItem()->data(Qt::UserRole).toMap());
+        if (text(track, "uri").isEmpty()) return;
+        savedQuery_ = message_->toPlainText();
+        savedQueryCursor_ = message_->textCursor().position(); savedQueryAnchor_ = message_->textCursor().anchor();
+        selectedTrack_ = track; ++searchVersion_; searchDelay_.stop(); setComposerText(QString(), 0, 0);
+        updateComposerMode(); setNotice(QStringLiteral("Pjesma je odabrana. Možeš dodati posvetu.")); message_->setFocus();
+    }
+    void cancelSong()
+    {
+        if (requestBusy_ || messageBusy_) return;
+        selectedTrack_ = {};
+        setComposerText(savedQuery_, savedQueryCursor_, savedQueryAnchor_); savedQuery_.clear();
+        updateComposerMode(); composerChanged(); setNotice(QStringLiteral("Pjesma nije poslana. Upit je vraćen.")); message_->setFocus();
+    }
+    void sendMagic()
+    {
+        if (requestBusy_ || messageBusy_) return;
+        selectedTrack_.isEmpty() ? sendMessage() : requestTrack();
+    }
     using Done = std::function<void(QJsonObject, QString)>;
     void call(const QString& path, const QJsonObject* data, Done done)
     {
@@ -292,41 +415,56 @@ private:
     }
     void search()
     {
-        const QString query = search_->text().trimmed();
-        if (query.size() < 2) { results_->clear(); return; }
+        if (!selectedTrack_.isEmpty()) return;
+        const QString query = message_->toPlainText().simplified().left(160);
+        if (query.size() < 2) return;
         const quint64 version = searchVersion_;
         QUrlQuery args; args.addQueryItem(QStringLiteral("q"), query);
-        notice_->setText(QStringLiteral("Tražim pjesme…"));
         call(QStringLiteral("/api/search?") + args.toString(QUrl::FullyEncoded), nullptr, [this, version](QJsonObject data, QString error) {
-            if (version != searchVersion_) return;
+            if (version != searchVersion_ || !selectedTrack_.isEmpty()) return;
+            const QSignalBlocker block(results_);
             results_->clear();
-            if (!error.isEmpty()) { notice_->setText(error); return; }
+            if (!error.isEmpty()) {
+                suggestionHint(QStringLiteral("Pretraga trenutačno ne radi.\nPoruku i dalje možeš poslati DJ-u."), QStringLiteral("error"));
+                setNotice(error); return;
+            }
+            const QFontMetrics fm(stageFont(23));
+            // The results page can still be hidden while its first reply arrives.
+            // Measure its already-laid-out stack so the first titles are not
+            // elided to a hidden viewport's initial size.
+            const int width = std::max(120, suggestions_->width() - 46);
             for (const auto& value : data.value(QStringLiteral("tracks")).toArray()) {
                 const QJsonObject track = value.toObject();
-                auto* item = new QListWidgetItem(text(track, "title") + QStringLiteral("\n") + text(track, "artist"), results_);
+                auto* item = new QListWidgetItem(fm.elidedText(text(track, "title"), Qt::ElideRight, width)
+                    + QStringLiteral("\n") + fm.elidedText(text(track, "artist"), Qt::ElideRight, width), results_);
                 item->setData(Qt::UserRole, track.toVariantMap());
-                item->setToolTip(text(track, "album"));
+                item->setToolTip(text(track, "title") + QStringLiteral("\n") + text(track, "artist"));
+                item->setSizeHint(QSize(0, 76));
             }
-            notice_->setText(results_->count() ? QStringLiteral("Odaberi pjesmu i pošalji DJ-u.") : QStringLiteral("Nema rezultata. Probaj naslov ili izvođača."));
-            if (results_->count()) results_->setCurrentRow(0);
+            results_->setCurrentRow(-1);
+            if (results_->count()) { suggestions_->setCurrentWidget(results_); suggestionState_ = QStringLiteral("results"); }
+            else suggestionHint(QStringLiteral("Nema pjesama za taj upit.\nPoruku možeš poslati DJ-u."), QStringLiteral("empty"));
         });
     }
     void requestTrack()
     {
-        if (requestBusy_ || !results_->currentItem()) return;
-        const auto track = QJsonObject::fromVariantMap(results_->currentItem()->data(Qt::UserRole).toMap());
-        const QString uri = text(track, "uri"); if (uri.isEmpty()) return;
-        const QString signature = uri + QChar('\n') + name() + QChar('\n') + dedication_->text();
+        if (requestBusy_ || selectedTrack_.isEmpty()) return;
+        const QString uri = text(selectedTrack_, "uri"); if (uri.isEmpty()) return;
+        const QString words = message_->toPlainText().trimmed();
+        if (words.size() > 240) { setNotice(QStringLiteral("Posveta može imati do 240 znakova.")); return; }
+        const QString signature = uri + QChar('\n') + name() + QChar('\n') + words;
         if (signature != lastRequestSignature_) { requestId_ = uuid(); lastRequestSignature_ = signature; }
         QJsonObject data{{QStringLiteral("requestId"), requestId_}, {QStringLiteral("uri"), uri},
-                         {QStringLiteral("requestedBy"), name()}, {QStringLiteral("dedication"), dedication_->text().trimmed()}};
-        requestBusy_ = true; request_->setEnabled(false); notice_->setText(QStringLiteral("Šaljem zahtjev…"));
-        call(QStringLiteral("/api/request"), &data, [this, title = text(track, "title")](QJsonObject data, QString error) {
-            requestBusy_ = false; request_->setEnabled(results_->currentItem());
-            if (!error.isEmpty()) { notice_->setText(error); return; }
+                         {QStringLiteral("requestedBy"), name()}, {QStringLiteral("dedication"), words}};
+        requestBusy_ = true; updateComposerMode(); setNotice(QStringLiteral("Šaljem pjesmu i posvetu…"));
+        call(QStringLiteral("/api/request"), &data, [this, title = text(selectedTrack_, "title"), words](QJsonObject data, QString error) {
+            requestBusy_ = false;
+            if (!error.isEmpty()) { updateComposerMode(); setNotice(error); return; }
             const QString status = text(data, "status", text(data.value(QStringLiteral("request")).toObject(), "status"));
-            notice_->setText(title + (status == QStringLiteral("queued") ? QStringLiteral(" · dodano u red.") : QStringLiteral(" · zahtjev je stigao DJ-u.")));
-            dedication_->clear(); lastRequestSignature_.clear();
+            setNotice(title + (status == QStringLiteral("queued") ? QStringLiteral(" · dodano u red.") : QStringLiteral(" · zahtjev je stigao DJ-u.")));
+            selectedTrack_ = {}; savedQuery_.clear(); lastRequestSignature_.clear();
+            if (message_->toPlainText().trimmed() == words) setComposerText(QString(), 0, 0);
+            updateComposerMode(); composerChanged();
         });
     }
     void appendMessages(const QJsonArray& incoming)
@@ -375,28 +513,35 @@ private:
     }
     void sendMessage()
     {
-        const QString words = message_->text().trimmed(); if (messageBusy_ || words.isEmpty()) return;
+        const QString words = message_->toPlainText().trimmed(); if (messageBusy_ || words.isEmpty()) return;
+        if (words.size() > 1500) { setNotice(QStringLiteral("Poruka može imati do 1500 znakova.")); return; }
         if (words != lastMessage_) { messageId_ = uuid(); lastMessage_ = words; }
         const QJsonObject data{{QStringLiteral("guestId"), guestId_}, {QStringLiteral("name"), name()},
                               {QStringLiteral("text"), words}, {QStringLiteral("requestId"), messageId_}};
-        messageBusy_ = true; send_->setEnabled(false);
+        messageBusy_ = true; updateComposerMode();
         call(QStringLiteral("/api/message"), &data, [this, words](QJsonObject data, QString error) {
-            messageBusy_ = false; send_->setEnabled(true);
-            if (!error.isEmpty()) { notice_->setText(error); return; }
+            messageBusy_ = false; updateComposerMode();
+            if (!error.isEmpty()) { setNotice(error); return; }
             appendMessages(QJsonArray{data.value(QStringLiteral("message"))});
-            if (message_->text().trimmed() == words) message_->clear();
-            lastMessage_.clear(); notice_->setText(QStringLiteral("Poruka je stigla. Odgovor DJ-a pojavit će se ovdje.")); fetchChat();
+            if (message_->toPlainText().trimmed() == words) message_->clear();
+            lastMessage_.clear(); setNotice(QStringLiteral("Poruka je stigla DJ-u. Odgovor dolazi ovdje.")); fetchChat();
         });
     }
     QNetworkAccessManager network_{this};
     QTimer searchDelay_, chatPoll_;
     QUrl base_{QStringLiteral("http://127.0.0.1:8787")};
-    QLineEdit *name_, *search_, *dedication_, *message_;
+    QLineEdit* name_;
+    QPlainTextEdit* message_;
     QListWidget* results_;
-    QPushButton *request_, *send_;
-    QLabel *presence_, *notice_;
+    QStackedWidget* suggestions_;
+    QWidget* selectedPage_;
+    QPushButton *send_, *cancelSong_;
+    QLabel *presence_, *notice_, *suggestionHint_, *selectedTitle_, *selectedArtist_, *magicHelp_;
     QTextBrowser* chat_;
     QString guestId_, cursor_, requestId_, lastRequestSignature_, messageId_, lastMessage_;
+    QString savedQuery_, suggestionState_;
+    int savedQueryCursor_ = 0, savedQueryAnchor_ = 0;
+    QJsonObject selectedTrack_;
     QJsonArray messages_;
     QSet<QString> messageIds_;
     quint64 searchVersion_ = 0;
@@ -570,6 +715,12 @@ public:
             desk_ = new RequestDesk(window); desk_->setBase(requestUrl());
         }
         desk_->setVisible(visible);
+    }
+    QJsonObject composerDraft() const { return desk_ ? desk_->draft() : QJsonObject(); }
+    void restoreComposerDraft(const QJsonObject& draft)
+    {
+        if (!desk_) showRequests(true);
+        if (desk_) desk_->restoreDraft(draft);
     }
 protected:
     void showEvent(QShowEvent* e) override { frame_.start(); QWidget::showEvent(e); }
@@ -812,13 +963,15 @@ private:
         const double widest = std::min(w * .79, 1000 * u);
         const QRectF bounds = fm.boundingRect(QRectF(0, 0, widest - 54 * u, h * .32), Qt::TextWordWrap | Qt::AlignCenter, cue_.text);
         const double width = std::min(widest, std::max(360 * u, bounds.width() + 54 * u));
-        const double height = bounds.height() + 36 * u;
+        const double height = std::min(128 * u, bounds.height() + 36 * u);
         return QRectF((w - width) / 2, h - 77 * u - height, width, height);
     }
     double graphicsBottom(double w, double h, double u) const
     {
-        const QRectF caption = captionRect(w, h, u);
-        return std::min(h - 54 * u, caption.isEmpty() ? h : caption.top() - 14 * u);
+        Q_UNUSED(w);
+        // Reserve the caption band even between cues so photographs and robot
+        // paths never resize or jump when a caption appears or wraps differently.
+        return h - (77 + 128 + 14) * u;
     }
     void drawCaption(QPainter& p, double w, double h, double u, QColor white, QColor orange)
     {
@@ -826,12 +979,15 @@ private:
         const double age = seconds() - cueStart_;
         const double opacity = std::min(smooth(age / .6), smooth((cue_.seconds - age) / .65));
         p.save(); p.setOpacity(opacity);
-        p.setFont(stageFont(24 * u, true));
         const QRectF card = captionRect(w, h, u);
+        const QRectF words = card.adjusted(27 * u, 18 * u, -27 * u, -18 * u);
+        QFont font = stageFont(24 * u, true);
+        while (font.pixelSize() > 12 && QFontMetricsF(font).boundingRect(words, Qt::AlignCenter | Qt::TextWordWrap, cue_.text).height() > words.height())
+            font.setPixelSize(font.pixelSize() - 1);
+        p.setFont(font);
         panel(p, card, orange, .93);
         p.setPen(white);
-        p.drawText(card.adjusted(27 * u, 18 * u, -27 * u, -18 * u),
-                   Qt::AlignCenter | Qt::TextWordWrap, cue_.text);
+        p.drawText(words, Qt::AlignCenter | Qt::TextWordWrap, cue_.text);
         p.restore();
     }
     void drawDelivery(QPainter& p, double w, double h, double u, double t,
@@ -876,7 +1032,7 @@ private:
         const auto book = state_.value(QStringLiteral("bookMoment")).toObject();
         const qint64 expires = static_cast<qint64>(number(book, "expiresAt", 0));
         if (book_.isNull() || (expires > 0 && QDateTime::currentMSecsSinceEpoch() >= expires)) return {};
-        const double top = std::max(h * .275, 230 * u);
+        const double top = 230 * u;
         const double cardWidth = std::min(w - 68 * u, w * .44 * graphicsScale());
         const double cardHeight = std::min(h * .405 * graphicsScale(), graphicsBottom(w, h, u) - top);
         if (cardHeight < 100 * u) return {};
@@ -939,6 +1095,7 @@ void run(const RuntimeAgentHost* host)
     else if (request.contains(QStringLiteral("stateFile"))) stage->setStateFile(text(request, "stateFile"));
     if (request.contains(QStringLiteral("state"))) stage->applyState(request.value(QStringLiteral("state")).toObject());
     if (request.contains(QStringLiteral("requestBaseUrl"))) stage->setRequestBaseUrl(text(request, "requestBaseUrl"));
+    if (request.contains(QStringLiteral("composerDraft"))) stage->restoreComposerDraft(request.value(QStringLiteral("composerDraft")).toObject());
     if (request.contains(QStringLiteral("panel"))) stage->showRequests(request.value(QStringLiteral("panel")).toBool());
     if (request.contains(QStringLiteral("fullscreen"))) {
         request.value(QStringLiteral("fullscreen")).toBool() ? cube->window()->showFullScreen() : cube->window()->showNormal();
@@ -947,7 +1104,9 @@ void run(const RuntimeAgentHost* host)
         const QString filename = text(request, "capture");
         if (!cube->window()->grab().save(filename)) { host->fail(host->invocation_context, "Could not save the party window capture"); return; }
     }
-    host->complete_json(host->invocation_context, QJsonDocument(stage->status()).toJson(QJsonDocument::Compact).constData());
+    QJsonObject result = stage->status();
+    if (request.value(QStringLiteral("getComposerDraft")).toBool()) result.insert(QStringLiteral("composerDraft"), stage->composerDraft());
+    host->complete_json(host->invocation_context, QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
 }
 const RuntimeAgentSnippet descriptor{RUNTIME_AGENT_ABI, sizeof(RuntimeAgentSnippet), "LARICS / LYRICS party stage", &run, &release};
 } // namespace

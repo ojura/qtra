@@ -63,15 +63,27 @@ native overlay and request panel. `restore:true` releases the stage. Every run
 returns its current revision, scene, effect, cue, pending cue count, loaded image
 status, panel state, and state-file or missing-effect errors.
 
+`getComposerDraft:true` also returns `composerDraft`, containing the multiline
+text, cursor/anchor positions, selected track and saved query. Pass that object
+as `composerDraft` to restore the active Magic box intent during a hot reload.
+The name field remains `partyName`; the composer is `partyMessage` and exposes
+Qt's `plainText` property.
+
 ## Guest controls
 
 - Click **Zatraži pjesmu · R**, or press **R**, to open the native request and chat
-  panel. Search by song or artist, select a result, and send it to the DJ. A name
-  and dedication are optional.
-- The conversation displays messages returned by the live service. Enter a
-  message and press Return or **Pošalji poruku**. The DJ's actual reply appears in
-  the same conversation. The panel uses 18-pixel text for readable chat, inputs,
-  search results and buttons, with a larger heading.
+  panel. Its bottom **Magic box** accepts a song, artist, or a message to the DJ.
+  Typing shows debounced song results above the box; **Pošalji poruku** always
+  sends chat until a song is explicitly selected.
+- Selecting a result shows the chosen song in the same reserved area and turns
+  the box into an optional dedication. **Pošalji pjesmu** sends that song and
+  dedication. **Odustani od pjesme** restores the original query and cursor.
+- **Enter** adds a new line. **Ctrl+Enter** and the Send button submit the current
+  message or selected song. The multiline composer wraps and displays about four
+  lines; the panel uses 23-pixel text. Incoming DJ replies stay in the transcript.
+- The sidebar is 480 pixels wide. Its suggestion area, composer, help and status
+  rows keep their allocated bounds through loading, selection, empty results and
+  errors. Long titles are elided with full text available in tooltips.
 - **Escape** closes the panel first, then leaves fullscreen on the next press.
 - **F11** toggles fullscreen.
 - The QR opens the separate guest page on phones. The native panel uses the
@@ -111,10 +123,14 @@ the main accent to cyan; other values use warm orange.
 `scene.graphicsScale` defaults to 1. It scales the robot fleet, delivered records,
 and book/photo cards immediately; 1.5 makes the graphics fifty percent larger.
 The stage reports the applied value as `graphicsScale` in runtime status. Photo
-cards fit between the header and the current caption, and idle robots move into
+cards fit between the header and the reserved caption band. Idle robots move into
 the side margins while a book image is visible. Large delivery robots fit within
 those same vertical bounds. Labels grow with the robots. The request controls,
 QR and current-track panel keep their readable size.
+
+The caption band is reserved even between cues. Book images and robot paths keep
+the same bounds when a caption appears, disappears or wraps onto more lines.
+Long captions fit within that band by reducing their own font size.
 
 The effect index controls existing qtra geometry independently of the stage mode:
 
@@ -164,7 +180,10 @@ python3 -m unittest discover -s tests -p test_party_stage.py -v
 The integration test owns an Xvfb display, qtra process, and HTTP fixture. It
 exercises atomic state replacement, caption dwell and deduplication, recovery
 from invalid JSON, real named-action changes, native search and request widgets,
-outgoing chat, incoming replies, and complete stage release. Set
+multiline chat and dedications, query restoration, failed-send retries, stale
+search replies, fixed Magic box bounds, real Enter/Ctrl+Enter keyboard behavior,
+incoming replies, and complete stage release. The keyboard checks use `xdotool`
+on the test's private X display. Set
 `PARTY_STAGE_CAPTURE` to an absolute PNG path to inspect the actual window.
 
 ## Source context

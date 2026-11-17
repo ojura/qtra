@@ -41,9 +41,17 @@ class Service(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlsplit(self.path)
         if url.path == "/api/search":
-            self.server.searches.append(parse_qs(url.query)["q"][0])
+            query = parse_qs(url.query)["q"][0]
+            self.server.searches.append(query)
+            if query == "offline":
+                return self.reply({"error": "Search unavailable"})
+            if query == "slow":
+                time.sleep(.7)
+            title = "Robot karaoke" if query == "robot" else f"Song {query}"
+            if query == "long":
+                title = "A very long song title " * 25
             return self.reply({"tracks": [{"id": "test", "uri": "spotify:track:test",
-                                           "title": "Robot karaoke", "artist": "LARICS house band",
+                                           "title": title, "artist": "LARICS house band",
                                            "album": "After hours", "durationMs": 180000}]})
         if url.path == "/api/chat":
             after = int(parse_qs(url.query).get("after", [0])[0])
@@ -54,9 +62,17 @@ class Service(BaseHTTPRequestHandler):
     def do_POST(self):
         data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/api/request":
+            self.server.request_attempts.append(data)
+            if self.server.reject_requests:
+                self.server.reject_requests -= 1
+                return self.reply({"error": "Request interrupted; try again"})
             self.server.requests.append(data)
             return self.reply({"status": "queued"})
         if self.path == "/api/message":
+            self.server.message_attempts.append(data)
+            if self.server.reject_messages:
+                self.server.reject_messages -= 1
+                return self.reply({"error": "Message interrupted; try again"})
             self.server.posts.append(data)
             message = {"id": len(self.server.messages) + 1, "role": "user",
                        "name": data["name"], "text": data["text"], "createdAt": int(time.time() * 1000)}
@@ -79,6 +95,7 @@ class PartyStage(unittest.TestCase):
         self.addCleanup(self.display.stop)
         environment = child_environment(self.display)
         environment["XDG_CONFIG_HOME"] = str(self.folder / "config")
+        self.environment = environment
         self.log = (self.folder / "qtra.log").open("w+")
         self.addCleanup(self.log.close)
         self.process = subprocess.Popen([str(BUILD / "qt_runtime_cube"), "--agent-socket", str(self.folder / "agent.sock")],
@@ -104,6 +121,8 @@ class PartyStage(unittest.TestCase):
             self.assertEqual(finished["outcome"], "completed", finished)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Service)
         self.server.searches, self.server.requests, self.server.posts = [], [], []
+        self.server.request_attempts, self.server.message_attempts = [], []
+        self.server.reject_requests = self.server.reject_messages = 0
         self.server.messages = [{"id": 1, "role": "assistant", "name": "DJ",
                                  "text": "Welcome to the lab. What should play next?", "createdAt": int(time.time() * 1000)}]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -152,7 +171,23 @@ class PartyStage(unittest.TestCase):
         self.fail(message)
 
     def set_text(self, object_name, value):
-        self.client.request("object.set", {"objectName": object_name, "property": "text", "value": value})
+        prop = "plainText" if object_name == "partyMessage" else "text"
+        self.client.request("object.set", {"objectName": object_name, "property": prop, "value": value})
+
+    def composer_text(self):
+        return self.client.request("object.get", {"objectName": "partyMessage", "property": "plainText"})
+
+    def magic_bounds(self):
+        return {name: self.client.request("object.get", {"objectName": name, "property": "geometry"})
+                for name in ("partyRequestPanel", "partySuggestions", "partyMessage", "partyMagicHelp", "partySendButton")}
+
+    def key(self, combination):
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        self.assertTrue(windows)
+        subprocess.run(["xdotool", "windowfocus", windows[-1]], env=self.environment, check=True)
+        self.client.request("object.invoke", {"objectName": "partyMessage", "method": "setFocus"})
+        subprocess.run(["xdotool", "key", "--clearmodifiers", combination], env=self.environment, check=True)
 
     def test_live_state_caption_dwell_requests_chat_and_release(self):
         first = self.run_stage(stateFile=str(self.state_file), fullscreen=True)
@@ -196,24 +231,70 @@ class PartyStage(unittest.TestCase):
         self.write_state()
         self.eventually(lambda: not checked("actionOrbitSphere") and checked("actionMobiusRing") and checked("actionWireframe"), "scene handover did not change the real actions")
         self.assertEqual(self.run_stage()["effectError"], "")
+        self.eventually(lambda: self.run_stage()["captionId"] == "two", "the second caption never got its full turn")
 
         self.run_stage(panel=True)
         self.eventually(lambda: self.run_stage()["chatCount"] == 1, "actual DJ chat was not fetched")
+        bounds = self.magic_bounds()
         self.set_text("partyName", "Guest test")
-        self.set_text("partySearch", "robot")
+        self.set_text("partyMessage", "slow")
+        self.eventually(lambda: "slow" in self.server.searches, "slow search did not start")
+        self.set_text("partyMessage", "long")
+        self.eventually(lambda: self.run_stage()["suggestionState"] == "results", "replacement search did not complete")
+        time.sleep(.75)
+        self.assertEqual(self.magic_bounds(), bounds, "search results changed the Magic box bounds")
+        self.client.request("object.set", {"objectName": "partyResults", "property": "currentRow", "value": 0})
+        self.assertTrue(self.run_stage()["selectedTrack"].startswith("A very long song title"), "a stale search replaced current results")
+        self.assertEqual(self.run_stage()["composerMode"], "dedication")
+        self.assertEqual(self.composer_text(), "")
+        self.assertFalse(self.server.requests, "selecting a song submitted it without consent")
+        self.assertEqual(self.magic_bounds(), bounds, "song selection changed the Magic box bounds")
+        self.client.request("widget.click", {"objectName": "partyCancelSong"})
+        self.assertEqual(self.composer_text(), "long", "cancel did not restore the search draft")
+        self.assertEqual(self.run_stage()["composerMode"], "message")
+
+        self.set_text("partyMessage", "robot")
         self.eventually(lambda: self.run_stage()["searchCount"] == 1, "search response was not displayed")
-        self.assertEqual(self.server.searches, ["robot"])
-        self.client.request("widget.click", {"objectName": "partyRequestButton"})
+        self.client.request("object.set", {"objectName": "partyResults", "property": "currentRow", "value": 0})
+        self.assertEqual(self.run_stage()["composerMode"], "dedication")
+        dedication = "Za cijelu ekipu.\nI robote koji još plešu."
+        self.set_text("partyMessage", dedication)
+        self.server.reject_requests = 1
+        self.client.request("widget.click", {"objectName": "partySendButton"})
+        self.eventually(lambda: "interrupted" in self.run_stage()["panelNotice"], "failed song request was not reported")
+        self.assertEqual(self.composer_text(), dedication, "failed request lost its dedication")
+        self.assertEqual(self.run_stage()["composerMode"], "dedication")
+        self.assertEqual(self.magic_bounds(), bounds, "request failure changed the Magic box bounds")
+        self.client.request("widget.click", {"objectName": "partySendButton"})
         self.eventually(lambda: len(self.server.requests) == 1, "request button did not send a song")
         self.assertEqual(self.server.requests[0]["uri"], "spotify:track:test")
         self.assertEqual(self.server.requests[0]["requestedBy"], "Guest test")
-        self.assertTrue(self.server.requests[0]["requestId"])
-        self.set_text("partyMessage", "More groove, please <3")
-        self.client.request("widget.click", {"objectName": "partySendButton"})
+        self.assertEqual(self.server.requests[0]["dedication"], dedication)
+        self.assertEqual(self.server.request_attempts[0]["requestId"], self.server.request_attempts[1]["requestId"])
+        self.eventually(lambda: self.composer_text() == "" and self.run_stage()["composerMode"] == "message", "successful song send did not reset the composer")
+
+        self.set_text("partyMessage", "offline")
+        self.eventually(lambda: self.run_stage()["suggestionState"] == "error", "search failure was not shown")
+        self.assertEqual(self.magic_bounds(), bounds, "search failure changed the Magic box bounds")
+        prefix = "More groove, please <3"
+        self.run_stage(composerDraft={"text": prefix, "cursor": len(prefix), "anchor": len(prefix)})
+        self.key("Return")
+        self.eventually(lambda: self.composer_text() == prefix + "\n", "Enter did not insert a newline")
+        self.assertFalse(self.server.posts, "plain Enter sent a message")
+        message = prefix + "\nAnd something Croatian."
+        self.run_stage(composerDraft={"text": message, "cursor": len(message), "anchor": len(message)})
+        self.server.reject_messages = 1
+        self.key("ctrl+Return")
+        self.eventually(lambda: "Message interrupted" in self.run_stage()["panelNotice"], "Ctrl+Enter did not attempt chat submission")
+        self.assertEqual(self.composer_text(), message, "failed chat submission lost the multiline draft")
+        self.key("ctrl+Return")
         self.eventually(lambda: len(self.server.posts) == 1, "composer did not send the guest message")
+        self.assertEqual(self.server.posts[0]["text"], message, "multiline text was changed during submission")
+        self.assertEqual(self.server.message_attempts[0]["requestId"], self.server.message_attempts[1]["requestId"])
+        self.eventually(lambda: self.composer_text() == "", "successful message did not clear the composer")
+        self.assertEqual(self.magic_bounds(), bounds, "chat submission changed the Magic box bounds")
         self.server.messages.append({"id": 3, "role": "assistant", "name": "DJ", "text": "Groove is on its way.", "createdAt": int(time.time() * 1000)})
         self.eventually(lambda: self.run_stage()["chatCount"] == 3, "the real reply did not appear or a message was duplicated")
-        self.eventually(lambda: self.run_stage()["captionId"] == "two", "the second caption never got its full turn")
         capture = os.environ.get("PARTY_STAGE_CAPTURE")
         if capture:
             self.run_stage(capture=capture)
