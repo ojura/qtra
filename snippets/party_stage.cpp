@@ -104,14 +104,15 @@ QFont uiFont(double scale, int pixels = UiMetrics::body, bool bold = false)
 {
     return stageFont(pixels * scale / UiMetrics::reference, bold);
 }
-enum class GuestShortcut : std::size_t { Spotify, Playback, Search, Previous, Next, Count };
+enum class GuestShortcut : std::size_t { Spotify, Playback, Search, Previous, Next, Lyrics, Count };
 struct ShortcutSpec { const char* objectName; const char* key; const char* label; const char* alias; };
 constexpr std::array<ShortcutSpec, static_cast<std::size_t>(GuestShortcut::Count)> guestShortcuts{{
     {"partySpotifyAction", "Tab", "Spotify", ""},
     {"partyPlaybackAction", "Ctrl+P", "Pauza", ""},
     {"partyRequestAction", "Ctrl+K", "Traži", "R"},
     {"partyPreviousAction", "Ctrl+B", "Natrag", ""},
-    {"partyNextAction", "Ctrl+N", "Dalje", ""}
+    {"partyNextAction", "Ctrl+N", "Dalje", ""},
+    {"partyLyricsAction", "Ctrl+L", "Stihovi", ""}
 }};
 const ShortcutSpec& shortcutSpec(GuestShortcut kind) { return guestShortcuts[static_cast<std::size_t>(kind)]; }
 QString shortcutKey(GuestShortcut kind)
@@ -120,7 +121,7 @@ QString shortcutKey(GuestShortcut kind)
 }
 QString controlStyle(double scale, int pixels = UiMetrics::body)
 {
-    return QStringLiteral("QPushButton { font:600 %1px 'DejaVu Sans'; color:#ddfff4; background:#1b4a44; border:1px solid #6bc6ab; border-radius:%2px; padding:%3px; } QPushButton:disabled { color:#aab5c5; background:#263141; border-color:#536174; } QPushButton:hover:enabled { background:#276258; }")
+    return QStringLiteral("QPushButton { font:600 %1px 'DejaVu Sans'; color:#ddfff4; background:#1b4a44; border:1px solid #6bc6ab; border-radius:%2px; padding:%3px; } QPushButton:disabled { color:#aab5c5; background:#263141; border-color:#536174; } QPushButton:hover:enabled { background:#276258; } QPushButton:checked { color:#fff1d9; background:#654a29; border-color:#ffd089; }")
         .arg(uiFont(scale, pixels).pixelSize()).arg(std::max(3, qRound(6 * scale))).arg(std::max(1, qRound(2 * scale)));
 }
 double requestCardWidth(double width, double scale)
@@ -1401,6 +1402,9 @@ public:
         playbackAction_ = createShortcut(GuestShortcut::Playback, [this] { setPlaybackPaused(); });
         previousAction_ = createShortcut(GuestShortcut::Previous, [this] { navigatePlayback(QStringLiteral("previous")); });
         nextAction_ = createShortcut(GuestShortcut::Next, [this] { navigatePlayback(QStringLiteral("next")); });
+        lyricsMode_ = window->property("partyLyricsMode").toBool();
+        lyricsAction_ = createShortcut(GuestShortcut::Lyrics, [this] { setLyricsMode(!lyricsMode_); });
+        lyricsAction_->setCheckable(true); lyricsAction_->setChecked(lyricsMode_);
         if (auto* main = qobject_cast<QMainWindow*>(window)) {
             menuWasVisible_ = main->menuBar()->isVisible(); statusWasVisible_ = main->statusBar()->isVisible();
             main->menuBar()->hide(); main->statusBar()->hide();
@@ -1466,7 +1470,7 @@ public:
             if (auto* main = qobject_cast<QMainWindow*>(cube_->window())) {
                 main->menuBar()->setVisible(menuWasVisible_); main->statusBar()->setVisible(statusWasVisible_);
             }
-            for (QAction* a : {requestAction_, fullAction_, escapeAction_, spotifyAction_, returnAction_, playbackAction_, previousAction_, nextAction_}) cube_->window()->removeAction(a);
+            for (QAction* a : {requestAction_, fullAction_, escapeAction_, spotifyAction_, returnAction_, playbackAction_, previousAction_, nextAction_, lyricsAction_}) cube_->window()->removeAction(a);
         }
     }
     void setStateFile(const QString& file) { stateFile_ = file; bytes_.clear(); readState(); }
@@ -1569,6 +1573,7 @@ public:
             shortcutStatus.append(QJsonObject{{QStringLiteral("action"), action->objectName()},
                 {QStringLiteral("key"), action->shortcut().toString(QKeySequence::NativeText)},
                 {QStringLiteral("label"), button ? button->text() : QString()}, {QStringLiteral("enabled"), action->isEnabled()},
+                {QStringLiteral("checked"), action->isChecked()},
                 {QStringLiteral("autoRepeat"), action->autoRepeat()},
                 {QStringLiteral("bounds"), QJsonArray{bounds.x(), bounds.y(), bounds.width(), bounds.height()}}});
         }
@@ -1587,13 +1592,16 @@ public:
             for (auto it = values.begin(); it != values.end(); ++it) result.insert(it.key(), it.value());
         }
         const auto karaoke = karaokeFrame();
-        QJsonObject singing{{QStringLiteral("active"), karaoke.visible}, {QStringLiteral("positionMs"), karaoke.position},
+        QJsonObject singing{{QStringLiteral("active"), karaoke.visible && karaoke.available}, {QStringLiteral("mode"), lyricsMode_},
+            {QStringLiteral("panelVisible"), karaoke.visible}, {QStringLiteral("available"), karaoke.available},
+            {QStringLiteral("manual"), karaoke.manual}, {QStringLiteral("title"), karaoke.title}, {QStringLiteral("reason"), karaoke.reason},
+            {QStringLiteral("positionMs"), karaoke.position},
             {QStringLiteral("status"), karaoke.status}, {QStringLiteral("phase"), karaoke.phase},
             {QStringLiteral("clockState"), karaoke.clockState},
             {QStringLiteral("countInMs"), karaoke.countIn},
             {QStringLiteral("lineIndex"), karaoke.lineIndex}, {QStringLiteral("syllableIndex"), karaoke.syllableIndex},
             {QStringLiteral("text"), text(karaoke.line, "text")}, {QStringLiteral("nextText"), text(karaoke.next, "text")}};
-        for (auto it = karaokeGeometry_.begin(); it != karaokeGeometry_.end(); ++it) singing.insert(it.key(), it.value());
+        if (karaoke.visible) for (auto it = karaokeGeometry_.begin(); it != karaokeGeometry_.end(); ++it) singing.insert(it.key(), it.value());
         result.insert(QStringLiteral("karaoke"), singing);
         return result;
     }
@@ -1607,6 +1615,14 @@ public:
     {
         setProperty("requestBaseUrl", url);
         if (desk_) desk_->setBase(requestUrl());
+    }
+    void setLyricsMode(bool enabled)
+    {
+        lyricsMode_ = enabled;
+        cube_->window()->setProperty("partyLyricsMode", enabled);
+        lyricsAction_->setChecked(enabled);
+        karaokeGeometry_ = {};
+        updatePlaybackControl(); update();
     }
     void showRequests(bool visible)
     {
@@ -1879,6 +1895,7 @@ private:
         case GuestShortcut::Search: return requestAction_;
         case GuestShortcut::Previous: return previousAction_;
         case GuestShortcut::Next: return nextAction_;
+        case GuestShortcut::Lyrics: return lyricsAction_;
         default: return nullptr;
         }
     }
@@ -1968,14 +1985,21 @@ private:
         playbackStatus_->setToolTip(control.reason);
         playbackStatus_->setVisible(isVisible()); playbackStatus_->raise();
         playbackButton_->setVisible(isVisible()); playbackButton_->raise();
-        const double rowWidth = requestCardWidth(width(), u), rowX = width() - 34 * u - rowWidth;
-        const double gap = 6 * u, cell = (rowWidth - gap * (guestShortcuts.size() - 1)) / guestShortcuts.size();
+        const double gap = 6 * u;
+        const double preferredWidth = guestShortcuts.size() * 76 * u + gap * (guestShortcuts.size() - 1);
+        const double availableWidth = width() - 34 * u - (playbackButton_->geometry().right() + 14 * u);
+        const double rowWidth = std::min(std::max(requestCardWidth(width(), u), preferredWidth), std::max(1.0, availableWidth));
+        const double rowX = width() - 34 * u - rowWidth;
+        const double cell = (rowWidth - gap * (guestShortcuts.size() - 1)) / guestShortcuts.size();
         for (std::size_t i = 0; i < guestShortcuts.size(); ++i) {
             auto* button = shortcutButtons_[i].data(); if (!button) continue;
             const auto kind = static_cast<GuestShortcut>(i); auto* action = shortcutAction(kind);
             const QString label = action->text();
             button->setText(shortcutKey(kind) + QChar('\n') + label); button->setEnabled(action->isEnabled());
-            button->setToolTip(action->isEnabled() ? action->text() + QStringLiteral(" · ") + shortcutKey(kind) : control.reason);
+            button->setCheckable(action->isCheckable()); button->setChecked(action->isChecked());
+            button->setToolTip(kind == GuestShortcut::Lyrics
+                ? (lyricsMode_ ? QStringLiteral("Zatvori stihove") : QStringLiteral("Prikaži stihove trenutne pjesme")) + QStringLiteral(" · ") + shortcutKey(kind)
+                : action->isEnabled() ? action->text() + QStringLiteral(" · ") + shortcutKey(kind) : control.reason);
             button->setGeometry(qRound(rowX + i * (cell + gap)), qRound(27 * u), qRound(cell), qRound(43 * u));
             button->setStyleSheet(controlStyle(u, UiMetrics::small)); button->setVisible(isVisible()); button->raise();
         }
@@ -2113,27 +2137,53 @@ private:
         });
     }
     struct KaraokeFrame {
-        bool visible = false;
+        bool visible = false, available = false, manual = false;
         QJsonObject sheet, line, next;
-        QString status, phase, clockState;
+        QString status, phase, clockState, title, reason;
         double position = 0, progress = 0, countIn = 0;
         int lineIndex = -1, syllableIndex = -1;
     };
     KaraokeFrame karaokeFrame() const
     {
         KaraokeFrame frame;
-        frame.sheet = state_.value(QStringLiteral("karaoke")).toObject();
-        const auto lines = frame.sheet.value(QStringLiteral("lines")).toArray();
-        if (!frame.sheet.value(QStringLiteral("enabled")).toBool() || lines.isEmpty()) return frame;
-        frame.visible = true; frame.status = text(frame.sheet, "status", QStringLiteral("waiting"));
+        frame.visible = lyricsMode_;
+        const auto playback = state_.value(QStringLiteral("nowPlaying")).toObject();
+        frame.title = text(playback, "title", QStringLiteral("Nema potvrđene pjesme"));
+        frame.status = frame.phase = QStringLiteral("unavailable");
+        frame.reason = QStringLiteral("Za ovu pjesmu još nema pripremljenih stihova.");
+        const auto sheet = state_.value(QStringLiteral("karaoke")).toObject();
+        const auto lines = sheet.value(QStringLiteral("lines")).toArray();
+        if (!sheet.value(QStringLiteral("enabled")).toBool() || lines.isEmpty()) return frame;
+        const QString source = text(sheet, "source");
+        const bool spotify = source == QStringLiteral("spotify");
+        if (spotify) {
+            const QString uid = text(playback, "uid");
+            if (uid.isEmpty()) {
+                frame.status = frame.phase = QStringLiteral("waiting");
+                frame.reason = QStringLiteral("Čekam potvrđenu trenutnu pjesmu."); return frame;
+            }
+            // An occurrence stays authoritative across relinked Spotify URIs.
+            // A preloaded URI-only sheet is not current until the service binds it.
+            if (text(sheet, "trackUid").isEmpty() || text(sheet, "trackUid") != uid
+                || text(sheet, "clockState") == QStringLiteral("unmatched")) return frame;
+            const auto connection = state_.value(QStringLiteral("spotify")).toObject();
+            if (text(sheet, "clockState") == QStringLiteral("disconnected")
+                || (connection.contains(QStringLiteral("connected")) && !connection.value(QStringLiteral("connected")).toBool())) {
+                frame.status = frame.phase = QStringLiteral("waiting");
+                frame.reason = QStringLiteral("Spotify nije povezan. Čekam stanje pjesme."); return frame;
+            }
+            if (text(sheet, "status") == QStringLiteral("waiting")) return frame;
+        } else if (source == QStringLiteral("manual")) {
+            frame.manual = true; frame.title = text(sheet, "title", QStringLiteral("Ručna proba"));
+        } else return frame;
+        frame.sheet = sheet; frame.available = true; frame.reason.clear();
+        frame.status = text(frame.sheet, "status", QStringLiteral("waiting"));
         const double stamp = QDateTime::currentMSecsSinceEpoch();
         const auto sampleValue = frame.sheet.value(QStringLiteral("sampledAt"));
         const auto positionValue = frame.sheet.value(QStringLiteral("positionMs"));
         const bool finiteClock = sampleValue.isDouble() && std::isfinite(sampleValue.toDouble()) && sampleValue.toDouble() <= stamp
             && positionValue.isDouble() && std::isfinite(positionValue.toDouble());
         const double sampledAt = number(frame.sheet, "sampledAt", stamp);
-        const bool spotify = text(frame.sheet, "source") == QStringLiteral("spotify");
-        const auto playback = state_.value(QStringLiteral("nowPlaying")).toObject();
         frame.clockState = text(frame.sheet, "clockState", frame.status == QStringLiteral("playing") ? QStringLiteral("running") : frame.status);
         const bool valid = !frame.sheet.contains(QStringLiteral("clockValid")) || frame.sheet.value(QStringLiteral("clockValid")).toBool();
         const bool playbackHeld = spotify && ((playback.contains(QStringLiteral("clockValid")) && !playback.value(QStringLiteral("clockValid")).toBool())
@@ -2216,7 +2266,19 @@ private:
         p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(QColor("#7de4ed"));
         const QRectF titleRect = card.adjusted(24 * u, 18 * v, -24 * u, -330 * v);
         p.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
-                   QFontMetrics(p.font()).elidedText(QStringLiteral("KARAOKE · ") + text(frame.sheet, "title"), Qt::ElideRight, qRound(titleRect.width() * .68)));
+                   QFontMetrics(p.font()).elidedText((frame.manual ? QStringLiteral("PROBA STIHOVA · ") : QStringLiteral("STIHOVI · ")) + frame.title,
+                                                    Qt::ElideRight, qRound(titleRect.width() * .68)));
+        const auto rectangle = [](const QRectF& r) { return QJsonArray{r.x(), r.y(), r.width(), r.height()}; };
+        if (!frame.available) {
+            p.setFont(stageFont(32 * u, true)); p.setPen(QColor("#d5e0ee"));
+            p.drawText(current, Qt::AlignCenter | Qt::TextWordWrap, frame.reason);
+            p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#aebcd0"));
+            p.drawText(next, Qt::AlignCenter | Qt::TextWordWrap,
+                       QStringLiteral("Kad stihovi budu spremni, pojavit će se ovdje. %1 zatvara prikaz.").arg(shortcutKey(GuestShortcut::Lyrics)));
+            p.restore();
+            karaokeGeometry_ = {{QStringLiteral("bounds"), rectangle(card)}, {QStringLiteral("lineBounds"), rectangle(current)}};
+            return;
+        }
         QString stateLabel;
         if (frame.status == QStringLiteral("waiting")) stateLabel = QStringLiteral("Čekamo pjesmu");
         else if (frame.status == QStringLiteral("paused")) stateLabel = QStringLiteral("Pauza");
@@ -2280,7 +2342,6 @@ private:
             p.setPen(QColor("#aebcd0")); nextLayout.draw(&p, QPointF(next.x(), next.y() + std::max(0.0, (next.height() - nextHeight) / 2)));
         }
         p.restore();
-        const auto rectangle = [](const QRectF& r) { return QJsonArray{r.x(), r.y(), r.width(), r.height()}; };
         karaokeGeometry_ = {{QStringLiteral("bounds"), rectangle(card)}, {QStringLiteral("lineBounds"), rectangle(current)},
                             {QStringLiteral("note"), QJsonArray{note.x(), note.y()}}};
     }
@@ -2498,7 +2559,7 @@ private:
     QString artworkUrl_, artworkError_;
     quint64 artworkVersion_ = 0;
     qint64 artworkRetryAt_ = 0, playbackRefreshAfter_ = 0;
-    bool playbackBusy_ = false;
+    bool playbackBusy_ = false, lyricsMode_ = false;
     QJsonArray queuePreview_;
     QString trackClockKey_;
     double trackClockPosition_ = 0, trackClockStamp_ = 0, trackClockDuration_ = 0;
@@ -2513,7 +2574,7 @@ private:
     QElapsedTimer clock_;
     QTimer frame_, poll_;
     QAction *requestAction_ = nullptr, *fullAction_ = nullptr, *escapeAction_ = nullptr, *spotifyAction_ = nullptr, *returnAction_ = nullptr, *playbackAction_ = nullptr;
-    QAction *previousAction_ = nullptr, *nextAction_ = nullptr;
+    QAction *previousAction_ = nullptr, *nextAction_ = nullptr, *lyricsAction_ = nullptr;
     QRectF requestRect_, qrBounds_, playingBounds_;
     QSet<QString> seenCues_;
     QQueue<Cue> pending_;
@@ -2554,6 +2615,7 @@ void run(const RuntimeAgentHost* host)
     if (request.contains(QStringLiteral("requestBaseUrl"))) stage->setRequestBaseUrl(text(request, "requestBaseUrl"));
     if (request.contains(QStringLiteral("windowToggle"))) stage->configureWindowToggle(request.value(QStringLiteral("windowToggle")).toObject());
     if (request.contains(QStringLiteral("composerDraft"))) stage->restoreComposerDraft(request.value(QStringLiteral("composerDraft")).toObject());
+    if (request.value(QStringLiteral("lyricsMode")).isBool()) stage->setLyricsMode(request.value(QStringLiteral("lyricsMode")).toBool());
     if (request.contains(QStringLiteral("panel"))) stage->showRequests(request.value(QStringLiteral("panel")).toBool());
     if (request.contains(QStringLiteral("fullscreen"))) {
         request.value(QStringLiteral("fullscreen")).toBool() ? cube->window()->showFullScreen() : cube->window()->showNormal();

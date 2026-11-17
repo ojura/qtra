@@ -124,7 +124,7 @@ showing its error; the client never retries that GET automatically.
   leaves the track, queue and volume alone.
   Matching clickable shortcut controls sit in the main-stage header beside the
   observed playback button and directly above **Daj pjesmu**. They show **Tab**,
-  **Ctrl+P**, **Ctrl+K**, **Ctrl+B** and **Ctrl+N**. One `guestShortcuts`
+  **Ctrl+P**, **Ctrl+K**, **Ctrl+B**, **Ctrl+N** and **Ctrl+L**. One `guestShortcuts`
   specification supplies the visible keys, labels and QAction bindings; the
   header controls share the playback button's style and scale. The lower Magic
   box help retains its Tab reminder; the sidebar has no separate shortcut block.
@@ -244,6 +244,10 @@ showing its error; the client never retries that GET automatically.
   Native navigation posts to `/api/admin/skip` with `direction`, the expected
   current occurrence/device, `source:native` and the existing private operator
   header. It changes the display only from the subsequent canonical observation.
+- **Ctrl+L**, or the matching **Stihovi** header button, toggles the local
+  lyrics/karaoke surface. The highlighted button indicates the open mode. It
+  preserves the editor, selection, focus and playback; its visibility choice
+  survives song changes and a stage hot reload. The mode starts closed.
 - The QR opens the separate guest page on phones. The native panel uses the
   loopback service URL, independently of the phone-facing address.
 
@@ -478,10 +482,27 @@ comic acts, readable payoff lines, changing motion, and smooth handovers.
 ## Karaoke
 
 `state.karaoke` is either `null` or an enabled cue sheet with `title`, `source`,
+`trackUid`, `trackUri`,
 `status`, `positionMs`, `sampledAt`, `durationMs`, `offsetMs`, `clockState`,
 `clockValidUntil`, and `lines`. Each
 line supplies `text`, `startMs`, `endMs`, and ordered `syllables` with the same
 timing fields and text fragments. Spaces in those fragments are preserved.
+
+**Ctrl+L** opens the fixed lyric region even when the current song has no prepared
+sheet, in which case it shows the actual song title and an availability message.
+For Spotify, a nonempty `trackUid` must exactly match the current occurrence.
+The UID remains authoritative across URI relinks. A sheet waiting for its first
+occurrence binding, a sheet for another occurrence, and an explicitly unmatched
+or disconnected sheet expose no lyric text. New matching material appears in the
+same region while the mode stays open. The toggle itself performs no lyric lookup
+or transport operation; the service supplies the validated cue sheet.
+
+Manual sheets are explicitly headed **PROBA STIHOVA** and use their own title and
+clock, independently of Spotify. They are intended for supplied-text rehearsal.
+Runtime configuration `lyricsMode:true|false` provides the same local visibility
+control as the shared action. `karaoke.mode`, `panelVisible`, `available`, `manual`
+and `reason` distinguish the open UI, matching material and current availability;
+`active` means that both the mode and its available lyrics are on.
 
 The native stage adds elapsed time only while `status` is `playing` with finite,
 nonfuture clock samples. For Spotify, `clockValidUntil` is the actual observation
@@ -501,7 +522,11 @@ cue. Long lines wrap and fit inside their allocated area. The karaoke panel sits
 between the header and subtitle band, leaving the guest desk and photo bounds
 unchanged. Native status includes its current line, syllable, clock, and geometry.
 
-The private-display test uses the original text “Roboti pjevaju.” to exercise
+The private-display tests use the original text “Roboti pjevaju.” to exercise
 pause, interpolation, negative anchors, gaps, seeks, exact deadline holds, invalid
-clock samples, and stable lyric bounds.
+clock samples, and stable lyric bounds. The Ctrl+L case also checks exact occurrence
+binding, repeated songs, relinked URIs, disconnection, explicit manual rehearsal,
+no transport/submission side effects, unchanged draft/focus and reload retention.
 `PARTY_KARAOKE_CAPTURE=/absolute/path.png` saves its actual rendered frame.
+`PARTY_LYRICS_CAPTURE=/absolute/path.png` saves the Ctrl+L fixture with the six
+header controls and also writes `native307-lyrics-unavailable.png` beside it.

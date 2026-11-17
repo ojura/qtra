@@ -484,7 +484,7 @@ class PartyStage(unittest.TestCase):
         draft, bounds = self.editor_draft(), self.magic_bounds()
         self.eventually(lambda: self.run_stage()["requestCardBounds"][2] > 0, "private header geometry was not painted")
         rendered = self.run_stage(); controls = rendered["shortcutControls"]
-        self.assertEqual([item["key"] for item in controls], ["Tab", "Ctrl+P", "Ctrl+K", "Ctrl+B", "Ctrl+N"])
+        self.assertEqual([item["key"] for item in controls], ["Tab", "Ctrl+P", "Ctrl+K", "Ctrl+B", "Ctrl+N", "Ctrl+L"])
         self.assertTrue(all(item["key"] in item["label"] and not item["autoRepeat"] for item in controls))
         playback, request = rendered["playbackControl"]["bounds"], rendered["requestCardBounds"]
         for index, item in enumerate(controls):
@@ -497,7 +497,7 @@ class PartyStage(unittest.TestCase):
             if index:
                 previous = controls[index - 1]["bounds"]
                 self.assertGreater(x, previous[0] + previous[2], "shortcut controls overlap")
-        self.assertAlmostEqual(controls[0]["bounds"][0], request[0], delta=1)
+        self.assertLessEqual(controls[0]["bounds"][0], request[0], "the wider shared shortcut row lost its right-hand placement")
         self.assertAlmostEqual(controls[-1]["bounds"][0] + controls[-1]["bounds"][2], request[0] + request[2], delta=1)
         self.assertNotIn("partyDeskHeading", {item.get("objectName") for item in self.client.request("object.list", {})})
         capture = os.environ.get("PARTY_SHORTCUT_CAPTURE")
@@ -1453,8 +1453,101 @@ class PartyStage(unittest.TestCase):
         self.assertEqual(self.run_stage()["trackProgressMs"], 0, "a valid paused zero position was discarded")
         time.sleep(.2); self.assertEqual(self.run_stage()["trackProgressMs"], 0)
 
+    def test_lyrics_toggle_matches_occurrence_and_preserves_editor(self):
+        self.state["nowPlaying"].update(uid="lyrics-first", uri="spotify:track:first", paused=True, playing=False, clockValid=True)
+        self.state["spotify"] = {"connected": True}
+        self.write_state(); self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
+        self.run_stage(composerDraft={"text": "Za prijatelje: sačuvaj ovaj tekst.", "cursor": 25, "anchor": 4,
+                                     "query": "Atomic Song", "queryCursor": 7, "queryAnchor": 2,
+                                     "selectedTrack": {"id": "selected", "uri": "spotify:track:selected", "title": "Another requested song"}})
+        self.set_text("partyName", "Private listener")
+        draft, bounds = self.editor_draft(), self.magic_bounds()
+        window = {key: self.client.request("object.get", {"objectName": "mainWindow", "property": key})
+                  for key in ("visible", "fullScreen")}
+        self.assertFalse(self.run_stage()["karaoke"]["mode"])
+        self.key("ctrl+l")
+        self.eventually(lambda: self.run_stage()["karaoke"].get("bounds"), "Ctrl+L did not open the fixed lyric panel")
+        frame = self.run_stage()["karaoke"]
+        self.assertTrue(frame["mode"] and frame["panelVisible"])
+        self.assertFalse(frame["available"] or frame["active"])
+        self.assertEqual(frame["title"], "Atomic Song")
+        self.assertEqual(frame["text"], "")
+        self.assertIn("nema pripremljenih", frame["reason"])
+        lyric_bounds = frame["bounds"]
+        action = next(item for item in self.run_stage()["shortcutControls"] if item["key"] == "Ctrl+L")
+        self.assertTrue(action["checked"] and action["enabled"])
+        self.assertFalse(action["autoRepeat"])
+        self.assertTrue(self.client.request("object.get", {"objectName": "partyMessage", "property": "focus"}))
+        capture = os.environ.get("PARTY_LYRICS_CAPTURE")
+        if capture:
+            self.run_stage(capture=str(Path(capture).with_name("native307-lyrics-unavailable.png")))
+        self.state["karaoke"] = {"enabled": True, "title": "The prepared cue title", "source": "spotify", "status": "paused",
+                                 "trackUid": "lyrics-first", "trackUri": "spotify:track:first", "durationMs": 9000,
+                                 "positionMs": 1500, "sampledAt": int(time.time() * 1000), "clockState": "paused",
+                                 "lines": [{"text": "Roboti pjevaju.", "startMs": 1000, "endMs": 3800,
+                                            "syllables": [{"text": "Roboti ", "startMs": 1000, "endMs": 2200},
+                                                          {"text": "pjevaju.", "startMs": 2400, "endMs": 3800}]},
+                                           {"text": "Sad je red na vas.", "startMs": 5000, "endMs": 8000,
+                                            "syllables": [{"text": "Sad je red na vas.", "startMs": 5000, "endMs": 8000}]}]}
+
+        def publish():
+            self.state["revision"] += 1; self.write_state()
+            self.eventually(lambda: self.run_stage()["revision"] == self.state["revision"], "lyric identity change did not arrive")
+            return self.run_stage()["karaoke"]
+
+        frame = publish()
+        self.assertTrue(frame["available"] and frame["active"])
+        self.assertEqual(frame["text"], "Roboti pjevaju.")
+        self.assertEqual(frame["title"], "Atomic Song", "the prepared sheet title replaced actual current-song metadata")
+        self.eventually(lambda: "note" in self.run_stage()["karaoke"], "the matched lyric was not rendered")
+        self.assertEqual(self.run_stage()["karaoke"]["bounds"], lyric_bounds)
+        if capture:
+            self.run_stage(capture=capture)
+        self.state["nowPlaying"]["uri"] = "spotify:track:relinked"
+        self.assertTrue(publish()["available"], "a relinked URI broke the authoritative occurrence binding")
+        self.state["nowPlaying"]["uid"] = "lyrics-second"
+        frame = publish()
+        self.assertFalse(frame["available"], "old-occurrence lyrics appeared for a repeat of the same song")
+        self.assertEqual((frame["text"], frame["nextText"]), ("", ""))
+        self.state["karaoke"]["trackUid"] = ""
+        self.assertFalse(publish()["available"], "a preloaded URI sheet appeared before occurrence binding")
+        self.state["karaoke"]["trackUid"] = "lyrics-second"
+        self.assertTrue(publish()["available"])
+        self.state["karaoke"]["clockState"] = "unmatched"
+        self.assertFalse(publish()["available"])
+        self.state["karaoke"]["clockState"] = "disconnected"
+        self.state["spotify"]["connected"] = False
+        frame = publish()
+        self.assertEqual(frame["status"], "waiting")
+        self.assertEqual(frame["text"], "")
+        self.assertIn("nije povezan", frame["reason"])
+        self.state["karaoke"].update(source="manual", title="Originalna ručna proba", clockState="paused")
+        frame = publish()
+        self.assertTrue(frame["available"] and frame["manual"])
+        self.assertEqual(frame["title"], "Originalna ručna proba")
+        self.client.request("widget.click", {"objectName": "partyLyricsShortcutButton"})
+        self.assertFalse(self.run_stage()["karaoke"]["mode"])
+        self.assertNotIn("bounds", self.run_stage()["karaoke"])
+        self.assertEqual(self.editor_draft(), draft); self.assertEqual(self.magic_bounds(), bounds)
+        self.assertTrue(self.client.request("object.get", {"objectName": "partyMessage", "property": "focus"}))
+        self.assertEqual(self.client.request("object.get", {"objectName": "partyName", "property": "text"}), "Private listener")
+        for key, value in window.items():
+            self.assertEqual(self.client.request("object.get", {"objectName": "mainWindow", "property": key}), value)
+        self.assertFalse(self.server.playback_requests or self.server.skip_requests or self.server.requests or self.server.message_attempts,
+                         "the local lyrics toggle issued a transport or guest submission")
+        self.key("ctrl+l")
+        saved = self.run_stage(getComposerDraft=True)["composerDraft"]
+        self.run_stage(restore=True)
+        self.run_stage(stateFile=str(self.state_file), composerDraft=saved)
+        self.assertTrue(self.run_stage()["karaoke"]["mode"], "a stage reload lost the local lyric-mode choice")
+        self.assertEqual(self.editor_draft(), draft)
+        self.assertTrue(next(item for item in self.run_stage()["shortcutControls"] if item["key"] == "Ctrl+L")["checked"])
+
     def test_karaoke_clock_note_and_stable_lyric_area(self):
-        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False, lyricsMode=True)
         windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
                                           env=self.environment, text=True).splitlines()
         subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
@@ -1521,9 +1614,9 @@ class PartyStage(unittest.TestCase):
         self.assertEqual(frame["lineIndex"], 1, "seeking did not choose the right lyric line")
         self.assertEqual(frame["bounds"], bounds, "the next lyric changed the panel bounds")
         stamp = int(time.time() * 1000)
-        self.state["nowPlaying"].update(clockValid=True, paused=False, buffering=False, playing=True)
+        self.state["nowPlaying"].update(uid="karaoke-current", uri="spotify:track:karaoke", clockValid=True, paused=False, buffering=False, playing=True)
         frame = change(source="spotify", positionMs=1000, status="playing", sampledAt=stamp,
-                       clockValidUntil=stamp + 350, clockState="running")
+                       clockValidUntil=stamp + 350, clockState="running", trackUid="karaoke-current", trackUri="spotify:track:karaoke")
         self.eventually(lambda: self.run_stage()["karaoke"]["status"] == "held", "lyrics did not hold at the source deadline")
         held = self.run_stage()["karaoke"]
         self.assertEqual(held["positionMs"], 1350, "deadline capping changed the signed song clock")
