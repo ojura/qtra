@@ -42,9 +42,9 @@ class Service(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def reply(self, value):
+    def reply(self, value, status=200):
         body = json.dumps(value).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -55,6 +55,26 @@ class Service(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlsplit(self.path)
+        if url.path == "/api/admin/lyrics":
+            query = parse_qs(url.query, keep_blank_values=True)
+            record = {"query": query, "authorization": self.headers.get("Authorization"),
+                      "operator": self.headers.get("X-DJ-Operator")}
+            self.server.lyrics_requests.append(record)
+            if record["authorization"] != "Bearer private-fixture-token":
+                return self.reply({"error": "Private fixture authentication failed"}, 401)
+            uid = query.get("expectedCurrentUid", [""])[0]
+            target = {"uid": uid, "uri": query.get("expectedUri", [""])[0],
+                      "deviceId": query.get("expectedDeviceId", [""])[0]}
+            payload = {"requestId": query.get("requestId", [""])[0], "target": target,
+                       **copy.deepcopy(self.server.lyrics_results.get(uid, {
+                           "availability": "unavailable", "timing": "none", "provider": None, "lines": []}))}
+            if uid in self.server.lyrics_mutators:
+                self.server.lyrics_mutators[uid](payload)
+            status = self.server.lyrics_statuses.get(uid, 200)
+            gate = self.server.lyrics_gates.get(uid)
+            if gate:
+                gate.wait(10)
+            return self.reply(payload, status)
         if url.path == "/api/state":
             self.server.state_reads += 1
             state = copy.deepcopy(self.server.state_snapshot)
@@ -298,6 +318,8 @@ class PartyStage(unittest.TestCase):
         self.server.message_reply_gate = None
         self.server.processing_ids = []
         self.server.message_work = {}
+        self.server.lyrics_requests = []
+        self.server.lyrics_results, self.server.lyrics_gates, self.server.lyrics_statuses, self.server.lyrics_mutators = {}, {}, {}, {}
         self.server.state_reads = 0
         self.server.state_snapshot = {}
         self.server.cover_requests, self.server.playback_requests, self.server.playback_commands, self.server.playback_operators = [], [], [], []
@@ -1453,6 +1475,206 @@ class PartyStage(unittest.TestCase):
         self.assertEqual(self.run_stage()["trackProgressMs"], 0, "a valid paused zero position was discarded")
         time.sleep(.2); self.assertEqual(self.run_stage()["trackProgressMs"], 0)
 
+    def configure_source_lyrics(self, uid="source-1", uri="spotify:track:0000000000000000000001"):
+        (self.folder / "admin-token").write_text("private-fixture-token")
+        stamp = int(time.time() * 1000)
+        self.state["spotify"] = {"connected": True, "observedAt": stamp}
+        self.state["playbackState"] = {"paused": True, "buffering": False, "clockValid": True,
+                                       "device": {"id": "fixture-device"}}
+        self.state["nowPlaying"].update(uid=uid, uri=uri, paused=True, playing=False, buffering=False,
+                                        clockValid=True, progressMs=1500, durationMs=20000, observedAt=stamp)
+        self.write_state()
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False, lyricsMode=False)
+
+    def source_lyric_result(self, timing="line", words=None):
+        words = words or ["Roboti čuvaju ritam.", "Sad je red na prijatelje.", "Jutro nosi novi refren."]
+        return {"availability": "ready", "timing": timing,
+                "provider": {"name": "Privatni izvor", "attribution": "Originalni tekst privatne probe",
+                             "sourceUrl": "https://example.test/original"},
+                "lines": [{"text": word, "startMs": (1000 + i * 2000 if timing == "line" else None)}
+                          for i, word in enumerate(words)]}
+
+    def publish_source_lyrics(self, **track):
+        stamp = int(time.time() * 1000)
+        self.state["spotify"]["observedAt"] = stamp
+        self.state["nowPlaying"]["observedAt"] = stamp
+        self.state["nowPlaying"].update(track)
+        self.state["revision"] += 1; self.write_state()
+        self.eventually(lambda: self.run_stage()["revision"] == self.state["revision"], "source lyric state did not arrive")
+        return self.run_stage()["sourceLyrics"]
+
+    def test_source_lyrics_line_static_clock_and_editor(self):
+        self.configure_source_lyrics()
+        self.server.lyrics_results["source-1"] = self.source_lyric_result()
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
+        subprocess.run(["xdotool", "windowfocus", windows[-1]], env=self.environment, check=True)
+        self.run_stage(composerDraft={"text": "Sačuvaj ovu skicu.", "cursor": 13, "anchor": 4,
+                                     "query": "Sačuvaj ovu skicu.", "queryCursor": 13, "queryAnchor": 4})
+        self.client.request("object.invoke", {"objectName": "partyMessage", "method": "setFocus"})
+        self.eventually(lambda: self.client.request("object.get", {"objectName": "partyMessage", "property": "focus"}),
+                        "the private composer did not gain focus before opening lyrics")
+        draft, bounds = self.editor_draft(), self.magic_bounds()
+        self.assertFalse(self.server.lyrics_requests, "closed mode performed a provider read")
+        self.run_stage(lyricsMode=True)
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["state"] == "ready", "source lines did not arrive")
+        frame = self.run_stage()["sourceLyrics"]
+        self.assertEqual((frame["text"], frame["nextText"], frame["lineIndex"]),
+                         ("Roboti čuvaju ritam.", "Sad je red na prijatelje.", 0))
+        self.assertEqual((frame["timing"], frame["clockState"], frame["positionMs"]), ("line", "paused", 1500))
+        self.assertTrue(self.client.request("object.get", {"objectName": "partyMessage", "property": "focus"}),
+                        "opening source lines changed the established editor focus")
+        self.eventually(lambda: "note" in self.run_stage()["karaoke"], "source lyrics were not painted")
+        self.assertEqual(self.run_stage()["karaoke"]["note"], [], "line timing invented a syllable-following note")
+        lyric_bounds = self.run_stage()["karaoke"]["bounds"]
+        request = self.server.lyrics_requests[0]
+        self.assertEqual(set(request["query"]), {"requestId", "expectedCurrentUid", "expectedUri", "expectedDeviceId"})
+        self.assertTrue(all(len(value) == 1 for value in request["query"].values()))
+        self.assertEqual(request["query"]["expectedCurrentUid"], ["source-1"])
+        self.assertEqual(request["query"]["expectedUri"], [self.state["nowPlaying"]["uri"]])
+        self.assertEqual(request["query"]["expectedDeviceId"], ["fixture-device"])
+        self.assertEqual((request["authorization"], request["operator"]), ("Bearer private-fixture-token", "qtra-native"))
+        self.assertNotIn("private-fixture-token", json.dumps(self.run_stage()))
+        capture = os.environ.get("PARTY_SOURCE_LYRICS_CAPTURE")
+        if capture:
+            self.run_stage(capture=str(Path(capture).with_name("native-source-lyrics-line.png")))
+        time.sleep(.15)
+        self.assertEqual(self.run_stage()["sourceLyrics"]["positionMs"], 1500)
+        frame = self.publish_source_lyrics(progressMs=3500)
+        self.assertEqual(frame["lineIndex"], 1)
+        frame = self.publish_source_lyrics(progressMs=0, clockValid=False)
+        self.assertEqual((frame["positionMs"], frame["clockState"]), (3500, "held"))
+        self.state["playbackState"]["paused"] = False
+        frame = self.publish_source_lyrics(progressMs=4000, clockValid=True, paused=False, playing=True,
+                                          observedAt=int(time.time() * 1000) - 11000)
+        self.assertEqual((frame["positionMs"], frame["clockState"]), (14000, "held"))
+        self.state["playbackState"]["paused"] = True
+        self.publish_source_lyrics(progressMs=1200, paused=True, playing=False)
+        self.assertEqual(len(self.server.lyrics_requests), 1, "clock-only updates refetched source lyrics")
+        words = ["<b>Ovo je običan tekst.</b>"] + [f"Privatni redak broj {i}: prijatelji ostaju zajedno." for i in range(1, 22)]
+        self.server.lyrics_results["source-2"] = self.source_lyric_result("none", words)
+        self.publish_source_lyrics(uid="source-2", uri="spotify:track:0000000000000000000002")
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["staticTextVisible"], "untimed source text was not displayed")
+        static = self.run_stage()["sourceLyrics"]
+        self.assertEqual((static["timing"], static["clockState"]), ("none", "untimed"))
+        self.assertEqual(self.client.request("object.get", {"objectName": "partySourceLyricsText", "property": "plainText"}), "\n".join(words))
+        self.assertGreater(static["scrollMaximum"], 0, "untimed lyrics were truncated rather than scrollable")
+        self.client.request("object.set", {"objectName": "partySourceLyricsScroll", "property": "value", "value": 70})
+        self.publish_source_lyrics(progressMs=2000)
+        self.assertEqual(self.run_stage()["sourceLyrics"]["scrollValue"], 70, "clock poll reset the static text scroll")
+        self.assertEqual(self.run_stage()["karaoke"]["bounds"], lyric_bounds)
+        self.assertEqual(self.editor_draft(), draft); self.assertEqual(self.magic_bounds(), bounds)
+        self.assertTrue(self.client.request("object.get", {"objectName": "partyMessage", "property": "focus"}))
+        if capture:
+            self.run_stage(capture=str(Path(capture).with_name("native-source-lyrics-static.png")))
+        self.state["karaoke"] = {"enabled": True, "source": "manual", "title": "Ručna originalna proba", "status": "paused",
+                                 "positionMs": 1500, "sampledAt": int(time.time() * 1000), "durationMs": 8000,
+                                 "lines": [{"text": "Ručno zadani redak.", "startMs": 1000, "endMs": 6000,
+                                            "syllables": [{"text": "Ručno zadani redak.", "startMs": 1000, "endMs": 6000}]}]}
+        self.publish_source_lyrics()
+        self.assertTrue(self.run_stage()["karaoke"]["manual"], "provider text replaced an explicit manual rehearsal")
+        self.assertFalse(self.run_stage()["sourceLyrics"]["open"])
+        self.assertFalse(self.run_stage()["sourceLyrics"]["staticTextVisible"])
+        self.assertEqual(len(self.server.lyrics_requests), 2)
+        self.assertFalse(self.server.playback_requests or self.server.skip_requests or self.server.requests or self.server.message_attempts)
+
+    def test_source_lyrics_old_target_close_base_and_release(self):
+        self.configure_source_lyrics()
+        old_gate = threading.Event(); self.addCleanup(old_gate.set)
+        self.server.lyrics_gates["source-1"] = old_gate
+        self.server.lyrics_results["source-1"] = self.source_lyric_result(words=["Stari redak."])
+        self.run_stage(lyricsMode=True)
+        self.eventually(lambda: len(self.server.lyrics_requests) == 1, "initial read was not admitted")
+        self.server.lyrics_results["source-repeat"] = self.source_lyric_result(words=["Nova pojava iste pjesme."])
+        self.publish_source_lyrics(uid="source-repeat")
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["text"] == "Nova pojava iste pjesme.", "new occurrence did not replace old lookup")
+        old_gate.set(); time.sleep(.15)
+        self.assertEqual(self.run_stage()["sourceLyrics"]["text"], "Nova pojava iste pjesme.")
+        close_gate = threading.Event(); self.addCleanup(close_gate.set)
+        self.server.lyrics_gates["source-close"] = close_gate
+        self.server.lyrics_results["source-close"] = self.source_lyric_result(words=["Kasni zatvoreni odgovor."])
+        self.publish_source_lyrics(uid="source-close")
+        self.eventually(lambda: len(self.server.lyrics_requests) == 3, "close-race read was not admitted")
+        self.run_stage(lyricsMode=False); close_gate.set(); time.sleep(.15)
+        self.assertFalse(self.run_stage()["sourceLyrics"]["open"] or self.run_stage()["karaoke"]["available"])
+        self.run_stage(lyricsMode=True)
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["state"] == "ready", "explicit reopening did not make a fresh read")
+        ids = [request["query"]["requestId"][0] for request in self.server.lyrics_requests]
+        self.assertEqual(len(ids), len(set(ids)), "a reopened read reused its old generation ID")
+
+        base_gate = threading.Event(); self.addCleanup(base_gate.set)
+        self.server.lyrics_gates["source-base"] = base_gate
+        self.server.lyrics_results["source-base"] = self.source_lyric_result(words=["Stari servis."])
+        self.publish_source_lyrics(uid="source-base")
+        self.eventually(lambda: len(self.server.lyrics_requests) == 5, "old-base read was not admitted")
+        other = ThreadingHTTPServer(("127.0.0.1", 0), Service)
+        self.assertNotEqual(other.server_port, 8787)
+        for name in ("state_reads", "state_snapshot", "state_reply_gate", "chat_requests", "chat_finished", "chat_reply_gate",
+                     "messages", "withdrawn_ids", "llm", "processing_ids", "message_work"):
+            setattr(other, name, getattr(self.server, name))
+        other.lyrics_requests = []; other.lyrics_gates = {}; other.lyrics_statuses = {}; other.lyrics_mutators = {}
+        other.lyrics_results = {"source-base": self.source_lyric_result(words=["Drugi privatni izvor."])}
+        thread = threading.Thread(target=other.serve_forever, daemon=True); thread.start()
+        self.addCleanup(lambda: (other.shutdown(), other.server_close(), thread.join(3)))
+        self.request_base_url = f"http://127.0.0.1:{other.server_port}"
+        self.run_stage(requestBaseUrl=self.request_base_url)
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["text"] == "Drugi privatni izvor.", "new base did not supply its own source")
+        base_gate.set(); time.sleep(.15)
+        self.assertEqual(self.run_stage()["sourceLyrics"]["text"], "Drugi privatni izvor.")
+        self.assertEqual(len(other.lyrics_requests), 1)
+        self.assertNotEqual(other.lyrics_requests[0]["query"]["requestId"], self.server.lyrics_requests[-1]["query"]["requestId"])
+
+        release_gate = threading.Event(); self.addCleanup(release_gate.set)
+        other.lyrics_gates["source-release"] = release_gate
+        other.lyrics_results["source-release"] = self.source_lyric_result(words=["Odgovor starog modula."])
+        self.publish_source_lyrics(uid="source-release")
+        self.eventually(lambda: len(other.lyrics_requests) == 2, "release-race read was not admitted")
+        self.run_stage(restore=True); release_gate.set()
+        other.lyrics_results["source-release"] = self.source_lyric_result(words=["Nova generacija prikaza."])
+        self.run_stage(stateFile=str(self.state_file))
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["text"] == "Nova generacija prikaza.", "released reply reached the new stage")
+        self.assertIsNone(self.process.poll())
+        self.assertFalse(self.server.playback_requests or self.server.skip_requests or self.server.requests or self.server.message_attempts)
+
+    def test_source_lyrics_unavailable_errors_and_response_bounds(self):
+        self.configure_source_lyrics()
+        self.run_stage(lyricsMode=True)
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["state"] == "unavailable", "missing source was not reported")
+        self.assertFalse(self.run_stage()["karaoke"]["available"])
+        self.server.lyrics_results["instrumental"] = {"availability": "instrumental", "timing": "none", "lines": [],
+            "provider": {"name": "Privatni izvor", "attribution": "Instrumentalna proba", "sourceUrl": None}}
+        self.publish_source_lyrics(uid="instrumental")
+        self.eventually(lambda: self.run_stage()["sourceLyrics"]["state"] == "instrumental", "explicit instrumental result was lost")
+        self.assertIn("instrumental", self.run_stage()["sourceLyrics"]["reason"])
+        self.assertEqual(self.run_stage()["sourceLyrics"]["provider"], "Instrumentalna proba")
+        mutations = {
+            "wrong-id": lambda payload: payload.update(requestId="other-generation"),
+            "wrong-target": lambda payload: payload["target"].update(uid="another-occurrence"),
+            "invented-timing": lambda payload: payload.update(timing="syllable"),
+            "backward-lines": lambda payload: payload["lines"][1].update(startMs=0),
+            "too-many-lines": lambda payload: payload.update(lines=[{"text": "Privatno.", "startMs": 0}] * 1001),
+            "oversized": lambda payload: payload["lines"][0].update(text="x" * (2 * 1024 * 1024 + 1)),
+        }
+        for uid, mutate in mutations.items():
+            with self.subTest(uid=uid):
+                self.server.lyrics_results[uid] = self.source_lyric_result()
+                self.server.lyrics_mutators[uid] = mutate
+                self.publish_source_lyrics(uid=uid)
+                self.eventually(lambda: self.run_stage()["sourceLyrics"]["state"] == "error", "invalid source response was accepted")
+                frame = self.run_stage()["karaoke"]
+                self.assertFalse(frame["available"]); self.assertEqual((frame["text"], frame["nextText"]), ("", ""))
+        for uid, code in (("stale", 409), ("failed", 503)):
+            self.server.lyrics_results[uid] = {"error": "Private fixture failure", "code": "stale_target" if code == 409 else "lyrics_read_failed"}
+            self.server.lyrics_statuses[uid] = code
+            self.publish_source_lyrics(uid=uid)
+            self.eventually(lambda: self.run_stage()["sourceLyrics"]["state"] == "error", "HTTP source failure did not settle")
+        count = len(self.server.lyrics_requests)
+        self.publish_source_lyrics(progressMs=1600)
+        time.sleep(.15)
+        self.assertEqual(len(self.server.lyrics_requests), count, "failed source read retried automatically")
+        self.assertFalse(self.server.playback_requests or self.server.skip_requests or self.server.requests or self.server.message_attempts)
+
     def test_lyrics_toggle_matches_occurrence_and_preserves_editor(self):
         self.state["nowPlaying"].update(uid="lyrics-first", uri="spotify:track:first", paused=True, playing=False, clockValid=True)
         self.state["spotify"] = {"connected": True}
@@ -1475,7 +1697,7 @@ class PartyStage(unittest.TestCase):
         self.assertFalse(frame["available"] or frame["active"])
         self.assertEqual(frame["title"], "Atomic Song")
         self.assertEqual(frame["text"], "")
-        self.assertIn("nema pripremljenih", frame["reason"])
+        self.assertIn("Čekam potvrđenu pjesmu", frame["reason"])
         lyric_bounds = frame["bounds"]
         action = next(item for item in self.run_stage()["shortcutControls"] if item["key"] == "Ctrl+L")
         self.assertTrue(action["checked"] and action["enabled"])
@@ -1523,7 +1745,7 @@ class PartyStage(unittest.TestCase):
         frame = publish()
         self.assertEqual(frame["status"], "waiting")
         self.assertEqual(frame["text"], "")
-        self.assertIn("nije povezan", frame["reason"])
+        self.assertIn("Spotify vezu", frame["reason"])
         self.state["karaoke"].update(source="manual", title="Originalna ručna proba", clockState="paused")
         frame = publish()
         self.assertTrue(frame["available"] and frame["manual"])
@@ -1599,10 +1821,16 @@ class PartyStage(unittest.TestCase):
             self.run_stage(capture=str(Path(capture).with_name("karaoke-photo-test.png")))
         frame = change(positionMs=-4000, status="paused")
         self.assertEqual(frame["countInMs"], 5000, "count-in ignored the negative pre-roll")
-        frame = change(positionMs=-4000, status="playing", sampledAt=int(time.time() * 1000) - 1000)
+        # Measure the clock interval instead of assuming the private GUI round
+        # trip completes within 500ms on a busy software-rendered display.
+        before_clock = int(time.time() * 1000)
+        sample = before_clock - 1000
+        frame = change(positionMs=-10000, status="playing", sampledAt=sample)
+        after_clock = int(time.time() * 1000)
         self.assertEqual(frame["positionMs"], 0)
-        self.assertGreater(frame["countInMs"], 3500)
-        self.assertLessEqual(frame["countInMs"], 4000, "count-in did not advance through pre-roll")
+        self.assertGreaterEqual(frame["countInMs"], max(0, 11000 - (after_clock - sample)) - 5)
+        self.assertLessEqual(frame["countInMs"], 11000 - (before_clock - sample) + 5,
+                             "count-in did not advance through signed pre-roll")
         time.sleep(.25)
         self.assertEqual(self.run_stage()["karaoke"]["positionMs"], 0, "a negative anchor was clamped before interpolation")
         frame = change(positionMs=1400, status="playing", sampledAt=int(time.time() * 1000))

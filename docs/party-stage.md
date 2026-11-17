@@ -495,52 +495,84 @@ comic acts, readable payoff lines, changing motion, and smooth handovers.
 
 ## Karaoke
 
-`state.karaoke` is either `null` or an enabled cue sheet with `title`, `source`,
-`trackUid`, `trackUri`,
+**Ctrl+L** opens the fixed lyric region for the actual current song. With no
+matching authored sheet, the native stage reads
+`GET /api/admin/lyrics?requestId=...&expectedCurrentUid=...&expectedUri=...&expectedDeviceId=...`
+on demand. These are the only four query fields. The actual URI, occurrence UID
+and active device must all match; a repeat of the same recording is a new target.
+The request uses the local private token and `X-DJ-Operator:qtra-native`, without
+changing playback, the queue, speech or the authored karaoke state.
+
+The response supplies `availability:ready|unavailable|instrumental`,
+`timing:line|none`, provider attribution, and `{text,startMs}` lines. Line timing
+highlights the complete current line and shows the next source line. It preserves
+the supplied line starts without inventing word, syllable or end timestamps.
+Untimed material stays as literal, scrollable text in the same panel. Provider
+attribution remains visible; an instrumental label requires the source's explicit
+result. Loading, unavailable and error states use the same fixed area.
+
+A request generation is invalidated by closing the mode, changing its service,
+state file or current UID/URI/device, or releasing the stage. Late replies must
+match both that generation and the exact echoed target. Clock-only observations
+do not refetch. An unsuccessful lookup stays quiet until a new target or an
+explicit close/reopen; it does not retry playback or another control. Reads are
+bounded to 2MiB of JSON and the service's 1,000 lines / 100,000 text characters.
+`sourceLyrics` runtime status exposes availability, target, timing, provider,
+clock and static-scroll state without exposing credentials.
+
+`state.karaoke` remains the independent authored rehearsal surface. It is either
+`null` or an enabled cue sheet with `title`, `source`, `trackUid`, `trackUri`,
 `status`, `positionMs`, `sampledAt`, `durationMs`, `offsetMs`, `clockState`,
-`clockValidUntil`, and `lines`. Each
-line supplies `text`, `startMs`, `endMs`, and ordered `syllables` with the same
-timing fields and text fragments. Spaces in those fragments are preserved.
+`clockValidUntil`, and `lines`. Each line supplies `text`, `startMs`, `endMs`, and
+ordered `syllables` with the same timing fields and text fragments. Spaces in
+those fragments are preserved. A valid authored sheet takes precedence over the
+on-demand reader.
 
-**Ctrl+L** opens the fixed lyric region even when the current song has no prepared
-sheet, in which case it shows the actual song title and an availability message.
-For Spotify, a nonempty `trackUid` must exactly match the current occurrence.
-The UID remains authoritative across URI relinks. A sheet waiting for its first
-occurrence binding, a sheet for another occurrence, and an explicitly unmatched
-or disconnected sheet expose no lyric text. New matching material appears in the
-same region while the mode stays open. The toggle itself performs no lyric lookup
-or transport operation; the service supplies the validated cue sheet.
+For an authored Spotify sheet, a nonempty `trackUid` must exactly match the
+current occurrence. The UID remains authoritative across URI relinks. A sheet
+waiting for its first occurrence binding, a sheet for another occurrence, and an
+explicitly unmatched or disconnected sheet expose no lyric text. Manual sheets
+are explicitly headed **PROBA STIHOVA** and use their own title and clock,
+independently of Spotify. They are intended for supplied-text rehearsal.
 
-Manual sheets are explicitly headed **PROBA STIHOVA** and use their own title and
-clock, independently of Spotify. They are intended for supplied-text rehearsal.
 Runtime configuration `lyricsMode:true|false` provides the same local visibility
 control as the shared action. `karaoke.mode`, `panelVisible`, `available`, `manual`
 and `reason` distinguish the open UI, matching material and current availability;
-`active` means that both the mode and its available lyrics are on.
+`active` means that both the mode and its available lyrics are on. The mode
+preserves the editor, focus, window state and all existing stage geometry.
 
-The native stage adds elapsed time only while `status` is `playing` with finite,
-nonfuture clock samples. For Spotify, `clockValidUntil` is the actual observation
-time plus 10,000ms; interpolation stops exactly at that deadline and the status
-becomes `held`. `clockState` must be `running`, and `nowPlaying.clockValid:false`,
-pause or buffering also holds the clock. A frozen stale sample never continues
+The native stage adds elapsed time only while a trusted clock is running.
+Current-source line selection uses the same actual track clock as the progress
+display, preserving its last accepted position on invalid data and capping
+interpolation at the ten-second observation deadline. Pause and buffering hold
+the clock. Untimed text never acquires synthetic timing.
+
+For authored Spotify cues, `clockValidUntil` is the actual observation time plus
+10,000ms; interpolation stops exactly at that deadline and the status becomes
+`held`. `clockState` must be `running`, and `nowPlaying.clockValid:false`, pause
+or buffering also holds the clock. A frozen stale sample never continues
 advancing or resets to its original anchor. Manual cues use their explicit clock
 without a Spotify lease. The signed `positionMs` anchor is retained until after
-interpolation, then clamped to the song's duration. The service has already applied
-`offsetMs`. Paused and waiting clocks hold still; seeks select the corresponding
-line immediately.
+interpolation, then clamped to the song's duration. The service has already
+applied `offsetMs`. Paused and waiting clocks hold still; seeks select the
+corresponding line immediately.
 
-A fixed lyric panel shows the active and next lines. The current syllable changes
-color while a musical note travels across it and bounces. Text keeps the same
-layout during highlighting; gaps hold the note and show a count-in for the next
-cue. Long lines wrap and fit inside their allocated area. The karaoke panel sits
-between the header and subtitle band, leaving the guest desk and photo bounds
-unchanged. Native status includes its current line, syllable, clock, and geometry.
+The authored syllable renderer changes the current syllable's color while a
+musical note travels across it and bounces. Text keeps the same layout during
+highlighting; gaps hold the note and show a count-in for the next cue. Long lines
+wrap and fit inside their allocated area. The lyric panel sits between the header
+and subtitle band, leaving the guest desk and photo bounds unchanged.
 
-The private-display tests use the original text “Roboti pjevaju.” to exercise
-pause, interpolation, negative anchors, gaps, seeks, exact deadline holds, invalid
-clock samples, and stable lyric bounds. The Ctrl+L case also checks exact occurrence
-binding, repeated songs, relinked URIs, disconnection, explicit manual rehearsal,
-no transport/submission side effects, unchanged draft/focus and reload retention.
-`PARTY_KARAOKE_CAPTURE=/absolute/path.png` saves its actual rendered frame.
-`PARTY_LYRICS_CAPTURE=/absolute/path.png` saves the Ctrl+L fixture with the six
-header controls and also writes `native307-lyrics-unavailable.png` beside it.
+The private-display fixtures own their HTTP server, Xvfb and qtra process, and
+use original text. They exercise source identity and generation races, repeated
+songs, changed services, close/reopen/release, malformed or oversized replies,
+literal scrollable untimed text, attribution, actual clock holds, manual-sheet
+precedence and unchanged editor/focus. No live provider or player is used.
+The authored “Roboti pjevaju.” fixture retains pause, negative-anchor, gap,
+seek, syllable-note and exact-deadline coverage.
+
+`PARTY_SOURCE_LYRICS_CAPTURE=/tmp/source-lyrics.png` writes
+`native-source-lyrics-line.png` and `native-source-lyrics-static.png` from the
+same private source fixture. `PARTY_KARAOKE_CAPTURE=/absolute/path.png` saves the
+authored frame. `PARTY_LYRICS_CAPTURE=/absolute/path.png` saves the Ctrl+L fixture
+and its unavailable view.

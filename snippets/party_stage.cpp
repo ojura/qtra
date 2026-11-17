@@ -1399,6 +1399,23 @@ public:
         playbackStatus_ = new QLabel(cube_); playbackStatus_->setObjectName(QStringLiteral("partyPlaybackStatus"));
         playbackStatus_->setAttribute(Qt::WA_TransparentForMouseEvents);
         playbackStatus_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        sourceLyricsText_ = new QTextBrowser(cube_); sourceLyricsText_->setObjectName(QStringLiteral("partySourceLyricsText"));
+        sourceLyricsText_->setReadOnly(true); sourceLyricsText_->setFocusPolicy(Qt::NoFocus);
+        sourceLyricsText_->setTextInteractionFlags(Qt::NoTextInteraction);
+        sourceLyricsText_->setOpenLinks(false); sourceLyricsText_->setOpenExternalLinks(false);
+        sourceLyricsText_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        sourceLyricsText_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        sourceLyricsText_->setStyleSheet(QStringLiteral(
+            "QTextBrowser { color:#f7f2ea; background:transparent; border:0; padding:0; }"
+            "QScrollBar:vertical { background:#13243a; width:9px; border:0; }"
+            "QScrollBar::handle:vertical { background:#9bb5d1; border-radius:4px; min-height:30px; }"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }"));
+        sourceLyricsText_->verticalScrollBar()->setObjectName(QStringLiteral("partySourceLyricsScroll"));
+        for (QWidget* widget : {static_cast<QWidget*>(sourceLyricsText_.data()), sourceLyricsText_->viewport(),
+                               static_cast<QWidget*>(sourceLyricsText_->verticalScrollBar())}) {
+            widget->setCursor(djCursor()); widget->installEventFilter(this);
+        }
+        sourceLyricsText_->hide();
         playbackAction_ = createShortcut(GuestShortcut::Playback, [this] { setPlaybackPaused(); });
         previousAction_ = createShortcut(GuestShortcut::Previous, [this] { navigatePlayback(QStringLiteral("previous")); });
         nextAction_ = createShortcut(GuestShortcut::Next, [this] { navigatePlayback(QStringLiteral("next")); });
@@ -1448,6 +1465,8 @@ public:
     }
     ~PartyStage() override
     {
+        clearSourceLyrics();
+        delete sourceLyricsText_.data();
         for (auto* manager : {&artworkNetwork_, &controlNetwork_})
             for (auto* reply : manager->findChildren<QNetworkReply*>()) { disconnect(reply, nullptr, this, nullptr); reply->abort(); }
         delete playbackButton_;
@@ -1602,7 +1621,26 @@ public:
             {QStringLiteral("lineIndex"), karaoke.lineIndex}, {QStringLiteral("syllableIndex"), karaoke.syllableIndex},
             {QStringLiteral("text"), text(karaoke.line, "text")}, {QStringLiteral("nextText"), text(karaoke.next, "text")}};
         if (karaoke.visible) for (auto it = karaokeGeometry_.begin(); it != karaokeGeometry_.end(); ++it) singing.insert(it.key(), it.value());
+        const auto source = sourceLyricsFrame();
+        if (source.visible) {
+            singing.insert(QStringLiteral("active"), source.available);
+            singing.insert(QStringLiteral("available"), source.available);
+            singing.insert(QStringLiteral("manual"), false);
+            singing.insert(QStringLiteral("source"), QStringLiteral("provider"));
+            singing.insert(QStringLiteral("title"), source.title);
+            singing.insert(QStringLiteral("reason"), source.reason);
+            singing.insert(QStringLiteral("status"), source.state);
+            singing.insert(QStringLiteral("phase"), source.untimed ? QStringLiteral("static") : QStringLiteral("line"));
+            singing.insert(QStringLiteral("clockState"), source.clockState);
+            singing.insert(QStringLiteral("positionMs"), source.position);
+            singing.insert(QStringLiteral("countInMs"), source.countIn);
+            singing.insert(QStringLiteral("lineIndex"), source.lineIndex);
+            singing.insert(QStringLiteral("syllableIndex"), -1);
+            singing.insert(QStringLiteral("text"), text(source.line, "text"));
+            singing.insert(QStringLiteral("nextText"), text(source.next, "text"));
+        }
         result.insert(QStringLiteral("karaoke"), singing);
+        result.insert(QStringLiteral("sourceLyrics"), sourceLyricsStatus());
         return result;
     }
     QString requestUrl() const
@@ -1615,6 +1653,7 @@ public:
     {
         setProperty("requestBaseUrl", url);
         if (desk_) desk_->setBase(requestUrl());
+        updateSourceLyrics();
     }
     void setLyricsMode(bool enabled)
     {
@@ -1656,11 +1695,14 @@ protected:
     void hideEvent(QHideEvent* e) override {
         frame_.stop(); if (playbackButton_) playbackButton_->hide(); if (playbackStatus_) playbackStatus_->hide();
         for (const auto& button : shortcutButtons_) if (button) button->hide();
+        if (sourceLyricsText_) sourceLyricsText_->hide();
         QWidget::hideEvent(e);
     }
     bool eventFilter(QObject* o, QEvent* e) override
     {
-        const bool controlEvent = o == playbackButton_ || std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), [o](const auto& button) { return o == button.data(); });
+        const bool lyricsControl = sourceLyricsText_ && (o == sourceLyricsText_ || o == sourceLyricsText_->viewport()
+            || o == sourceLyricsText_->verticalScrollBar());
+        const bool controlEvent = lyricsControl || o == playbackButton_ || std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), [o](const auto& button) { return o == button.data(); });
         if (controlEvent && (e->type() == QEvent::EnabledChange || e->type() == QEvent::MouseButtonRelease
                                     || e->type() == QEvent::Enter || e->type() == QEvent::StyleChange)) {
             if (!cursorRefreshQueued_) {
@@ -1672,7 +1714,8 @@ protected:
                     const auto underPointer = [&pointer](const auto& button) {
                         return button && button->isVisible() && button->rect().contains(button->mapFromGlobal(pointer));
                     };
-                    if (!underPointer(playbackButton_) && !std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), underPointer)) return;
+                    if (!underPointer(playbackButton_) && !underPointer(sourceLyricsText_)
+                        && !std::any_of(shortcutButtons_.begin(), shortcutButtons_.end(), underPointer)) return;
                     auto* hovered = QApplication::widgetAt(pointer);
                     if (!hovered || hovered->window() != cube_->window()) return;
                     // Qt may apply a system cursor when disabling the child,
@@ -2003,6 +2046,7 @@ private:
             button->setGeometry(qRound(rowX + i * (cell + gap)), qRound(27 * u), qRound(cell), qRound(43 * u));
             button->setStyleSheet(controlStyle(u, UiMetrics::small)); button->setVisible(isVisible()); button->raise();
         }
+        updateSourceLyrics();
     }
     void refreshPlaybackState()
     {
@@ -2136,6 +2180,229 @@ private:
             reply->deleteLater(); update();
         });
     }
+
+    static constexpr qsizetype sourceLyricsByteLimit = 2 * 1024 * 1024;
+    QJsonObject sourceLyricsTarget() const
+    {
+        const auto now = state_.value(QStringLiteral("nowPlaying")).toObject();
+        const auto playback = state_.value(QStringLiteral("playbackState")).toObject();
+        return {{QStringLiteral("uid"), text(now, "uid")}, {QStringLiteral("uri"), text(now, "uri")},
+                {QStringLiteral("deviceId"), text(playback.value(QStringLiteral("device")).toObject(), "id")}};
+    }
+    bool sourceLyricsWanted() const { return lyricsMode_ && !karaokeFrame().available; }
+    void clearSourceLyrics()
+    {
+        ++sourceLyricsGeneration_;
+        auto old = sourceLyricsReply_; sourceLyricsReply_.clear();
+        if (old) { disconnect(old, nullptr, this, nullptr); old->abort(); old->deleteLater(); }
+        sourceLyricsBytes_.clear(); sourceLyricsPayload_ = {};
+        sourceLyricsRequestId_.clear(); sourceLyricsState_ = QStringLiteral("idle"); sourceLyricsError_.clear();
+        sourceLyricsAttempted_ = false; sourceLyricsOverflow_ = false;
+        if (sourceLyricsText_) { sourceLyricsText_->clear(); sourceLyricsText_->hide(); }
+    }
+    static bool validSourceLyrics(const QJsonObject& payload)
+    {
+        const QString availability = text(payload, "availability"), timing = text(payload, "timing");
+        if (availability != QStringLiteral("ready") && availability != QStringLiteral("unavailable")
+            && availability != QStringLiteral("instrumental")) return false;
+        if (timing != QStringLiteral("line") && timing != QStringLiteral("none")) return false;
+        if (!payload.value(QStringLiteral("lines")).isArray()) return false;
+        const auto lines = payload.value(QStringLiteral("lines")).toArray();
+        if (lines.size() > 1000 || (availability == QStringLiteral("ready") ? lines.isEmpty() : !lines.isEmpty())) return false;
+        const auto providerValue = payload.value(QStringLiteral("provider"));
+        if (!providerValue.isNull() && !providerValue.isObject()) return false;
+        if (availability == QStringLiteral("ready") && !providerValue.isObject()) return false;
+        if (availability != QStringLiteral("ready") && timing != QStringLiteral("none")) return false;
+        if (providerValue.isObject()) {
+            const auto provider = providerValue.toObject();
+            for (const char* key : {"name", "attribution"})
+                if (!provider.value(QLatin1String(key)).isString() || text(provider, key).trimmed().isEmpty() || text(provider, key).toUcs4().size() > 200) return false;
+            const auto url = provider.value(QStringLiteral("sourceUrl"));
+            if (!url.isNull()) {
+                const QUrl parsed(url.toString(), QUrl::StrictMode);
+                if (!url.isString() || url.toString().size() > 2048 || !parsed.isValid() || parsed.host().isEmpty()
+                    || parsed.scheme() != QStringLiteral("https") || !parsed.userInfo().isEmpty()) return false;
+                for (const auto c : url.toString()) if (c.isSpace() || c.unicode() < 32) return false;
+            }
+        }
+        qsizetype characters = 0; double previous = -1; bool hasWords = false;
+        for (const auto value : lines) {
+            if (!value.isObject()) return false;
+            const auto line = value.toObject(); const auto words = line.value(QStringLiteral("text"));
+            if (!words.isString() || words.toString().toUcs4().size() > 2000) return false;
+            characters += words.toString().toUcs4().size();
+            for (const auto c : words.toString()) if (c.unicode() < 32 && c != QChar('\n') && c != QChar('\t')) return false;
+            if (characters > 100000) return false;
+            hasWords |= !words.toString().trimmed().isEmpty();
+            const auto start = line.value(QStringLiteral("startMs"));
+            if (timing == QStringLiteral("none")) { if (!start.isNull()) return false; }
+            else {
+                if (!start.isDouble() || !std::isfinite(start.toDouble()) || start.toDouble() < 0
+                    || start.toDouble() < previous || start.toDouble() > 24.0 * 60 * 60 * 1000) return false;
+                previous = start.toDouble();
+            }
+        }
+        return availability != QStringLiteral("ready") || hasWords;
+    }
+    void updateSourceLyrics()
+    {
+        const QJsonObject target = sourceLyricsTarget();
+        const QString base = requestUrl();
+        const bool wanted = sourceLyricsWanted();
+        if (wanted != sourceLyricsOpen_ || target != sourceLyricsTarget_ || base != sourceLyricsBase_
+            || stateFile_ != sourceLyricsFile_) {
+            clearSourceLyrics();
+            sourceLyricsOpen_ = wanted; sourceLyricsTarget_ = target;
+            sourceLyricsBase_ = base; sourceLyricsFile_ = stateFile_;
+        }
+        if (!wanted) return;
+        // Reads use the same fresh, private occurrence/device observation as
+        // transport. A clock-only poll never reissues an admitted lyric read.
+        const auto guard = playbackView();
+        if (sourceLyricsAttempted_ || !guard.enabled || !fileError_.isEmpty()
+            || text(target, "uri").isEmpty()) return;
+        QFile token(QFileInfo(stateFile_).dir().filePath(QStringLiteral("admin-token")));
+        if (!token.open(QIODevice::ReadOnly)) return;
+        const QByteArray secret = token.read(4096).trimmed();
+        if (secret.isEmpty()) return;
+        sourceLyricsAttempted_ = true; sourceLyricsState_ = QStringLiteral("loading");
+        sourceLyricsError_.clear(); sourceLyricsBytes_.clear(); sourceLyricsOverflow_ = false;
+        const quint64 generation = ++sourceLyricsGeneration_;
+        const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        sourceLyricsRequestId_ = requestId;
+        QUrl url = QUrl(base).resolved(QUrl(QStringLiteral("/api/admin/lyrics")));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("requestId"), requestId);
+        query.addQueryItem(QStringLiteral("expectedCurrentUid"), text(target, "uid"));
+        query.addQueryItem(QStringLiteral("expectedUri"), text(target, "uri"));
+        query.addQueryItem(QStringLiteral("expectedDeviceId"), text(target, "deviceId"));
+        url.setQuery(query);
+        QNetworkRequest request(url); request.setTransferTimeout(15000);
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+        request.setRawHeader("Authorization", "Bearer " + secret);
+        request.setRawHeader("X-DJ-Operator", "qtra-native");
+        auto* reply = sourceLyricsNetwork_.get(request); sourceLyricsReply_ = reply;
+        reply->setReadBufferSize(sourceLyricsByteLimit + 1);
+        connect(reply, &QNetworkReply::readyRead, this, [this, reply, generation] {
+            if (generation != sourceLyricsGeneration_ || sourceLyricsReply_ != reply) return;
+            sourceLyricsBytes_ += reply->read(sourceLyricsByteLimit + 1 - sourceLyricsBytes_.size());
+            if (sourceLyricsBytes_.size() > sourceLyricsByteLimit) {
+                sourceLyricsOverflow_ = true; reply->abort();
+            }
+        });
+        connect(reply, &QNetworkReply::finished, this, [this, reply, generation, target, base, requestId, file = stateFile_] {
+            if (generation != sourceLyricsGeneration_ || sourceLyricsReply_ != reply) { reply->deleteLater(); return; }
+            sourceLyricsReply_.clear();
+            sourceLyricsBytes_ += reply->read(std::max<qint64>(0, sourceLyricsByteLimit + 1 - sourceLyricsBytes_.size()));
+            const auto document = QJsonDocument::fromJson(sourceLyricsBytes_);
+            const auto payload = document.object();
+            const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const bool current = sourceLyricsWanted() && sourceLyricsTarget() == target
+                && requestUrl() == base && stateFile_ == file;
+            if (!current) { reply->deleteLater(); return; }
+            sourceLyricsState_ = QStringLiteral("error"); sourceLyricsPayload_ = {};
+            if (!sourceLyricsOverflow_ && sourceLyricsBytes_.size() <= sourceLyricsByteLimit
+                && reply->error() == QNetworkReply::NoError && code == 200 && document.isObject()
+                && text(payload, "requestId") == requestId
+                && payload.value(QStringLiteral("target")).toObject() == target && validSourceLyrics(payload)) {
+                sourceLyricsPayload_ = payload; sourceLyricsState_ = text(payload, "availability");
+                sourceLyricsError_.clear();
+                if (text(payload, "timing") == QStringLiteral("none")) {
+                    QStringList words;
+                    for (const auto value : payload.value(QStringLiteral("lines")).toArray()) words.append(text(value.toObject(), "text"));
+                    sourceLyricsText_->setPlainText(words.join(QChar('\n')));
+                }
+            } else if (code == 409 && text(payload, "code") == QStringLiteral("stale_target")) {
+                sourceLyricsError_ = QStringLiteral("Pjesma ili uređaj su se promijenili. Čekam potvrđeno stanje.");
+            } else if (code == 401) {
+                sourceLyricsError_ = QStringLiteral("Lokalna veza za stihove nije potvrđena.");
+            } else if (sourceLyricsOverflow_ || sourceLyricsBytes_.size() > sourceLyricsByteLimit) {
+                sourceLyricsError_ = QStringLiteral("Odgovor sa stihovima je prevelik za ovaj prikaz.");
+            } else {
+                sourceLyricsError_ = QStringLiteral("Stihovi trenutačno nisu dostupni. Zatvori i ponovno otvori prikaz za novi pokušaj.");
+            }
+            sourceLyricsBytes_.clear(); reply->deleteLater(); update();
+        });
+    }
+    struct SourceLyricsFrame {
+        bool visible = false, available = false, untimed = false;
+        QString title, state, reason, clockState, provider, sourceUrl;
+        QJsonArray lines;
+        QJsonObject line, next;
+        int lineIndex = -1;
+        double position = 0, countIn = 0;
+    };
+    SourceLyricsFrame sourceLyricsFrame() const
+    {
+        SourceLyricsFrame frame; frame.visible = sourceLyricsWanted();
+        const auto now = state_.value(QStringLiteral("nowPlaying")).toObject();
+        const auto spotify = state_.value(QStringLiteral("spotify")).toObject();
+        const auto playback = state_.value(QStringLiteral("playbackState")).toObject();
+        frame.title = text(now, "title", QStringLiteral("Nema potvrđene pjesme"));
+        frame.state = sourceLyricsState_;
+        if (!frame.visible) return frame;
+        const auto target = sourceLyricsTarget();
+        const bool current = !text(target, "uid").isEmpty() && !text(target, "uri").isEmpty()
+            && !text(target, "deviceId").isEmpty() && target == sourceLyricsTarget_
+            && sourceLyricsBase_ == requestUrl() && sourceLyricsFile_ == stateFile_
+            && spotify.value(QStringLiteral("connected")).toBool() && fileError_.isEmpty() && !playbackBusy_;
+        if (!current) {
+            frame.state = QStringLiteral("waiting"); frame.reason = QStringLiteral("Čekam potvrđenu pjesmu i Spotify vezu."); return frame;
+        }
+        const auto provider = sourceLyricsPayload_.value(QStringLiteral("provider")).toObject();
+        frame.provider = text(provider, "attribution", text(provider, "name"));
+        if (frame.provider.isEmpty()) frame.provider = text(provider, "name");
+        const QUrl url(text(provider, "sourceUrl"));
+        if ((url.scheme() == QStringLiteral("https") || url.scheme() == QStringLiteral("http")) && url.userInfo().isEmpty())
+            frame.sourceUrl = url.toString();
+        if (frame.state == QStringLiteral("loading")) frame.reason = QStringLiteral("Učitavam stihove ove pjesme…");
+        else if (frame.state == QStringLiteral("instrumental")) frame.reason = QStringLiteral("Ova je snimka označena kao instrumental.");
+        else if (frame.state == QStringLiteral("unavailable")) frame.reason = QStringLiteral("Za ovu snimku izvor nema dostupne stihove.");
+        else if (frame.state == QStringLiteral("error")) frame.reason = sourceLyricsError_;
+        else if (frame.state != QStringLiteral("ready")) frame.reason = QStringLiteral("Čekam svježe stanje za čitanje stihova.");
+        if (frame.state != QStringLiteral("ready")) return frame;
+        frame.available = true; frame.lines = sourceLyricsPayload_.value(QStringLiteral("lines")).toArray();
+        frame.untimed = text(sourceLyricsPayload_, "timing") == QStringLiteral("none");
+        if (frame.untimed) { frame.clockState = QStringLiteral("untimed"); return frame; }
+        frame.position = trackProgress();
+        const bool validClock = trackClockKnown_ && trackClockTrusted_
+            && (!trackClockPlaying_ || QDateTime::currentMSecsSinceEpoch() <= trackClockStamp_ + 10000);
+        const bool paused = playback.value(QStringLiteral("paused")).toBool() || now.value(QStringLiteral("paused")).toBool();
+        const bool buffering = playback.value(QStringLiteral("buffering")).toBool() || now.value(QStringLiteral("buffering")).toBool();
+        frame.clockState = !validClock || buffering ? QStringLiteral("held") : paused ? QStringLiteral("paused") : QStringLiteral("running");
+        for (qsizetype i = 0; i < frame.lines.size(); ++i) {
+            if (number(frame.lines[i].toObject(), "startMs", 0) > frame.position) break;
+            frame.lineIndex = static_cast<int>(i);
+        }
+        if (frame.lineIndex >= 0) frame.line = frame.lines[frame.lineIndex].toObject();
+        if (frame.lineIndex + 1 < frame.lines.size()) {
+            frame.next = frame.lines[frame.lineIndex + 1].toObject();
+            if (frame.lineIndex < 0) frame.countIn = std::max(0.0, number(frame.next, "startMs", 0) - frame.position);
+        }
+        return frame;
+    }
+    QJsonObject sourceLyricsStatus() const
+    {
+        const auto frame = sourceLyricsFrame();
+        QJsonObject result{{QStringLiteral("open"), sourceLyricsOpen_}, {QStringLiteral("panelVisible"), frame.visible},
+            {QStringLiteral("available"), frame.available}, {QStringLiteral("state"), frame.state},
+            {QStringLiteral("target"), sourceLyricsTarget_}, {QStringLiteral("requestId"), sourceLyricsRequestId_},
+            {QStringLiteral("generation"), QString::number(sourceLyricsGeneration_)},
+            {QStringLiteral("timing"), frame.untimed ? QStringLiteral("none") : text(sourceLyricsPayload_, "timing")},
+            {QStringLiteral("lineCount"), frame.lines.size()}, {QStringLiteral("lineIndex"), frame.lineIndex},
+            {QStringLiteral("positionMs"), frame.position}, {QStringLiteral("clockState"), frame.clockState},
+            {QStringLiteral("provider"), frame.provider}, {QStringLiteral("reason"), frame.reason},
+            {QStringLiteral("text"), text(frame.line, "text")}, {QStringLiteral("nextText"), text(frame.next, "text")}};
+        if (sourceLyricsText_) {
+            const auto r = sourceLyricsText_->geometry();
+            result.insert(QStringLiteral("staticTextVisible"), sourceLyricsText_->isVisible());
+            result.insert(QStringLiteral("staticBounds"), QJsonArray{r.x(), r.y(), r.width(), r.height()});
+            result.insert(QStringLiteral("scrollValue"), sourceLyricsText_->verticalScrollBar()->value());
+            result.insert(QStringLiteral("scrollMaximum"), sourceLyricsText_->verticalScrollBar()->maximum());
+        }
+        return result;
+    }
+
     struct KaraokeFrame {
         bool visible = false, available = false, manual = false;
         QJsonObject sheet, line, next;
@@ -2251,9 +2518,83 @@ private:
         layout.endLayout();
         return std::max(0.0, height - gap);
     }
+
+    bool drawSourceLyrics(QPainter& p, double w, double h, double u, const QColor& accent)
+    {
+        const auto frame = sourceLyricsFrame();
+        if (sourceLyricsText_ && (!frame.visible || !frame.available || !frame.untimed)) sourceLyricsText_->hide();
+        if (!frame.visible) return false;
+        const QRectF card(34 * u, 292 * u, w - 68 * u,
+                          std::min(390 * u, graphicsBottom(w, h, u) - 310 * u));
+        if (card.height() < 230 * u || card.width() < 240 * u) return true;
+        const double v = card.height() / 390;
+        const QRectF current = card.adjusted(28 * u, 92 * v, -28 * u, -124 * v);
+        const QRectF next(card.x() + 28 * u, card.y() + 308 * v, card.width() - 56 * u, 45 * v);
+        const QRectF title = card.adjusted(24 * u, 18 * v, -24 * u, -330 * v);
+        p.save(); p.setClipRect(card); panel(p, card, QColor("#7de4ed"), .95);
+        p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(QColor("#7de4ed"));
+        p.drawText(title, Qt::AlignLeft | Qt::AlignVCenter, QFontMetrics(p.font()).elidedText(
+            QStringLiteral("STIHOVI · ") + frame.title, Qt::ElideRight, qRound(title.width() * .68)));
+        QString label;
+        if (frame.available) {
+            label = frame.untimed ? QStringLiteral("Bez vremenskih oznaka")
+                : frame.clockState == QStringLiteral("paused") ? QStringLiteral("Pauza")
+                : frame.clockState == QStringLiteral("held") ? QStringLiteral("Čekam položaj pjesme")
+                : frame.countIn > 0 ? QStringLiteral("Za %1 s").arg(static_cast<int>(std::ceil(frame.countIn / 1000)))
+                : QStringLiteral("Redak po retku");
+        }
+        p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#b6c5dc"));
+        p.drawText(title, Qt::AlignRight | Qt::AlignVCenter, label);
+        const auto rectangle = [](const QRectF& r) { return QJsonArray{r.x(), r.y(), r.width(), r.height()}; };
+        karaokeGeometry_ = {{QStringLiteral("bounds"), rectangle(card)}, {QStringLiteral("lineBounds"), rectangle(current)},
+            {QStringLiteral("nextBounds"), rectangle(next)}, {QStringLiteral("note"), QJsonArray()}};
+        if (!frame.available) {
+            p.setFont(stageFont(32 * u, true)); p.setPen(QColor("#d5e0ee"));
+            p.drawText(current, Qt::AlignCenter | Qt::TextWordWrap, frame.reason);
+            p.setFont(uiFont(u, UiMetrics::secondary)); p.setPen(QColor("#aebcd0"));
+            p.drawText(next, Qt::AlignCenter, QStringLiteral("%1 zatvara prikaz.").arg(shortcutKey(GuestShortcut::Lyrics)));
+        } else if (frame.untimed) {
+            sourceLyricsText_->setGeometry(card.adjusted(28 * u, 78 * v, -28 * u, -42 * v).toAlignedRect());
+            sourceLyricsText_->setFont(stageFont(38 * u));
+            sourceLyricsText_->setToolTip(frame.provider + (frame.sourceUrl.isEmpty() ? QString() : QChar('\n') + frame.sourceUrl));
+            if (!sourceLyricsText_->isVisible() && isVisible()) { sourceLyricsText_->show(); sourceLyricsText_->raise(); }
+            karaokeGeometry_.insert(QStringLiteral("lineBounds"), rectangle(sourceLyricsText_->geometry()));
+        } else {
+            // The provider supplies line starts only. Highlight the complete
+            // current line without creating words, syllables or end timestamps.
+            const auto drawLine = [&](const QString& words, const QRectF& bounds, double size, QColor color, bool bold) {
+                QFont font = stageFont(size * u, bold); QTextLayout layout(words, font);
+                double height = layOutLyrics(layout, bounds.width(), 6 * v);
+                while (height > bounds.height() && font.pixelSize() > uiFont(u, UiMetrics::small).pixelSize()) {
+                    font.setPixelSize(font.pixelSize() - 1); layout.setFont(font);
+                    height = layOutLyrics(layout, bounds.width(), 6 * v);
+                }
+                p.save(); p.setClipRect(bounds); p.setPen(color);
+                layout.draw(&p, QPointF(bounds.x(), bounds.y() + std::max(0.0, (bounds.height() - height) / 2)));
+                p.restore();
+            };
+            drawLine(text(frame.line, "text"), current, 58, accent, true);
+            line(p, QPointF(card.left() + 28 * u, card.top() + 282 * v),
+                 QPointF(card.right() - 28 * u, card.top() + 282 * v), QColor("#34475f"), u);
+            if (!frame.next.isEmpty()) {
+                p.setFont(uiFont(u, UiMetrics::small, true)); p.setPen(QColor("#a8bad2"));
+                p.drawText(QRectF(next.x(), card.top() + 286 * v, next.width(), 19 * v), Qt::AlignCenter, QStringLiteral("SLJEDEĆE"));
+                drawLine(text(frame.next, "text"), next, 30, QColor("#aebcd0"), false);
+            }
+        }
+        if (!frame.provider.isEmpty()) {
+            const QRectF attribution(card.x() + 28 * u, card.bottom() - 30 * v, card.width() - 56 * u, 24 * v);
+            p.setFont(uiFont(u, UiMetrics::small)); p.setPen(QColor("#b6c5dc"));
+            p.drawText(attribution, Qt::AlignCenter, QFontMetrics(p.font()).elidedText(
+                QStringLiteral("Izvor: ") + frame.provider, Qt::ElideRight, qRound(attribution.width())));
+        }
+        p.restore(); return true;
+    }
+
     void drawKaraoke(QPainter& p, double w, double h, double u, QColor orange)
     {
         karaokeGeometry_ = {};
+        if (drawSourceLyrics(p, w, h, u, orange)) return;
         const auto frame = karaokeFrame();
         if (!frame.visible) return;
         const QRectF card(34 * u, 292 * u, w - 68 * u,
@@ -2551,7 +2892,14 @@ private:
     QPointer<QPushButton> playbackButton_;
     QPointer<QLabel> playbackStatus_;
     std::array<QPointer<QPushButton>, static_cast<std::size_t>(GuestShortcut::Count)> shortcutButtons_;
-    QNetworkAccessManager artworkNetwork_{this}, controlNetwork_{this};
+    QNetworkAccessManager artworkNetwork_{this}, controlNetwork_{this}, sourceLyricsNetwork_{this};
+    QPointer<QTextBrowser> sourceLyricsText_;
+    QPointer<QNetworkReply> sourceLyricsReply_;
+    QJsonObject sourceLyricsTarget_, sourceLyricsPayload_;
+    QString sourceLyricsBase_, sourceLyricsFile_, sourceLyricsRequestId_, sourceLyricsState_, sourceLyricsError_;
+    QByteArray sourceLyricsBytes_;
+    quint64 sourceLyricsGeneration_ = 0;
+    bool sourceLyricsOpen_ = false, sourceLyricsAttempted_ = false, sourceLyricsOverflow_ = false;
     QPointer<QNetworkReply> artworkReply_;
     QCache<QString, QImage> artworkCache_{8};
     QImage artwork_;
