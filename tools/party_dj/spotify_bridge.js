@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 13) return {ready: true};
+  if (window.__laricsDJ?.version === 14) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -272,7 +272,7 @@
     catch { return false; }
   };
   const bridge = {
-    version: 13,
+    version: 14,
     operations,
     async status() {
       if (browserController) ensureActualState();
@@ -420,28 +420,56 @@
       if (!/^spotify:track:[A-Za-z0-9]{22}$/.test(uri)) throw new Error('Invalid track.');
       if (operations.has(requestId)) return operations.get(requestId);
       const pending = (async () => {
-        let before;
+        const validUid = value => typeof value === 'string' && value.trim().length > 0;
+        const identity = item => [item?.uid, item?.uri];
+        const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+        const queueApi = player._queue, manager = queueApi?._queueManager;
+        let before, target;
         try {
-          if (browserController) ensureActualState();
+          ensureActualState();
+          if (typeof manager?.addToQueue !== 'function' || typeof queueApi?.getInternalQueue !== 'function'
+              || typeof harmony?.getCurrentState !== 'function' || !manager._currentPlayerState) {
+            throw new Error('Spotify has no awaitable, targeted queue-addition connection.');
+          }
+          target = deviceInfo(await activeTarget());
+          if (browserController && target.isLocal) throw new Error('Queue additions require the active standalone Spotify device.');
           before = await player.getQueue();
           if (!before || !Array.isArray(before.queued)) throw new Error('Spotify has not supplied its current explicit queue.');
-          if (browserController) ensureActualState();
+          if (!validUid(before.current?.uid) || !before.current?.uri) throw new Error('Spotify has not identified the current occurrence for the queue addition.');
+          const observed = await bridge.status();
+          if (observed.playbackState.source !== 'harmony' || observed.playbackState.device?.id !== target.id
+              || !same(identity(observed.nowPlaying), identity(before.current))) {
+            throw new Error('The actual Spotify occurrence or device changed before the queue addition.');
+          }
+          if ((await activeTarget()).id !== target.id) throw new Error('The active Spotify device changed before queue-addition dispatch.');
+          ensureActualState();
+          const latest = queueApi.getInternalQueue();
+          const queued = latest?.next_items?.filter(item => item.provider === 'queue' && !item.hidden_in_queue);
+          if (!same(identity(latest?.current_track), identity(before.current)) || !Array.isArray(queued)
+              || !same(queued.map(identity), before.queued.map(identity))) {
+            throw new Error('The Spotify current occurrence or explicit queue changed before queue-addition dispatch.');
+          }
+          if (manager._currentPlayerState?.restrictions?.disallow_add_to_queue_reasons?.length) {
+            throw new Error('The active Spotify device currently forbids queue additions.');
+          }
         } catch (error) {
           return {error: String(error?.message || error), dispatched: false};
         }
-        const validUid = value => typeof value === 'string' && value.trim().length > 0;
         const initialCurrentUid = before.current?.uid;
         const previousCount = before.queued.filter(t => t.uri === uri).length;
         const previousUids = new Set(before.queued.map(t => t.uid));
         previousUids.add(initialCurrentUid);
         try {
-          const accepted = await player.addToQueue([{uri}]);
+          // The public wrapper drops the manager's promise and omits its device.
+          // Await the actual command and bind it to the observed playback device.
+          const accepted = await manager.addToQueue([uri], target.id);
           if (accepted === false) throw new Error('Spotify did not acknowledge the queue addition; inspect its actual queue.');
           const deadline = Date.now() + 6000;
           while (Date.now() < deadline) {
-            if (browserController) ensureActualState();
+            ensureActualState();
             const after = await player.getQueue();
-            if (browserController) ensureActualState();
+            if ((await activeTarget()).id !== target.id) throw new Error('The active Spotify device changed before the queue addition was confirmed.');
+            ensureActualState();
             if (!after || !Array.isArray(after.queued)) throw new Error('Spotify returned an incomplete queue after the addition.');
             const matching = after.queued.filter(t => t.uri === uri);
             const added = matching.filter(t => validUid(t.uid) && !previousUids.has(t.uid));

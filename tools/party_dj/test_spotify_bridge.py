@@ -52,6 +52,20 @@ async function fixture(options = {}) {
       return true;
     }};
   let api, harmony;
+  let wrapperAddCalls = 0, localActivations = 0;
+  const enqueueRunnerCalls = [];
+  manager._runner = (command, id) => {
+    const remote = !!id && id !== '@local' && devices.some(device => device.id === id && !device.local);
+    enqueueRunnerCalls.push({id, remote});
+    if (!remote) {localActivations++; harmony._hasFakeState = true;}
+    return Promise.resolve().then(command);
+  };
+  manager.addToQueue = (uris, id) => manager._runner(() => {
+    calls.push({action: 'addToQueue', id, uris: plain(uris)});
+    if (options.onAddCommand) return options.onAddCommand({items: uris.map(uri => ({uri})), id,
+      queue, internal, raw, state, harmony, devices, manager, syncQueue});
+    return true;
+  }, id);
   const skipCalls = [];
   const advanceTo = item => {
     internal.current_track = item; state.item = item; raw.track_window.current_track = item;
@@ -101,11 +115,8 @@ async function fixture(options = {}) {
       if (options.onQueueRead) options.onQueueRead({queue, internal, calls, harmony, raw, state, devices, syncQueue, read: ++queueReads});
       return structuredClone(queue);
     },
-    addToQueue: async items => {
-      calls.push({action: 'addToQueue'});
-      if (options.onAddCommand) return options.onAddCommand({items, queue, internal, raw, state, harmony, syncQueue});
-      return true;
-    },
+    // The observed public wrapper drops the manager promise and device argument.
+    addToQueue: async items => {wrapperAddCalls++; manager.addToQueue(items.map(item => item.uri));},
     skipToNext: async () => calls.push({action: 'next'}),
     pause: async () => { calls.push({action: 'wrapperPause'}); state.isPaused = true; },
     resume: async () => { calls.push({action: 'wrapperResume'}); state.isPaused = false; }};
@@ -154,7 +165,8 @@ async function fixture(options = {}) {
   assert.equal(ready.ready, true);
   return {bridge: window.__laricsDJ, calls, raw, state, devices, harmony, api, manager, queue, internal, syncQueue,
     lastQueuePayload: () => lastQueuePayload,
-    advance: milliseconds => { clock += milliseconds; }, catalogue, showSearch, location, timerCalls, skipCalls};
+    advance: milliseconds => { clock += milliseconds; }, catalogue, showSearch, location, timerCalls, skipCalls,
+    enqueueRunnerCalls, wrapperAddCalls: () => wrapperAddCalls, localActivations: () => localActivations};
 }
 '''
 
@@ -947,8 +959,8 @@ for (const kind of ['previously-queued', 'previously-unidentified']) {
     }});
   if (kind === 'previously-unidentified') f.queue.current = {...f.queue.current, uid: null};
   const result = await f.bridge.enqueue(f.queue.current.uri, 'different-occurrence-required');
-  assert.equal(result.dispatched, true, kind);
-  assert.equal(f.calls.length, 1);
+  assert.equal(result.dispatched, kind === 'previously-queued', kind);
+  assert.equal(f.calls.length, kind === 'previously-queued' ? 1 : 0);
 }
 ''')
 
@@ -962,6 +974,106 @@ for (const duringRead of [false, true]) {
   assert.match(result.error, /synthetic local state/);
   assert.equal(f.calls.length, 0);
   assert.equal(f.bridge.operations.has('fake-state-request'), false);
+}
+''')
+
+    def test_enqueue_awaits_the_targeted_manager_promise_and_avoids_local_wrapper(self):
+        self.run_js(r'''
+let acknowledge;
+const acknowledgement = new Promise(resolve => {acknowledge = resolve;});
+const f = await fixture({onAddCommand: ({internal, syncQueue, id}) => {
+  assert.equal(id, 'standalone');
+  internal.next_items.push(queuedTrack('new-targeted-occurrence', 'a')); syncQueue();
+  return acknowledgement;
+}});
+let settled = false;
+const pending = f.bridge.enqueue(f.queue.current.uri, 'await-targeted-ack');
+pending.then(() => {settled = true;});
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(f.calls.length, 1);
+assert.equal(settled, false, 'queue presence was accepted before the manager acknowledged');
+assert.deepEqual(f.enqueueRunnerCalls, [{id: 'standalone', remote: true}]);
+assert.equal(f.wrapperAddCalls(), 0);
+assert.equal(f.localActivations(), 0);
+assert.equal(f.harmony._hasFakeState, false);
+acknowledge(true);
+const result = await pending;
+assert.equal(result.queued, true); assert.equal(result.uid, 'new-targeted-occurrence');
+assert.deepEqual(plain(await f.bridge.enqueue(f.queue.current.uri, 'await-targeted-ack')), plain(result));
+assert.equal(f.calls.length, 1);
+''')
+
+    def test_enqueue_propagates_async_manager_rejection_without_replay(self):
+        self.run_js(r'''
+const f = await fixture({onAddCommand: () => Promise.reject(new Error('Targeted add rejected'))});
+const result = await f.bridge.enqueue(f.queue.current.uri, 'targeted-rejection');
+assert.equal(result.dispatched, true); assert.match(result.error, /Targeted add rejected/);
+assert.deepEqual(plain(await f.bridge.enqueue(f.queue.current.uri, 'targeted-rejection')), plain(result));
+assert.equal(f.calls.length, 1); assert.equal(f.wrapperAddCalls(), 0);
+assert.equal(f.localActivations(), 0);
+''')
+
+    def test_enqueue_rejects_missing_targeted_capability_and_actual_device(self):
+        self.run_js(r'''
+for (const options of [{withHarmony:false}, {devices:[]}, {observedDevice:{id:'other'}},
+  {devices:[{id:'browser',local:true,is_active:true,is_controllable:true,is_observable:true}]},
+  {devices:[{id:'restricted',local:false,is_active:true,is_controllable:false,is_observable:true}]},
+  {restrictions:{disallow_add_to_queue_reasons:['restricted']}}]) {
+  const f = await fixture(options);
+  const result = await f.bridge.enqueue(f.queue.current.uri, 'missing-target');
+  assert.equal(result.dispatched, false, JSON.stringify(options));
+  assert.equal(f.calls.length, 0); assert.equal(f.wrapperAddCalls(), 0);
+  assert.deepEqual(f.enqueueRunnerCalls, []);
+}
+for (const missing of ['addToQueue','state']) {
+  const f = await fixture();
+  if (missing === 'state') f.manager._currentPlayerState = null;
+  else delete f.manager.addToQueue;
+  const result = await f.bridge.enqueue(f.queue.current.uri, 'missing-manager');
+  assert.equal(result.dispatched, false); assert.equal(f.calls.length, 0);
+}
+''')
+
+    def test_enqueue_rechecks_current_device_queue_and_fake_state_before_dispatch(self):
+        self.run_js(r'''
+const changes = [
+  state => {state.devices[0].id = 'other-device';},
+  state => {state.harmony._hasFakeState = true;},
+  state => {state.internal.current_track = {...state.internal.current_track, uid:'manual-next'}; state.syncQueue();},
+  state => {state.internal.next_items.push(queuedTrack('manual-add')); state.syncQueue();},
+  state => {state.manager._currentPlayerState.restrictions.disallow_add_to_queue_reasons = ['manual'];}
+];
+for (const change of changes) {
+  const f = await fixture({onDevicesRead: state => {
+    if (state.read === 2) change({...state, syncQueue: () => {
+      state.queue.current = state.internal.current_track;
+      state.queue.queued = state.internal.next_items.filter(item => item.provider === 'queue');
+    }, manager: f.manager});
+  }});
+  const result = await f.bridge.enqueue(f.queue.current.uri, 'changed-before-dispatch');
+  assert.equal(result.dispatched, false); assert.equal(f.calls.length, 0);
+  assert.equal(f.wrapperAddCalls(), 0); assert.deepEqual(f.enqueueRunnerCalls, []);
+  assert.equal(f.bridge.operations.has('changed-before-dispatch'), false);
+}
+const actualChanged = await fixture({onRawRead: ({raw}) => {
+  raw.track_window.current_track = {...raw.track_window.current_track, uid:'new-actual-occurrence'};
+}});
+assert.equal((await actualChanged.bridge.enqueue(actualChanged.queue.current.uri, 'changed-actual')).dispatched, false);
+assert.equal(actualChanged.calls.length, 0);
+''')
+
+    def test_enqueue_device_or_fake_state_change_after_dispatch_is_uncertain(self):
+        self.run_js(r'''
+for (const change of [state => {state.devices[0].id = 'manual-device';},
+                      state => {state.harmony._hasFakeState = true;}]) {
+  const f = await fixture({onAddCommand: state => {
+    state.internal.next_items.push(queuedTrack('new-on-uncertain-target', 'a'));
+    state.syncQueue(); change(state); return true;
+  }});
+  const result = await f.bridge.enqueue(f.queue.current.uri, 'changed-after-dispatch');
+  assert.equal(result.dispatched, true); assert.equal(typeof result.error, 'string');
+  await f.bridge.enqueue(f.queue.current.uri, 'changed-after-dispatch');
+  assert.equal(f.calls.length, 1); assert.equal(f.wrapperAddCalls(), 0);
 }
 ''')
 
