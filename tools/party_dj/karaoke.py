@@ -8,6 +8,17 @@ import re
 
 TRACK = re.compile(r'^spotify:track:[A-Za-z0-9]{22}$')
 MAX_TIME = 24 * 60 * 60 * 1000
+CLOCK_FRESH_MS = 10000
+
+
+def clock_number(value, maximum):
+    """A reported zero is valid; an absent, boolean or nonfinite value is not."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return value if math.isfinite(value) and 0 <= value <= maximum else None
+    except OverflowError:
+        return None
 
 
 def milliseconds(value, name, minimum=0, maximum=MAX_TIME):
@@ -38,7 +49,9 @@ def normalize(body, current, stamp):
     if not isinstance(uid, str) or len(uid) > 180:
         raise ValueError('trackUid must be text.')
     if source == 'spotify' and not uid and uri in (current.get('uri'), current.get('requestedUri')):
-        uid = current.get('uid', '')
+        candidate = current.get('uid')
+        if isinstance(candidate, str) and len(candidate) <= 180:
+            uid = candidate
     rows = body.get('lines')
     if not isinstance(rows, list) or not 1 <= len(rows) <= 300:
         raise ValueError('Provide 1 to 300 timed lyric lines.')
@@ -83,9 +96,37 @@ def normalize(body, current, stamp):
 class Karaoke:
     def __init__(self, saved=None):
         self.sheet = copy.deepcopy(saved)
+        self._last_position = None
 
     def saved(self):
         return copy.deepcopy(self.sheet)
+
+    def _matches(self, current):
+        return (self.sheet['trackUid'] == current.get('uid') if self.sheet['trackUid']
+                else self.sheet['trackUri'] in (current.get('uri'), current.get('requestedUri')))
+
+    def observe(self, current, connected, stamp):
+        """Accept an observation before snapshot; persist saved() when this returns true.
+
+        The first matching occurrence binds a preloaded URI sheet to its UID.
+        Clock fallback is an in-memory measured position, never a running clock.
+        """
+        if not self.sheet or self.sheet['source'] != 'spotify' or not connected:
+            return False
+        current = current or {}
+        if not self._matches(current):
+            return False
+        changed = False
+        uid = current.get('uid')
+        if not self.sheet['trackUid'] and isinstance(uid, str) and 0 < len(uid) <= 180:
+            self.sheet['trackUid'] = uid
+            changed = True
+        position = clock_number(current.get('progressMs'), MAX_TIME)
+        observed = clock_number(current.get('observedAt'), stamp)
+        source_valid = current.get('clockValid', True) is True
+        if source_valid and position is not None and observed is not None and stamp - observed < CLOCK_FRESH_MS:
+            self._last_position = position
+        return changed
 
     def _manual_position(self, stamp):
         sheet = self.sheet
@@ -99,9 +140,12 @@ class Karaoke:
         if command == 'load':
             # Validate the entire sheet before replacing the one on screen.
             self.sheet = normalize(body, current or {}, stamp)
+            self._last_position = None
+            self.observe(current, True, stamp)
             return
         if command == 'stop':
             self.sheet = None
+            self._last_position = None
             return
         if not self.sheet:
             raise ValueError('Load a karaoke sheet first.')
@@ -129,22 +173,48 @@ class Karaoke:
         if not self.sheet:
             return None
         sheet = self.sheet
-        result = {key: value for key, value in sheet.items() if not key.startswith('_')}
+        result = copy.deepcopy({key: value for key, value in sheet.items() if not key.startswith('_')})
         current = current or {}
+        held = False
         if sheet['source'] == 'manual':
             position = self._manual_position(stamp)
             playing = sheet['_playing']
             matched = True
         else:
-            matched = connected and (sheet['trackUid'] == current.get('uid') if sheet['trackUid']
-                else sheet['trackUri'] in (current.get('uri'), current.get('requestedUri')))
-            playing = bool(current.get('playing')) and matched
-            elapsed = max(0, stamp - current.get('observedAt', stamp)) if playing else 0
-            position = current.get('progressMs', 0) + elapsed if matched else 0
+            matched = connected and self._matches(current)
+            position, playing = 0, False
+            result['clockValidUntil'] = 0
+            if not matched:
+                result['clockState'] = 'unmatched' if connected else 'disconnected'
+            else:
+                # Older observations lack this additive flag. An explicit
+                # invalid clock can contain a numeric fallback, not an anchor.
+                source_valid = current.get('clockValid', True) is True
+                measured = clock_number(current.get('progressMs'), MAX_TIME) if source_valid else None
+                observed = clock_number(current.get('observedAt'), stamp)
+                if measured is None or observed is None:
+                    # Hold an available measured position without turning a
+                    # missing source clock into a freshly sampled zero.
+                    position = measured if measured is not None else self._last_position
+                    if position is None:
+                        position = 0
+                    held = True
+                    result['clockState'] = 'invalid'
+                else:
+                    deadline = int(observed + CLOCK_FRESH_MS)
+                    result['clockValidUntil'] = deadline
+                    buffering = bool(current.get('buffering'))
+                    running = current.get('playing') is True and not current.get('paused') and not buffering
+                    elapsed = max(0, min(stamp, deadline) - observed) if running else 0
+                    position = measured + elapsed
+                    held = stamp >= deadline
+                    playing = running and not held
+                    result['clockState'] = ('stale' if held else 'buffering' if buffering
+                                            else 'running' if playing else 'paused')
         # A negative anchor preserves a future lyric start during interpolation.
         # The renderer clamps only after adding elapsed time to this anchor.
         adjusted = min(sheet['durationMs'], position + sheet['offsetMs']) if matched else 0
-        status = ('waiting' if not matched else 'finished' if adjusted >= sheet['durationMs']
+        status = ('waiting' if not matched else 'held' if held else 'finished' if adjusted >= sheet['durationMs']
                   else 'playing' if playing else 'paused')
         result.update({'status': status, 'positionMs': int(adjusted), 'sampledAt': stamp})
         return result

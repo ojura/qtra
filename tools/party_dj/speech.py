@@ -133,7 +133,7 @@ class SpotifyMixer:
         self.sleep, self.clock = sleep, clock
         self.available = self.pulse.available
 
-    def play(self, prepared, valid, stop):
+    def play(self, prepared, valid, stop, on_started=None):
         pulse = self.pulse
         stream = pulse.find_spotify()
         index, sink = stream['index'], stream['sink']
@@ -186,6 +186,12 @@ class SpotifyMixer:
             if stop.is_set() or not valid():
                 raise SpeechCancelled('Playback changed before speech started.')
             player = pulse.play(prepared.path, output, voice_volume)
+            if player.poll() not in (None, 0):
+                raise SpeechError('The speech player could not start this dedication.')
+            if stop.is_set() or not valid():
+                raise SpeechCancelled('Playback changed before speech started.')
+            if on_started is not None:
+                on_started()
             deadline = self.clock() + prepared.seconds + 3
             while player.poll() is None:
                 current = checked()
@@ -197,6 +203,7 @@ class SpotifyMixer:
                 self.sleep(.10)
             if player.returncode:
                 raise SpeechError('The speech player could not play this dedication.')
+            return {'kind': 'process_exit', 'returnCode': 0, 'audibleVerification': 'unperformed'}
         finally:
             if player is not None and player.poll() is None:
                 player.terminate()
@@ -217,56 +224,158 @@ class SpotifyMixer:
 
 
 class DedicationAudio:
-    def __init__(self, data, voice=None, mixer=None):
+    PREPARATION_LIMIT = 3
+    OBSERVATION_TTL_MS = 10000
+
+    def __init__(self, data, voice=None, mixer=None, *, clock=time.monotonic, wall_clock=time.time):
         self.data = Path(data)
         self.voice = voice or CroatianVoice(self.data / 'speech')
         self.mixer = mixer or SpotifyMixer()
+        self.clock, self.wall_clock = clock, wall_clock
         self.available = bool(self.voice.available and self.mixer.available)
+        self.unavailable_error = 'Speech preparation or local playback is unavailable.' if not self.available else None
         self.enabled = True
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
         self.stop = threading.Event()
         self.thread = None
         self.current = {}
+        self.current_device = None
+        self.current_started_at = None
         self.initial_track = None
-        self.current_seen = time.monotonic()
+        self.current_seen = self.clock()
+        self.generation = 0
         self.jobs = collections.deque()
         self.prepares = collections.OrderedDict()
-        self.preparing = set()
+        self.preparing = {}
+        self.targets = collections.OrderedDict()
+        self.next_preparation = 0
         self.ready = {}
+        self.ready_at = {}
         self.prepare_errors = {}
         self.last = None
         self.history_file = self.data / 'speech-history.json'
         try:
             self.history = json.loads(self.history_file.read_text())
+            if not isinstance(self.history, dict):
+                raise ValueError('Speech history must be an object.')
         except FileNotFoundError:
             self.history = {}
         except (ValueError, OSError):
-            # Without the history, automatic repeats cannot be reconciled.
             self.history = {}
             self.available = False
-            self.last = {'status': 'unavailable', 'error': 'Speech history cannot be read.'}
+            self.unavailable_error = 'Speech history cannot be read.'
+            self.last = {'status': 'unavailable', 'error': self.unavailable_error}
 
     @staticmethod
     def track_key(track):
         return track.get('uid') or track.get('uri') or ''
 
-    def _record(self, key, text, status, error=None):
-        item = {'id': key, 'text': text, 'status': status, 'updatedAt': int(time.time()*1000)}
+    @staticmethod
+    def occurrence_uid(track):
+        uid = track.get('uid')
+        return uid if isinstance(uid, str) and uid.strip() else None
+
+    @staticmethod
+    def playing(track):
+        return (track.get('playing') is True and track.get('paused', False) is False
+                and track.get('buffering', False) is False)
+
+    @staticmethod
+    def finite_number(value):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+
+    def _position(self, track):
+        if 'clockValid' in track and track['clockValid'] is not True:
+            return None
+        progress, observed_at = track.get('progressMs'), track.get('observedAt')
+        wall_now = self.wall_clock()
+        if (not self.finite_number(progress) or progress < 0
+                or not self.finite_number(observed_at) or observed_at < 0
+                or not self.finite_number(wall_now)):
+            return None
+        age = wall_now * 1000 - observed_at
+        if age < 0 or age >= self.OBSERVATION_TTL_MS:
+            return None
+        return progress + age
+
+    @staticmethod
+    def device_key(playback_state):
+        device = (playback_state or {}).get('device') or {}
+        return device.get('id') if isinstance(device, dict) else None
+
+    def _record(self, key, text, status, error=None, evidence=None):
+        item = {'id': key, 'text': text, 'status': status, 'updatedAt': int(self.wall_clock()*1000)}
         if error:
             item['error'] = str(error)[:250]
-        self.history[key] = item
+        if evidence is not None:
+            item['evidence'] = dict(evidence)
+        updated = {**self.history, key: item}
         temporary = self.history_file.with_suffix('.tmp')
-        temporary.write_text(json.dumps(self.history, ensure_ascii=False))
+        temporary.write_text(json.dumps(updated, ensure_ascii=False))
         os.replace(temporary, self.history_file)
+        self.history = updated
         self.last = item
         return item
 
+    def _finish(self, job, status, error=None, evidence=None):
+        try:
+            return self._record(job['key'], job['text'], status, error, evidence)
+        except OSError as failure:
+            self.last = {'id': job['key'], 'status': 'failed', 'error': str(failure)[:250]}
+
+    def _cancel_jobs(self, reason):
+        self.generation += 1
+        while self.jobs:
+            job = self.jobs.popleft()
+            if job.get('prepared') is not None:
+                job['prepared'].close()
+            self._finish(job, 'cancelled', reason)
+
+    def _discard_preparation(self, rid):
+        self.targets.pop(rid, None)
+        self.prepares.pop(rid, None)
+        self.prepare_errors.pop(rid, None)
+        self.ready_at.pop(rid, None)
+        prepared = self.ready.pop(rid, None)
+        if prepared is not None:
+            prepared.close()
+
     def snapshot(self):
         with self.lock:
+            preparations, attention = [], []
+            for rid, target in self.targets.items():
+                error = self.prepare_errors.get(rid)
+                if error:
+                    status = 'failed'
+                    attention.append({'requestId': rid, 'kind': 'preparation_failed', 'error': error})
+                elif rid in self.ready:
+                    status = 'ready'
+                elif target.get('terminal'):
+                    status = target['terminal']
+                elif self.preparing.get(rid) == target['token']:
+                    status = 'preparing'
+                else:
+                    status = 'queued'
+                item = {'requestId': rid, 'status': status, 'ready': status == 'ready',
+                        'occurrenceUid': target.get('uid'), 'text': target['text']}
+                if rid in self.ready:
+                    item['seconds'] = self.ready[rid].seconds
+                if error:
+                    item['error'] = error
+                preparations.append(item)
+            if self.unavailable_error:
+                attention.append({'requestId': None, 'kind': 'unavailable', 'error': self.unavailable_error})
             return {'available': self.available, 'enabled': self.available and self.enabled, 'voice': 'hr',
                     'speaking': bool(self.last and self.last['status'] == 'speaking'),
-                    'pending': len(self.jobs), 'last': self.last}
+                    'pending': len(self.jobs), 'last': dict(self.last) if self.last else None,
+                    'preparations': preparations[:self.PREPARATION_LIMIT + 1],
+                    'attention': attention[:self.PREPARATION_LIMIT + 1]}
 
     def start(self):
         if self.available and self.thread is None:
@@ -277,63 +386,121 @@ class DedicationAudio:
         with self.changed:
             self.enabled = bool(enabled)
             if not self.enabled:
-                self.prepares.clear()
+                self._cancel_jobs('Speech was disabled.')
+                for rid in list(self.targets):
+                    self._discard_preparation(rid)
             self.changed.notify_all()
 
     def interrupt(self):
-        with self.lock:
-            self.current['playing'] = False
-
-    def observe(self, current, requests):
         with self.changed:
-            self.current = dict(current or {})
-            self.current_seen = time.monotonic()
+            self._cancel_jobs('Playback was interrupted.')
+            self.current['playing'] = False
+            self.changed.notify_all()
+
+    def _want_preparation(self, request):
+        rid, text = request['id'], short_text(request['dedication'])
+        uid = request.get('uid')
+        target = self.targets.get(rid)
+        if target and (target['text'] != text or (target.get('uid') and uid and target['uid'] != uid)):
+            self._discard_preparation(rid)
+            target = None
+        if target is None:
+            self.next_preparation += 1
+            target = {'text': text, 'uid': uid, 'token': self.next_preparation}
+            self.targets[rid] = target
+        elif uid:
+            target['uid'] = uid
+        if (rid not in self.ready and rid not in self.prepare_errors and not target.get('terminal')
+                and self.preparing.get(rid) != target['token']):
+            self.prepares[rid] = (text, target['token'])
+
+    def observe(self, current, requests, *, playback_state=None):
+        with self.changed:
+            previous_key = self.track_key(self.current)
+            previous_playing = self.playing(self.current)
+            device = self.current_device if playback_state is None else self.device_key(playback_state)
+            incoming = dict(current or {})
+            if playback_state is not None:
+                for flag in ('paused', 'buffering'):
+                    if flag in playback_state and playback_state[flag] is not False:
+                        incoming[flag] = playback_state[flag]
+                if 'clockValid' in playback_state and playback_state['clockValid'] is not True:
+                    incoming['clockValid'] = playback_state['clockValid']
+            key = self.track_key(incoming)
+            progress = self._position(incoming)
+            if key != previous_key or device != self.current_device:
+                self._cancel_jobs('The requested occurrence or output device changed.')
+            elif key and (progress is None or (previous_playing and not self.playing(incoming))):
+                self._cancel_jobs('Playback paused, buffered or lost a fresh observation.')
+            if key != previous_key:
+                self.current_started_at = None
+            self.current, self.current_device = incoming, device
+            self.current_seen = self.clock()
+            if progress is not None and self.playing(self.current) and self.current_started_at is None:
+                self.current_started_at = self.current_seen - progress / 1000
             if not self.available:
                 return
-            key = self.track_key(self.current)
             if key and self.initial_track is None:
                 self.initial_track = key
             elif key and self.initial_track and key != self.initial_track:
                 self.initial_track = ''
             if not self.enabled:
                 return
-            future = [r for r in requests if r.get('dedication') and r.get('status') != 'playing'][:3]
-            wanted = {r['id'] for r in future}
-            retained = wanted | {self.current.get('requestId')} | {j['preparedId'] for j in self.jobs}
-            for rid in list(self.ready):
-                if rid not in retained:
-                    self.ready.pop(rid).close()
-            for rid in list(self.prepare_errors):
-                if rid not in retained:
-                    self.prepare_errors.pop(rid, None)
-            for rid in list(self.prepares):
-                if rid not in wanted:
-                    self.prepares.pop(rid, None)
-            for r in future:
-                text = short_text(r['dedication'])
-                if (r['id'] not in self.ready and r['id'] not in self.prepare_errors
-                        and r['id'] not in self.preparing):
-                    self.prepares[r['id']] = text
+            future = [r for r in requests if r.get('dedication') and r.get('status') != 'playing'][:self.PREPARATION_LIMIT]
             rid, text = self.current.get('requestId'), self.current.get('dedication')
-            if (rid and text and key != self.initial_track and self.current.get('playing')
-                    and float(self.current.get('progressMs', 0)) <= 12000):
+            retained = {r['id'] for r in future} | {rid}
+            for old in list(self.targets):
+                if old not in retained:
+                    self._discard_preparation(old)
+            for request in future:
+                self._want_preparation(request)
+            if (rid and text and key != self.initial_track and self.playing(self.current)
+                    and progress is not None):
                 job_key = f'dedication:{rid}:{key}'
                 if job_key not in self.history:
+                    target = self.targets.get(rid)
+                    ready = self.ready.get(rid)
+                    reason = None
+                    if self.occurrence_uid(self.current) is None:
+                        reason = 'The requested occurrence has no verified UID.'
+                    elif progress > 12000:
+                        reason = 'The opening of the requested song has passed.'
+                    elif ready is None or target is None or target['text'] != short_text(text):
+                        reason = self.prepare_errors.get(rid) or 'The dedication was not ready before its occurrence.'
+                    elif target.get('uid') and target['uid'] != self.current['uid']:
+                        reason = 'The prepared dedication belongs to another occurrence.'
+                    elif self.ready_at[rid] > self.current_started_at:
+                        reason = 'The dedication became ready after its occurrence started.'
                     try:
-                        self._enqueue(job_key, short_text(text), key, rid, automatic=True)
+                        if reason:
+                            self._record(job_key, short_text(text), 'missed', reason)
+                            self.prepares.pop(rid, None)
+                            if target is not None:
+                                self.next_preparation += 1
+                                target.update(token=self.next_preparation, terminal='missed')
+                            stale = self.ready.pop(rid, None)
+                            self.ready_at.pop(rid, None)
+                            if stale is not None:
+                                stale.close()
+                        else:
+                            self._enqueue(job_key, short_text(text), key, rid, automatic=True, prepared=ready)
+                            self.ready.pop(rid)
+                            self.ready_at.pop(rid, None)
+                            target['terminal'] = 'consumed'
                     except OSError as error:
-                        self.last = {'status': 'failed', 'error': str(error)[:250]}
+                        self.last = {'id': job_key, 'status': 'failed', 'error': str(error)[:250]}
             self.changed.notify_all()
 
-    def _enqueue(self, key, text, expected, prepared_id, automatic=False):
+    def _enqueue(self, key, text, expected, prepared_id, automatic=False, prepared=None):
         existing = self.history.get(key)
         if existing:
             if existing['text'] != text:
                 raise ValueError('This speech request ID already has different text.')
             return {'queued': existing['status'] == 'queued', **existing}
         self._record(key, text, 'queued')
-        self.jobs.append({'key': key, 'text': text, 'track': expected,
-                          'preparedId': prepared_id, 'automatic': automatic})
+        self.jobs.append({'key': key, 'text': text, 'track': expected, 'device': self.current_device,
+                          'generation': self.generation, 'preparedId': prepared_id,
+                          'automatic': automatic, 'prepared': prepared})
         self.changed.notify_all()
         return {'queued': True, 'id': key, 'status': 'queued'}
 
@@ -344,15 +511,17 @@ class DedicationAudio:
         with self.changed:
             if not self.available or not self.enabled:
                 return {'queued': False, 'error': 'Croatian speech is unavailable; the text stays on screen.'}
-            key = self.track_key(self.current)
-            if not key or not self.current.get('playing'):
-                return {'queued': False, 'error': 'Start Spotify before speaking a dedication.'}
-            return self._enqueue('manual:' + request_id, text, key, 'manual:' + request_id)
+            uid = self.occurrence_uid(self.current)
+            if uid is None or not self.playing(self.current) or self._position(self.current) is None:
+                return {'queued': False, 'error': 'A fresh playing Spotify occurrence with a verified UID is required for a dedication.'}
+            return self._enqueue('manual:' + request_id, text, uid, 'manual:' + request_id)
 
     def _valid(self, job):
         with self.lock:
-            return (self.enabled and not self.stop.is_set() and bool(self.current.get('playing'))
-                    and self.track_key(self.current) == job['track'])
+            return (self.enabled and not self.stop.is_set() and self.playing(self.current)
+                    and self._position(self.current) is not None
+                    and self.track_key(self.current) == job['track']
+                    and self.current_device == job['device'] and self.generation == job['generation'])
 
     def _run(self):
         while not self.stop.is_set():
@@ -363,38 +532,65 @@ class DedicationAudio:
                 job = self.jobs.popleft() if self.jobs else None
                 preparation = self.prepares.popitem(last=False) if not job and self.prepares else None
                 if preparation:
-                    self.preparing.add(preparation[0])
+                    self.preparing[preparation[0]] = preparation[1][1]
             if preparation:
-                rid, text = preparation
+                rid, (text, token) = preparation
+                ready = None
                 try:
                     ready = self.voice.prepare(text)
-                    with self.lock:
-                        self.ready[rid] = ready
+                    with self.changed:
+                        target = self.targets.get(rid)
+                        if (not self.stop.is_set() and self.enabled and target is not None
+                                and target['token'] == token and not target.get('terminal')):
+                            self.ready[rid] = ready
+                            self.ready_at[rid] = self.clock()
+                            ready = None
+                        self.changed.notify_all()
                 except Exception as error:
-                    with self.lock:
-                        self.prepare_errors[rid] = str(error)[:250]
+                    with self.changed:
+                        target = self.targets.get(rid)
+                        if target is not None and target['token'] == token and self.enabled:
+                            self.prepare_errors[rid] = str(error)[:250]
+                        self.changed.notify_all()
                 finally:
-                    with self.lock:
-                        self.preparing.discard(rid)
+                    if ready is not None:
+                        ready.close()
+                    with self.changed:
+                        if self.preparing.get(rid) == token:
+                            self.preparing.pop(rid, None)
+                        self.changed.notify_all()
                 continue
-            ready = None
+            ready = job.get('prepared')
+            evidence = None
             try:
-                with self.lock:
-                    ready = self.ready.pop(job['preparedId'], None)
-                    previous_error = self.prepare_errors.pop(job['preparedId'], None)
-                if previous_error:
-                    raise SpeechError(previous_error)
                 if not self._valid(job):
-                    raise SpeechCancelled('The requested song has already changed.')
+                    raise SpeechCancelled('The bound playback was cancelled.')
                 if ready is None:
+                    if job['automatic']:
+                        raise SpeechCancelled('The dedication was not prepared before its occurrence.')
                     ready = self.voice.prepare(job['text'])
                 with self.lock:
-                    progress = float(self.current.get('progressMs', 0)) + (time.monotonic()-self.current_seen)*1000
+                    if not self._valid(job):
+                        raise SpeechCancelled('Playback changed while speech was prepared.')
+                    progress = self._position(self.current)
+                    if progress is None:
+                        raise SpeechCancelled('The playback observation expired before speech started.')
                     if job['automatic'] and progress > 15000:
                         raise SpeechCancelled('The opening of the requested song has passed.')
-                    self._record(job['key'], job['text'], 'speaking')
-                self.mixer.play(ready, lambda: self._valid(job), self.stop)
-                status, error = 'played', None
+                    self._record(job['key'], job['text'], 'starting')
+
+                def on_started():
+                    with self.lock:
+                        if not self._valid(job):
+                            raise SpeechCancelled('Playback changed before speech started.')
+                        self._record(job['key'], job['text'], 'speaking')
+
+                evidence = self.mixer.play(ready, lambda: self._valid(job), self.stop, on_started=on_started)
+                if (not isinstance(evidence, dict) or evidence.get('kind') != 'process_exit'
+                        or type(evidence.get('returnCode')) is not int or evidence['returnCode'] != 0):
+                    raise SpeechError('The speech mixer returned no successful process completion evidence.')
+                evidence = {**evidence, 'audibleVerification': 'unperformed'}
+                status, error = 'completed', None
             except SpeechCancelled as failure:
                 status, error = 'cancelled', str(failure)
             except Exception as failure:
@@ -402,18 +598,16 @@ class DedicationAudio:
             finally:
                 if ready is not None:
                     ready.close()
-            with self.lock:
-                try:
-                    self._record(job['key'], job['text'], status, error)
-                except OSError as failure:
-                    self.last = {'status': 'failed', 'error': str(failure)[:250]}
+            with self.changed:
+                self._finish(job, status, error, evidence if status == 'completed' else None)
+                self.changed.notify_all()
 
     def close(self):
         self.stop.set()
         with self.changed:
+            self._cancel_jobs('Speech was stopped.')
+            for rid in list(self.targets):
+                self._discard_preparation(rid)
             self.changed.notify_all()
         if self.thread:
             self.thread.join()
-        for ready in self.ready.values():
-            ready.close()
-        self.ready.clear()
