@@ -181,6 +181,77 @@ class PartyDance(unittest.TestCase):
         self.stage.eventually(lambda: self.run_dance()["act"] == "disco", "four-act cycle did not wrap")
         self.run_dance(restore=True)
 
+    def test_song_visual_cue_tracks_occurrence_and_recovers_without_reset(self):
+        self.stage.state["nowPlaying"].update(uid="current", uri="spotify:track:original", title="An original fixture tune")
+        self.stage.write_state()
+        original = self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path)
+        self.assertEqual(original["themeSource"], "automatic")
+        self.assertEqual(original["theme"], original["automaticTheme"])
+        identity = {key: original[key] for key in ("songKey", "songRevision", "act")}
+
+        def expect(theme, source, identity_expected=identity):
+            self.stage.eventually(lambda: self.run_dance()["theme"] == theme and self.run_dance()["themeSource"] == source,
+                                  f"expected {source} artwork {theme}")
+            current = self.run_dance()
+            self.assertEqual({key: current[key] for key in identity_expected}, identity_expected)
+            return current
+
+        self.stage.state["scene"]["songVisual"] = {"trackUid": "current", "theme": "cocktail"}
+        self.stage.write_state()
+        cue = expect("cocktail", "cue")
+        self.assertEqual(cue["automaticTheme"], original["automaticTheme"])
+        self.stage.state["nowPlaying"]["progressMs"] += 1000
+        self.stage.state["queue"] = [{"uid": "next", "title": "Another original tune"}]
+        self.stage.write_state()
+        time.sleep(.6)
+        expect("cocktail", "cue")
+
+        self.stage.state["scene"]["songVisual"]["theme"] = "compass"
+        self.stage.write_state()
+        expect("compass", "cue")
+        self.stage.state_file.unlink()
+        self.stage.eventually(lambda: bool(self.run_dance()["stateError"]), "missing state was not observed")
+        expect("compass", "cue")
+        self.stage.write_state()
+        self.stage.eventually(lambda: not self.run_dance()["stateError"], "identical restored state did not clear its error")
+        expect("compass", "cue")
+        self.stage.state_file.write_text("{broken")
+        self.stage.eventually(lambda: bool(self.run_dance()["stateError"]), "invalid state was not observed")
+        self.run_dance(restore=True)
+        reloaded = self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path)
+        self.assertTrue(reloaded["stateError"])
+        expect("compass", "cue")
+        self.stage.write_state()
+        self.stage.eventually(lambda: not self.run_dance()["stateError"], "state did not recover")
+
+        current_track = self.stage.state["nowPlaying"]
+        self.stage.state["nowPlaying"] = None
+        self.stage.write_state()
+        expect(original["automaticTheme"], "automatic")
+        self.run_dance(restore=True)
+        self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path)
+        expect(original["automaticTheme"], "automatic")
+        self.stage.state["nowPlaying"] = current_track
+        self.stage.write_state()
+        expect("compass", "cue")
+
+        for cue in (None, {"trackUid": "current", "theme": "unknown"}, {"trackUid": "next", "theme": "dandelion"}):
+            self.stage.state["scene"]["songVisual"] = cue
+            self.stage.write_state()
+            time.sleep(.55)
+            expect(original["automaticTheme"], "automatic")
+        self.stage.state["nowPlaying"].update(uid="next", uri="spotify:track:next")
+        self.stage.write_state()
+        self.stage.eventually(lambda: self.run_dance()["songRevision"] == original["songRevision"] + 1,
+                              "new occurrence did not advance identity")
+        current = self.run_dance()
+        next_identity = {key: current[key] for key in ("songKey", "songRevision", "act")}
+        expect("dandelion", "cue", next_identity)
+        self.stage.state["scene"].pop("songVisual")
+        self.stage.write_state()
+        expect(current["automaticTheme"], "automatic", next_identity)
+        self.run_dance(restore=True)
+
 
 if __name__ == "__main__":
     unittest.main()

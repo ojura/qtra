@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPointer>
+#include <QStringList>
 #include <QThread>
 #include <QTimer>
 #include <QWidget>
@@ -26,6 +27,13 @@ namespace {
 constexpr double pi = 3.14159265358979323846;
 double fraction(double value) { return value - std::floor(value); }
 QColor opacity(QColor color, double value) { color.setAlphaF(std::clamp(value, 0.0, 1.0)); return color; }
+bool supportedTheme(const QString& theme)
+{
+    static const QStringList themes{QStringLiteral("record"), QStringLiteral("speaker"), QStringLiteral("headphones"),
+        QStringLiteral("microphone"), QStringLiteral("bottles"), QStringLiteral("cocktail"), QStringLiteral("compass"),
+        QStringLiteral("dandelion"), QStringLiteral("embers")};
+    return themes.contains(theme);
+}
 
 class PartyDance final : public QWidget {
 public:
@@ -37,6 +45,14 @@ public:
         cycle_ = cube->window()->property("partyDanceCycle").toInt() % 4;
         songKey_ = cube->window()->property("partyDanceSongKey").toString();
         songRevision_ = cube->window()->property("partyDanceSongRevision").toInt();
+        const QString automatic = cube->window()->property("partyDanceAutomaticTheme").toString();
+        if (supportedTheme(automatic)) automaticTheme_ = automatic;
+        theme_ = automaticTheme_;
+        const QString effective = cube->window()->property("partyDanceTheme").toString();
+        if (supportedTheme(effective)) {
+            theme_ = effective;
+            if (cube->window()->property("partyDanceThemeSource").toString() == QStringLiteral("cue")) themeSource_ = QStringLiteral("cue");
+        }
         act_ = cube->window()->property("partyDanceAct").toString();
         if (act_.isEmpty()) act_ = QStringLiteral("auto");
         clock_.start(); frameClock_.start(); frame_.setInterval(34); frame_.setTimerType(Qt::PreciseTimer);
@@ -86,6 +102,7 @@ public:
                 {QStringLiteral("parentWidth"), cube_ ? cube_->width() : 0},
                 {QStringLiteral("fpsLimit"), 30}, {QStringLiteral("particleLimit"), 24},
                 {QStringLiteral("theme"), theme_}, {QStringLiteral("songKey"), songKey_},
+                {QStringLiteral("themeSource"), themeSource_}, {QStringLiteral("automaticTheme"), automaticTheme_},
                 {QStringLiteral("songRevision"), songRevision_}};
     }
 protected:
@@ -155,7 +172,7 @@ private:
         if (!file.open(QIODevice::ReadOnly)) { stateError_ = file.errorString(); return; }
         const auto bytes = file.read(1024 * 1024 + 1);
         if (bytes.size() > 1024 * 1024) { stateError_ = QStringLiteral("State exceeds 1 MiB"); return; }
-        if (bytes == bytes_) return;
+        if (!bytes_.isEmpty() && bytes == bytes_) { stateError_.clear(); return; }
         QJsonParseError error; const auto document = QJsonDocument::fromJson(bytes, &error);
         if (error.error != QJsonParseError::NoError || !document.isObject()) { stateError_ = QStringLiteral("Invalid party state"); return; }
         bytes_ = bytes; stateError_.clear();
@@ -179,16 +196,26 @@ private:
                 cube_->window()->setProperty("partyDanceSongRevision", songRevision_);
             }
             const QString words = title.toCaseFolded();
-            if (words.contains(QStringLiteral("koktel"))) theme_ = QStringLiteral("cocktail");
-            else if (words.contains(QStringLiteral("piti")) || words.contains(QStringLiteral("pivo")) || words.contains(QStringLiteral("vino"))) theme_ = QStringLiteral("bottles");
-            else if (words.contains(QStringLiteral("gdje")) && words.contains(QStringLiteral("bio"))) theme_ = QStringLiteral("compass");
-            else if (words.contains(QStringLiteral("masla"))) theme_ = QStringLiteral("dandelion");
-            else if (words.contains(QStringLiteral("pepel"))) theme_ = QStringLiteral("embers");
+            if (words.contains(QStringLiteral("koktel"))) automaticTheme_ = QStringLiteral("cocktail");
+            else if (words.contains(QStringLiteral("piti")) || words.contains(QStringLiteral("pivo")) || words.contains(QStringLiteral("vino"))) automaticTheme_ = QStringLiteral("bottles");
+            else if (words.contains(QStringLiteral("gdje")) && words.contains(QStringLiteral("bio"))) automaticTheme_ = QStringLiteral("compass");
+            else if (words.contains(QStringLiteral("masla"))) automaticTheme_ = QStringLiteral("dandelion");
+            else if (words.contains(QStringLiteral("pepel"))) automaticTheme_ = QStringLiteral("embers");
             else {
                 const QString defaults[] = {QStringLiteral("record"), QStringLiteral("speaker"), QStringLiteral("headphones"), QStringLiteral("microphone")};
-                theme_ = defaults[songRevision_ % 4];
+                automaticTheme_ = defaults[songRevision_ % 4];
             }
         }
+        theme_ = automaticTheme_; themeSource_ = QStringLiteral("automatic");
+        const auto cue = scene.value(QStringLiteral("songVisual")).toObject();
+        const QString uid = track.value(QStringLiteral("uid")).toString();
+        const QString requested = cue.value(QStringLiteral("theme")).toString();
+        if (!title.isEmpty() && !uid.isEmpty() && cue.value(QStringLiteral("trackUid")).toString() == uid && supportedTheme(requested)) {
+            theme_ = requested; themeSource_ = QStringLiteral("cue");
+        }
+        cube_->window()->setProperty("partyDanceAutomaticTheme", automaticTheme_);
+        cube_->window()->setProperty("partyDanceTheme", theme_);
+        cube_->window()->setProperty("partyDanceThemeSource", themeSource_);
     }
     QColor color(int index) const
     {
@@ -433,7 +460,8 @@ private:
     }
     QPointer<CubeWidget> cube_;
     QTimer frame_, poll_; QElapsedTimer clock_, frameClock_; QLocalSocket socket_;
-    QByteArray buffer_, bytes_; QString stateFile_, socketPath_, audioError_, stateError_, act_, songKey_, theme_ = QStringLiteral("record");
+    QByteArray buffer_, bytes_; QString stateFile_, socketPath_, audioError_, stateError_, act_, songKey_;
+    QString theme_ = QStringLiteral("record"), automaticTheme_ = QStringLiteral("record"), themeSource_ = QStringLiteral("automatic");
     quint64 frames_ = 0, beats_ = 0; qint64 lastAct_ = 0;
     int cycle_ = 0, songRevision_ = 0; double pulse_ = 0, bpm_ = 0, drawMs_ = 0, energy_ = .7; bool cool_ = true;
 };

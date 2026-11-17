@@ -254,7 +254,22 @@ for titles mentioning ashes. Unmatched songs alternate large records, speakers,
 headphones and microphones. Prop colors change with each new song; progress
 updates, searches and queue edits leave the currently playing song's art alone.
 The song key and revision survive a module reload. Native status exposes
-`theme`, `songKey` and `songRevision` for the DJ to coordinate captions.
+`theme`, `automaticTheme`, `themeSource`, `songKey` and `songRevision` for the DJ
+to coordinate captions. `themeSource` is `automatic` or `cue`.
+
+An optional `scene.songVisual` selects an existing prop without rebuilding:
+`{"trackUid":"the-current-occurrence-uid","theme":"compass"}`. The supported
+themes are `record`, `speaker`, `headphones`, `microphone`, `bottles`, `cocktail`,
+`compass`, `dandelion` and `embers`. The UID must match the actual current
+occurrence; a prepared cue for another queued occurrence waits without changing
+the current art. Clear with `null` or omit the field to restore automatic art.
+Unknown themes also fall back to automatic art in the renderer. Cue changes leave
+the song revision and act clock intact. An unreadable state file retains the last
+accepted art, including through a module reload. A valid state with no current
+track shows the remembered automatic motif until a matching occurrence returns.
+
+The visuals are reusable starting material, with runtime selection and extension
+procedures in [the visual plugin seed](../virtual-dj/plugins/visuals.md).
 
 The launcher loads it with `stateFile` and `agentSocket`. One asynchronous local
 socket subscribes to the existing `audio.beat` events; the module never opens an
@@ -276,7 +291,8 @@ running. Use the GUI executor. The current choice survives a module reload in
 the host window's properties.
 
 Run `python3 -m unittest discover -s tests -p test_party_dance.py -v` for the
-private-display lifecycle and audio-event regression.
+private-display lifecycle, synthetic audio-event and occurrence-cue regressions.
+These tests own their display, host, HTTP fixture and synthetic beat socket.
 
 ## Source context
 
