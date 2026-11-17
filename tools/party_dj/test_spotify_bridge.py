@@ -74,10 +74,14 @@ async function fixture(options = {}) {
       return internal;
     }, _queueManager: manager},
     getState: () => structuredClone(state), getQueue: async () => {
-      if (options.onQueueRead) options.onQueueRead({queue, internal, calls, syncQueue, read: ++queueReads});
+      if (options.onQueueRead) options.onQueueRead({queue, internal, calls, harmony, raw, state, devices, syncQueue, read: ++queueReads});
       return structuredClone(queue);
     },
-    addToQueue: async () => calls.push({action: 'addToQueue'}),
+    addToQueue: async items => {
+      calls.push({action: 'addToQueue'});
+      if (options.onAddCommand) return options.onAddCommand({items, queue, internal, raw, state, harmony, syncQueue});
+      return true;
+    },
     skipToNext: async () => calls.push({action: 'next'}),
     pause: async () => { calls.push({action: 'wrapperPause'}); state.isPaused = true; },
     resume: async () => { calls.push({action: 'wrapperResume'}); state.isPaused = false; }};
@@ -121,6 +125,152 @@ assert.equal(f.calls[1].id, 'standalone');
 assert.equal(resumed.status.nowPlaying.playing, true);
 assert.equal(resumed.status.playbackState.source, 'harmony');
 assert.equal(f.calls.length, 2);
+''')
+
+    def test_explicit_set_paused_dispatches_once_and_returns_actual_state(self):
+        self.run_js(r'''
+const f = await fixture({queued: [queuedTrack('queued')], raw: {position: 38912}});
+const next = f.internal.next_items, previous = f.internal.previous_items, current = f.internal.current_track;
+for (const paused of [true, false]) {
+  const result = await f.bridge.setPaused(paused, 'occurrence-a', 'standalone');
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'setPaused');
+  assert.equal(result.paused, paused);
+  assert.equal(result.changed, true);
+  assert.equal(result.status.nowPlaying.paused, paused);
+  assert.equal(result.status.nowPlaying.uid, 'occurrence-a');
+  assert.equal(result.status.playbackState.device.id, 'standalone');
+  assert.equal(result.status.playbackState.clockValid, true);
+}
+assert.deepEqual(f.calls, [
+  {action: 'pause', id: 'standalone', parameters: {forceRemoteAction: true}},
+  {action: 'resume', id: 'standalone', parameters: {forceRemoteAction: true}}]);
+assert.equal(f.internal.next_items, next);
+assert.equal(f.internal.previous_items, previous);
+assert.equal(f.internal.current_track, current);
+''')
+
+    def test_explicit_set_paused_no_op_resamples_clock_and_does_not_dispatch(self):
+        self.run_js(r'''
+for (const paused of [true, false]) {
+  const f = await fixture({raw: {paused}, onRawRead: ({raw, read}) => {
+    if (read === 2) { raw.position = 34000; raw.timestamp = 1000000; }
+  }});
+  const result = await f.bridge.setPaused(paused, 'occurrence-a', 'standalone');
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, false);
+  assert.equal(result.status.nowPlaying.progressMs, 34000);
+  assert.equal(result.status.nowPlaying.paused, paused);
+  assert.equal(f.calls.length, 0);
+}
+''')
+
+    def test_explicit_set_paused_rejects_missing_or_mismatched_preconditions(self):
+        self.run_js(r'''
+for (const arguments_ of [
+  [undefined, 'occurrence-a', 'standalone'], [null, 'occurrence-a', 'standalone'],
+  ['true', 'occurrence-a', 'standalone'], [1, 'occurrence-a', 'standalone'],
+  [true, undefined, 'standalone'], [true, '', 'standalone'], [true, ' ', 'standalone'],
+  [true, 'occurrence-a', null], [true, 'occurrence-a', ' '],
+  [true, 'other-occurrence', 'standalone'], [true, 'occurrence-a', 'other-device']
+]) {
+  const f = await fixture();
+  const result = await f.bridge.setPaused(...arguments_);
+  assert.equal(result.dispatched, false, JSON.stringify(arguments_));
+  assert.equal(typeof result.error, 'string');
+  assert.equal(f.calls.length, 0);
+}
+''')
+
+    def test_explicit_set_paused_refuses_fake_missing_pause_buffering_or_invalid_clock(self):
+        self.run_js(r'''
+for (const options of [
+  {fakeState: true}, {withHarmony: false},
+  {raw: {paused: undefined}}, {raw: {paused: 0}},
+  {raw: {position: undefined}}, {raw: {position: NaN}},
+  {raw: {position: -1}}, {raw: {loading: true}},
+  {raw: {timestamp: 1002000}},
+  {raw: {timestamp: undefined}, state: {timestamp: undefined}},
+  {observedDevice: {id: 'wrong-observed-device'}},
+  {devices: [{id: 'standalone', is_active: true, is_controllable: false, is_observable: true}]},
+  {devices: []}
+]) {
+  const f = await fixture(options);
+  const result = await f.bridge.setPaused(true, 'occurrence-a', 'standalone');
+  assert.equal(result.dispatched, false, JSON.stringify(options));
+  assert.equal(f.calls.length, 0);
+}
+// A held zero-position clock remains real even without a source timestamp.
+const held = await fixture({raw: {paused: true, position: 0, timestamp: undefined}, state: {timestamp: undefined}});
+const result = await held.bridge.setPaused(true, 'occurrence-a', 'standalone');
+assert.equal(result.changed, false);
+assert.equal(result.status.nowPlaying.progressMs, 0);
+assert.equal(held.calls.length, 0);
+''')
+
+    def test_explicit_set_paused_rechecks_current_device_and_state_before_dispatch_or_no_op(self):
+        self.run_js(r'''
+for (const paused of [true, false]) {
+  for (const race of ['raw-current', 'internal-current', 'device', 'fake', 'buffering']) {
+    const f = await fixture({onRawRead: ({raw, read}) => {
+      if (read === 2 && race === 'raw-current') raw.track_window.current_track = {...raw.track_window.current_track, uid: 'new-occurrence-same-uri'};
+      if (read === 2 && race === 'buffering') raw.loading = true;
+    }, onDevicesRead: ({devices, harmony, internal, read}) => {
+      if (read !== 2) return;
+      if (race === 'internal-current') internal.current_track = {...internal.current_track, uid: 'new-occurrence-same-uri'};
+      if (race === 'device') devices[0].id = 'new-device';
+      if (race === 'fake') harmony._hasFakeState = true;
+    }});
+    const result = await f.bridge.setPaused(paused, 'occurrence-a', 'standalone');
+    assert.equal(result.dispatched, false, race);
+    assert.equal(f.calls.length, 0, race);
+  }
+}
+''')
+
+    def test_explicit_set_paused_handles_a_matching_manual_change_as_a_fresh_no_op(self):
+        self.run_js(r'''
+const f = await fixture({onRawRead: ({raw, read}) => {
+  if (read === 2) { raw.paused = true; raw.position = 25000; }
+}});
+const result = await f.bridge.setPaused(true, 'occurrence-a', 'standalone');
+assert.equal(result.changed, false);
+assert.equal(result.status.nowPlaying.progressMs, 25000);
+assert.equal(f.calls.length, 0);
+''')
+
+    def test_explicit_set_paused_keeps_ack_failure_and_unconfirmed_response_dispatched(self):
+        self.run_js(r'''
+for (const outcome of ['rejected', 'lost', 'unconfirmed', 'current-changed', 'device-changed', 'fake']) {
+  const f = await fixture({onCommand: ({raw, devices, harmony}) => {
+    if (outcome === 'rejected') return false;
+    if (outcome === 'lost') throw new Error('Connection lost after dispatch');
+    if (outcome === 'current-changed') raw.track_window.current_track = {...raw.track_window.current_track, uid: 'new-same-uri'};
+    if (outcome === 'device-changed') devices[0].id = 'new-device';
+    if (outcome === 'fake') harmony._hasFakeState = true;
+    return true;
+  }});
+  const result = await f.bridge.setPaused(true, 'occurrence-a', 'standalone');
+  assert.equal(result.dispatched, true, outcome);
+  assert.equal(typeof result.error, 'string');
+  assert.equal(f.calls.length, 1, outcome);
+  assert.equal(f.calls[0].action, 'pause');
+}
+''')
+
+    def test_explicit_set_paused_waits_for_real_confirmation_through_transient_buffering(self):
+        self.run_js(r'''
+let dispatched = false;
+const f = await fixture({onCommand: ({raw}) => {
+  dispatched = true; raw.paused = true; raw.loading = true; return true;
+}, onRawRead: ({raw, read}) => {
+  if (dispatched && read >= 4) { raw.loading = false; raw.position = 45000; }
+}});
+const result = await f.bridge.setPaused(true, 'occurrence-a', 'standalone');
+assert.equal(result.changed, true);
+assert.equal(result.status.nowPlaying.progressMs, 45000);
+assert.equal(result.status.nowPlaying.buffering, false);
+assert.equal(f.calls.length, 1);
 ''')
 
     def test_raw_paused_position_and_zero_are_preserved_without_elapsed_time(self):
@@ -220,7 +370,85 @@ const status = await f.bridge.status();
 assert.equal(status.nowPlaying.uid, 'second-occurrence');
 assert.equal(status.nowPlaying.progressMs, 1000);
 assert.equal(status.playbackState.sourceTimestamp, status.observedAt);
+assert.equal(status.nowPlaying.clockValid, false);
+assert.equal(status.playbackState.clockValid, false);
 assert.equal(status.nowPlaying.title, 'Current track'); // Same-URI metadata is reusable.
+''')
+
+    def test_clock_validity_distinguishes_real_zero_from_missing_or_invalid_position(self):
+        self.run_js(r'''
+for (const position of [undefined, null, true, NaN, Infinity, -1]) {
+  const f = await fixture({raw: {position}, state: {positionAsOfTimestamp: position, position}});
+  const status = await f.bridge.status();
+  assert.equal(status.nowPlaying.clockValid, false, String(position));
+  assert.equal(status.playbackState.clockValid, false);
+  assert.ok(Number.isFinite(status.nowPlaying.progressMs));
+}
+const zero = await fixture({raw: {position: 0, timestamp: 1000000}});
+const status = await zero.bridge.status();
+assert.equal(status.nowPlaying.progressMs, 0);
+assert.equal(status.nowPlaying.clockValid, true);
+assert.equal(status.playbackState.clockValid, true);
+assert.equal(zero.calls.length, 0);
+''')
+
+    def test_playing_clock_needs_a_real_positive_source_timestamp(self):
+        self.run_js(r'''
+for (const timestamp of [undefined, null, true, NaN, Infinity, 0, -1]) {
+  const f = await fixture({raw: {timestamp}, state: {timestamp}});
+  const status = await f.bridge.status();
+  assert.equal(status.nowPlaying.clockValid, false, String(timestamp));
+  assert.equal(status.playbackState.clockValid, false);
+  assert.equal(status.nowPlaying.playing, true); // Existing transport fields stay compatible.
+}
+const fallback = await fixture({raw: {timestamp: undefined}, state: {timestamp: 999000}});
+const status = await fallback.bridge.status();
+assert.equal(status.nowPlaying.clockValid, true);
+assert.equal(status.nowPlaying.progressMs, 11000);
+assert.equal(status.playbackState.sourceTimestamp, 999000);
+''')
+
+    def test_future_playing_anchors_outside_clock_tolerance_are_invalid(self):
+        self.run_js(r'''
+for (const withHarmony of [true, false]) {
+  for (const offset of [0, 1000, 1001, 3600000]) {
+    const timestamp = 1000000 + offset;
+    const f = await fixture({withHarmony, raw: {timestamp}, state: {timestamp}});
+    const status = await f.bridge.status();
+    assert.equal(status.nowPlaying.clockValid, offset <= 1000);
+    assert.equal(status.playbackState.clockValid, offset <= 1000);
+    assert.equal(status.playbackState.sourceTimestamp, timestamp);
+    assert.equal(status.nowPlaying.progressMs, 10000);
+  }
+}
+for (const held of [{paused: true}, {loading: true}]) {
+  const f = await fixture({raw: {...held, timestamp: 4600000}});
+  const status = await f.bridge.status();
+  assert.equal(status.nowPlaying.clockValid, true);
+  assert.equal(status.nowPlaying.progressMs, 10000);
+}
+''')
+
+    def test_explicitly_held_clocks_need_position_but_no_timestamp(self):
+        self.run_js(r'''
+for (const buffering of [false, true]) {
+  for (const withHarmony of [false, true]) {
+    const f = await fixture({withHarmony,
+      state: {isPaused: !buffering, isBuffering: buffering, positionAsOfTimestamp: 0, timestamp: undefined},
+      raw: {paused: !buffering, loading: buffering, position: 0, timestamp: undefined}});
+    let status = await f.bridge.status();
+    assert.equal(status.nowPlaying.clockValid, true);
+    assert.equal(status.playbackState.clockValid, true);
+    assert.equal(status.nowPlaying.progressMs, 0);
+    f.advance(6000);
+    status = await f.bridge.status();
+    assert.equal(status.nowPlaying.progressMs, 0);
+    assert.equal(status.nowPlaying.clockValid, true);
+    f.state.positionAsOfTimestamp = undefined;
+    f.raw.position = undefined;
+    assert.equal((await f.bridge.status()).nowPlaying.clockValid, false);
+  }
+}
 ''')
 
     def test_native_direct_control_and_next_keep_their_existing_paths(self):
@@ -241,7 +469,7 @@ assert.deepEqual(web.calls, [{action: 'next'}]);
         self.run_js(r'''
 const operations = new Map([['existing-request', Promise.resolve({queued: true})]]);
 const other = {uri: 'spotify:track:' + 'b'.repeat(22), uid: 'new-occurrence', metadata: {title: 'Actual new track', duration: '90000'}};
-const f = await fixture({previousBridge: {version: 7, operations},
+const f = await fixture({previousBridge: {version: 8, operations},
   raw: {track_window: {current_track: other}, position: 1000, duration: 90000}});
 const status = await f.bridge.status();
 assert.equal(status.nowPlaying.uri, other.uri);
@@ -258,6 +486,91 @@ assert.equal(current.nowPlaying.progressMs, 1000);
 assert.equal(current.playbackState.sourceTimestamp, current.observedAt);
 const incomplete = await fixture({raw: {track_window: {current_track: other}, position: NaN}});
 await assert.rejects(() => incomplete.bridge.status(), /changed playback occurrences before a complete clock/);
+''')
+
+    def test_enqueue_does_not_confirm_the_recording_that_was_already_current(self):
+        self.run_js(r'''
+const f = await fixture();
+const uri = f.queue.current.uri;
+const result = await f.bridge.enqueue(uri, 'same-current-request');
+assert.equal(result.dispatched, true);
+assert.match(result.error, /new requested occurrence was not confirmed/);
+assert.equal(f.calls.length, 1);
+assert.deepEqual(plain(await f.bridge.enqueue(uri, 'same-current-request')), plain(result));
+assert.equal(f.calls.length, 1, 'uncertain result was replayed');
+''')
+
+    def test_enqueue_confirms_the_new_queued_uid_among_repeated_recordings(self):
+        self.run_js(r'''
+const f = await fixture({queued: [queuedTrack('existing-one', 'a'), queuedTrack('existing-two', 'a')],
+  onAddCommand: ({internal, syncQueue}) => {
+    internal.next_items.push(queuedTrack('actual-new-request', 'a')); syncQueue(); return true;
+  }});
+const result = await f.bridge.enqueue(f.queue.current.uri, 'new-request');
+assert.deepEqual(plain(result), {queued: true, uri: f.queue.current.uri, requestId: 'new-request', uid: 'actual-new-request'});
+assert.equal(f.calls.length, 1);
+await f.bridge.enqueue(f.queue.current.uri, 'new-request');
+assert.equal(f.calls.length, 1);
+''')
+
+    def test_enqueue_confirms_a_new_occurrence_that_started_before_the_queue_read(self):
+        self.run_js(r'''
+const f = await fixture({onAddCommand: ({internal, syncQueue}) => {
+  internal.current_track = queuedTrack('new-current-occurrence', 'a'); syncQueue(); return true;
+}});
+const result = await f.bridge.enqueue(f.queue.current.uri, 'fast-start-request');
+assert.equal(result.queued, true);
+assert.equal(result.uid, 'new-current-occurrence');
+assert.equal(f.calls.length, 1);
+''')
+
+    def test_enqueue_rejects_false_ack_lost_ack_and_malformed_after_queue_without_replay(self):
+        self.run_js(r'''
+for (const outcome of ['false', 'lost', 'malformed', 'ambiguous-new-uids']) {
+  const f = await fixture({onAddCommand: ({queue, internal, syncQueue}) => {
+    if (outcome === 'false') return false;
+    if (outcome === 'lost') throw new Error('Lost queue acknowledgement');
+    if (outcome === 'malformed') queue.queued = null;
+    if (outcome === 'ambiguous-new-uids') {
+      internal.next_items.push(queuedTrack('new-one', 'a'), queuedTrack('new-two', 'a')); syncQueue();
+    }
+    return true;
+  }});
+  const uri = f.queue.current.uri;
+  const result = await f.bridge.enqueue(uri, 'uncertain-request');
+  assert.equal(result.dispatched, true, outcome);
+  assert.equal(typeof result.error, 'string');
+  await f.bridge.enqueue(uri, 'uncertain-request');
+  assert.equal(f.calls.length, 1, outcome);
+}
+''')
+
+    def test_enqueue_cannot_claim_an_existing_queued_occurrence_or_late_current_uid(self):
+        self.run_js(r'''
+for (const kind of ['previously-queued', 'previously-unidentified']) {
+  const f = await fixture({queued: kind === 'previously-queued' ? [queuedTrack('already-queued', 'a')] : [],
+    onAddCommand: ({internal, syncQueue}) => {
+      internal.current_track = queuedTrack(kind === 'previously-queued' ? 'already-queued' : 'late-known-uid', 'a');
+      internal.next_items = []; syncQueue(); return true;
+    }});
+  if (kind === 'previously-unidentified') f.queue.current = {...f.queue.current, uid: null};
+  const result = await f.bridge.enqueue(f.queue.current.uri, 'different-occurrence-required');
+  assert.equal(result.dispatched, true, kind);
+  assert.equal(f.calls.length, 1);
+}
+''')
+
+    def test_enqueue_synthetic_preflight_is_definitely_unsent_even_after_queue_read(self):
+        self.run_js(r'''
+for (const duringRead of [false, true]) {
+  const f = await fixture({fakeState: !duringRead,
+    onQueueRead: ({harmony, read}) => { if (duringRead && read === 1) harmony._hasFakeState = true; }});
+  const result = await f.bridge.enqueue(f.queue.current.uri, 'fake-state-request');
+  assert.equal(result.dispatched, false);
+  assert.match(result.error, /synthetic local state/);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.bridge.operations.has('fake-state-request'), false);
+}
 ''')
 
     def test_queue_move_retains_duplicate_recordings_and_full_context_history(self):
@@ -404,6 +717,193 @@ assert.equal(result.moved, false);
 assert.equal(result.status.nowPlaying.playing, true);
 assert.deepEqual(plain(result.status.queue.map(t => t.uid)), ['one', 'two', 'three']);
 assert.equal(f.calls.length, 0);
+''')
+
+    def test_atomic_reorder_keeps_all_context_and_hidden_slots_with_one_command(self):
+        self.run_js(r'''
+const items = [queuedTrack('one', 'b'), queuedTrack('two', 'c'), queuedTrack('three', 'b'), queuedTrack('four', 'd')];
+const context = Array.from({length: 16}, (_, n) => ({uid: n % 2 ? 'context-repeat' : 'one',
+  uri: 'spotify:track:' + 'e'.repeat(22), provider: 'context', metadata: {iteration: n}}));
+const hidden = {...queuedTrack('hidden-queued'), hidden_in_queue: true};
+const delimiter = {uid: 'delimiter0', uri: 'spotify:delimiter', provider: 'context'};
+const original = [context[0], items[0], hidden, items[1], delimiter, items[2], context[1], items[3], ...context.slice(2)];
+const f = await fixture({internal: {next_items: original}});
+const previous = f.internal.previous_items, current = f.internal.current_track;
+const desired = ['four', 'two', 'one', 'three'];
+const result = await f.bridge.reorderQueue(desired, ['one', 'two', 'three', 'four'], current.uid, 'standalone');
+assert.equal(result.ok, true);
+assert.equal(result.action, 'reorderQueue');
+assert.equal(result.moved, true);
+assert.deepEqual(plain(result.orderedQueuedUids), desired);
+assert.deepEqual(plain(result.status.queue.filter(t => t.source === 'queue').map(t => t.uid)), desired);
+assert.equal(result.status.nowPlaying.uid, current.uid);
+assert.equal(result.status.nowPlaying.playing, true);
+assert.equal(f.calls.length, 1);
+assert.equal(f.calls[0].action, 'setInternalPlayerQueue');
+assert.equal(f.calls[0].id, 'standalone');
+assert.deepEqual(f.calls[0].parameters, {ignoreRevision: false});
+const payload = f.lastQueuePayload();
+assert.equal(payload.revision, 'revision-before');
+assert.equal(payload.previous_items, previous);
+assert.equal(f.internal.current_track, current);
+assert.equal(payload.next_items.length, original.length);
+let slot = 0;
+original.forEach((item, index) => {
+  if (item.provider === 'queue' && !item.hidden_in_queue) {
+    const wanted = desired[slot++];
+    assert.equal(payload.next_items[index], items.find(value => value.uid === wanted));
+  } else assert.equal(payload.next_items[index], item);
+});
+''')
+
+    def test_reorder_requires_an_exact_uid_permutation_and_explicit_current_device(self):
+        self.run_js(r'''
+const expected = ['one', 'two', 'three'], desired = ['three', 'one', 'two'];
+const cases = [
+  {desired: ['three', 'one']}, {desired: ['three', 'one', 'two', 'added']},
+  {desired: ['three', 'one', 'one']}, {desired: ['three', 'one', 'missing']},
+  {desired: ['three', 'one', null]}, {desired: 'three,one,two'},
+  {expected: ['one', 'one', 'three']}, {expected: ['one', 'three', 'two']},
+  {current: undefined}, {current: ''}, {current: 'another-occurrence'},
+  {device: undefined}, {device: ''}, {device: 'another-device'}
+];
+for (const changes of cases) {
+  const row = {desired, expected, current: 'occurrence-a', device: 'standalone', ...changes};
+  const f = await fixture({queued: expected.map(id => queuedTrack(id))});
+  const result = await f.bridge.reorderQueue(row.desired, row.expected, row.current, row.device);
+  assert.equal(result.dispatched, false, JSON.stringify(changes));
+  assert.equal(typeof result.error, 'string');
+  assert.equal(f.calls.length, 0);
+}
+const ambiguous = await fixture({queued: [queuedTrack('one'), queuedTrack('two')],
+  context: [{...queuedTrack('two'), hidden_in_queue: true}]});
+const rejected = await ambiguous.bridge.reorderQueue(['two', 'one'], ['one', 'two'], 'occurrence-a', 'standalone');
+assert.equal(rejected.dispatched, false);
+assert.equal(ambiguous.calls.length, 0);
+''')
+
+    def test_reorder_rechecks_manual_order_revision_current_and_device_changes(self):
+        self.run_js(r'''
+for (const mutate of [
+  state => {state.internal.next_items.reverse(); state.syncQueue();},
+  state => {state.internal.next_items.push(queuedTrack('manual-add')); state.syncQueue();},
+  state => {state.internal.revision = 'manual-revision';},
+  state => {state.internal.current_track = {...state.internal.current_track, uid: 'repeat-of-current-uri'};
+    state.raw.track_window.current_track = state.internal.current_track;},
+  state => {state.devices[0].id = 'manual-device';},
+  state => {state.devices[0].is_controllable = false;},
+  state => {state.harmony._hasFakeState = true;}
+]) {
+  const f = await fixture({queued: [queuedTrack('one'), queuedTrack('two'), queuedTrack('three')],
+    onRawRead: state => {if (state.read === 2) mutate(state);}});
+  const result = await f.bridge.reorderQueue(['three', 'two', 'one'], ['one', 'two', 'three'], 'occurrence-a', 'standalone');
+  assert.equal(result.dispatched, false);
+  assert.equal(typeof result.error, 'string');
+  assert.equal(f.calls.length, 0);
+}
+const finalRace = await fixture({queued: [queuedTrack('one'), queuedTrack('two')],
+  onDevicesRead: state => {if (state.read === 2) {
+    state.internal.current_track = {...state.internal.current_track, uid: 'latest-current'};
+    state.raw.track_window.current_track = state.internal.current_track;
+  }}});
+assert.equal((await finalRace.bridge.reorderQueue(['two', 'one'], ['one', 'two'], 'occurrence-a', 'standalone')).dispatched, false);
+assert.equal(finalRace.calls.length, 0);
+''')
+
+    def test_reorder_waits_for_observation_and_reports_unconfirmed_once(self):
+        self.run_js(r'''
+for (const onQueueCommand of [() => true, () => false, () => {throw new Error('stale revision');}]) {
+  const f = await fixture({queued: [queuedTrack('one'), queuedTrack('two')], onQueueCommand});
+  const result = await f.bridge.reorderQueue(['two', 'one'], ['one', 'two'], 'occurrence-a', 'standalone');
+  assert.equal(result.dispatched, true);
+  assert.equal(typeof result.error, 'string');
+  assert.equal(f.calls.length, 1);
+}
+const delayed = await fixture({queued: [queuedTrack('one'), queuedTrack('two'), queuedTrack('three')],
+  onQueueCommand: () => true,
+  onQueueRead: state => {if (state.calls.length && state.read === 4) {
+    state.internal.next_items.reverse(); state.syncQueue();
+  }}});
+const result = await delayed.bridge.reorderQueue(['three', 'two', 'one'], ['one', 'two', 'three'], 'occurrence-a', 'standalone');
+assert.equal(result.ok, true);
+assert.ok(result.status.observedAt > 1000000);
+assert.equal(delayed.calls.length, 1);
+''')
+
+    def test_reorder_does_not_retry_post_dispatch_manual_changes(self):
+        self.run_js(r'''
+for (const change of [
+  state => {state.devices[0].id = 'new-device';},
+  state => {state.internal.current_track = {...state.internal.current_track, uid: 'new-current'};
+    state.raw.track_window.current_track = state.internal.current_track; state.syncQueue();},
+  state => {state.internal.next_items.push(queuedTrack('new-item')); state.syncQueue();},
+  state => {state.internal.previous_items = [];}
+]) {
+  const f = await fixture({queued: [queuedTrack('one'), queuedTrack('two')],
+    onQueueCommand: state => {change(state); return true;}});
+  const result = await f.bridge.reorderQueue(['two', 'one'], ['one', 'two'], 'occurrence-a', 'standalone');
+  assert.equal(result.dispatched, true);
+  assert.equal(typeof result.error, 'string');
+  assert.equal(f.calls.length, 1);
+}
+''')
+
+    def test_queue_no_op_resamples_pause_and_clock_after_preflight(self):
+        self.run_js(r'''
+for (const operation of ['move', 'reorder']) {
+  let f;
+  f = await fixture({queued: [queuedTrack('one'), queuedTrack('two')], onRawRead: state => {
+    if (state.read === 2) {
+      state.raw.paused = true; state.raw.position = 321; state.raw.timestamp = 1000000;
+      f.advance(700);
+    }
+  }});
+  const result = operation === 'move'
+    ? await f.bridge.moveQueue('one', 'two', ['one', 'two'])
+    : await f.bridge.reorderQueue(['one', 'two'], ['one', 'two'], 'occurrence-a', 'standalone');
+  assert.equal(result.ok, true);
+  assert.equal(result.moved, false);
+  assert.equal(result.status.nowPlaying.paused, true);
+  assert.equal(result.status.nowPlaying.progressMs, 321);
+  assert.equal(result.status.observedAt, 1000700);
+  assert.equal(f.calls.length, 0);
+}
+''')
+
+    def test_queue_no_op_revalidates_changes_during_its_final_status_read(self):
+        self.run_js(r'''
+for (const mutate of [
+  state => {state.internal.next_items.reverse(); state.syncQueue();},
+  state => {state.internal.revision = 'manual-no-op-revision';},
+  state => {state.internal.current_track = {...state.internal.current_track, uid: 'new-current'};
+    state.raw.track_window.current_track = state.internal.current_track;},
+  state => {state.devices[0].id = 'new-device';},
+  state => {state.harmony._hasFakeState = true;}
+]) {
+  const f = await fixture({queued: [queuedTrack('one'), queuedTrack('two')],
+    onRawRead: state => {if (state.read === 3) mutate(state);}});
+  const result = await f.bridge.reorderQueue(['one', 'two'], ['one', 'two'], 'occurrence-a', 'standalone');
+  assert.equal(typeof result.error, 'string');
+  assert.equal(result.dispatched, false);
+  assert.equal(f.calls.length, 0);
+}
+''')
+
+    def test_reorder_empty_single_and_matching_orders_are_guarded_no_ops(self):
+        self.run_js(r'''
+for (const uids of [[], ['one'], ['one', 'two']]) {
+  const f = await fixture({queued: uids.map(id => queuedTrack(id))});
+  const result = await f.bridge.reorderQueue(uids, uids, 'occurrence-a', 'standalone');
+  assert.equal(result.ok, true);
+  assert.equal(result.moved, false);
+  assert.deepEqual(plain(result.orderedQueuedUids), uids);
+  assert.equal(result.status.nowPlaying.uid, 'occurrence-a');
+  assert.equal(result.status.playbackState.device.id, 'standalone');
+  assert.equal(f.calls.length, 0);
+  const stale = await f.bridge.reorderQueue(uids, uids, 'stale-current', 'standalone');
+  assert.equal(stale.dispatched, false);
+  assert.equal(f.calls.length, 0);
+}
 ''')
 
 

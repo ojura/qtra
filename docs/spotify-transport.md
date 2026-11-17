@@ -1,9 +1,16 @@
 # Spotify transport and playback observations
 
 The request service uses the existing native Spotify debugging connection when
-available, otherwise the signed-in Spotify web controller. Search and enqueue
-keep their existing behavior. The additive queue move below changes only the
-order of already queued occurrences.
+available, otherwise the signed-in Spotify web controller. Search uses the existing
+catalogue path. The reorder operations below change only the order of already
+queued occurrences; enqueue confirmation binds a newly observed occurrence.
+
+Ordinary client operations reuse an existing native debugging connection or an
+already listed Spotify browser page. If neither is available, they report a
+disconnected/preparation-required error and do not create a tab or prepare an
+absent target. A later listed page can be attached normally. Browser/controller
+setup is explicit: `python3 tools/party_dj/spotify_reconnect.py ensure` owns any
+needed controller-tab creation. The native-port path is unchanged.
 
 ## Playback ownership
 
@@ -45,11 +52,95 @@ PlayerAPI path when Harmony is absent and confirms the returned player state.
 `next` retains its existing skip path. Transport handling does not transfer
 playback, change volume, or touch audio hardware.
 
+### Explicit playback state with caller preconditions
+
+`setPaused(paused, expectedCurrentUid, expectedDeviceId)` sets a requested pause
+state for exactly the observed occurrence and device. Python exposes
+`set_paused(paused, expected_current_uid, expected_device_id)` under the shared
+client lock. All three arguments are required: `paused` must be a boolean and
+both identity fields must be nonblank strings.
+
+Admission requires actual Harmony state with an explicit pause boolean, a valid
+clock and no buffering. The active device must be uniquely controllable and
+observable, and its ID must match both the caller and the status observation.
+The bridge resamples status and checks the current internal queue occurrence
+synchronously after its final device read. This catches a track change while
+that device read was pending. Missing internal occurrence access rejects the
+operation before dispatch.
+
+If the latest actual pause state already matches, the same preconditions still
+apply and the operation returns a fresh no-op. Otherwise it sends one targeted
+`pause` or `resume` and observes the same occurrence/device for up to eight
+seconds. Transient buffering may clear during confirmation; success requires
+the requested actual pause state, a valid clock and buffering finished.
+
+Success returns `{ok:true, action:'setPaused', paused, changed, device, status}`.
+`changed:false` means no command was needed. Errors carry `dispatched:false`
+before command admission or `dispatched:true` once the command may have been
+sent, including a lost acknowledgement or an unconfirmed timeout. The Python
+wrapper preserves this distinction and never retries. The method has no toggle
+or untargeted fallback; a new action must use a new observation and decision.
+
+## Reordering the explicit queue atomically
+
+`reorderQueue(orderedQueuedUids, expectedQueuedUids, expectedCurrentUid,
+expectedDeviceId)` applies the complete desired order in one revision-checked
+command. Python exposes `reorder_queue(ordered_queued_uids, expected_queued_uids,
+expected_current_uid, expected_device_id)` through the same client lock used by
+status, search and queue writes.
+
+All four arguments are required. The two lists must contain unique, nonempty
+UIDs and be exact permutations of each other; no occurrence is added, removed or
+matched by URI. The expected list must equal the entire freshly observed explicit
+queue. The current occurrence UID and active controllable/observable device ID
+must match the supplied expectations before the operation proceeds. Empty,
+single-item and already matching queues return a guarded no-op with fresh state.
+The no-op resamples playback and revalidates the device, current occurrence,
+revision and full order immediately before returning, so a pause during preflight
+is published without sending a queue command.
+
+The shared queue implementation replaces only visible explicit-queue slots with
+the existing objects in their requested order. Hidden items, context entries,
+repeated context UIDs, delimiters and their positions are retained along with
+the current occurrence and playback history. It never reconstructs the full
+queue from the public context preview. The final current/device/revision/order
+checks, one targeted manager dispatch and observed confirmation are the same
+ones used for a single move below.
+
+Success returns `{ok: true, action: 'reorderQueue', moved, orderedQueuedUids,
+device, status}`. Errors carry the same `dispatched` flag as a move. A stale
+precondition, manual queue change or unconfirmed result requires a new
+observation and a new decision; neither wrapper retries the operation.
+
+The authenticated service endpoint is `POST /api/admin/reorder`, with the four
+preconditions in its JSON body:
+
+```json
+{"orderedQueuedUids":["q-three","q-one","q-two"],"expectedQueuedUids":["q-one","q-two","q-three"],"expectedCurrentUid":"q-current","expectedDeviceId":"active-device-id"}
+```
+
+The reusable desk obtains a fresh observation and can save a reviewable plan:
+
+```sh
+python3 tools/party_dj/desk.py front q-three --save queue-plan.json
+python3 tools/party_dj/desk.py apply queue-plan.json
+```
+
+Use actual occurrence UIDs from `desk.py queue`; `order` accepts the complete
+desired list while `front` preserves the relative order of the remaining items.
+Applying a saved plan sends its original preconditions once. If another person
+has changed the queue, current occurrence or device, inspect the new observation
+and make a new plan. A failed or lost response never causes an automatic replay.
+
 ## Moving an existing queue occurrence
 
 `moveQueue(uid, beforeUid, expectedQueuedUids)` moves one explicit queue occurrence
 immediately before another. The Python client exposes the same operation as
 `move_queue(uid, before_uid, expected_queued_uids)` under its existing shared lock.
+This compatible three-argument operation derives a desired order and uses the
+same guarded implementation as the complete reorder. It captures current/device
+expectations from its initial observation; new complete-reorder callers must
+supply those preconditions explicitly.
 Callers supply the complete ordered list of explicit queue UIDs from a fresh
 observation. Both selected UIDs must occur exactly once; repeated recordings with
 different UIDs remain separate requests. Missing or ambiguous occurrences,
@@ -78,7 +169,9 @@ Success returns `{ok: true, action: 'moveQueue', moved, device, status}` with fr
 state for backend publication. An already satisfied order returns `moved: false`
 without a command. An error carries `dispatched: false` before a command and
 `dispatched: true` after dispatch may have occurred; the Python wrapper preserves
-that flag in `SpotifyError`. A timeout or concurrent change is not retried.
+that flag in `SpotifyError`. Bootstrap or argument-encoding failure is definitely
+undispatched; a lost response after method evaluation remains uncertain. A timeout
+or concurrent change is not retried.
 
 The authenticated service endpoint is `POST /api/admin/move`; `djctl move`
 accepts the same JSON body through `--json` or `--file`:
@@ -92,6 +185,23 @@ pass the body to `python3 tools/party_dj/djctl.py move --file move.json`.
 The service reconciles the confirmed `result.status` and publishes public state
 before responding. Its Spotify-error response includes `dispatched`, including
 an unconfirmed command; callers must inspect fresh state instead of replaying it.
+
+## Confirming a new queue addition
+
+Enqueue retains the request UUID and its cached outcome. Before dispatch, browser
+controllers must expose actual state and a complete explicit queue; a synthetic
+state discovered during that preflight is definitely unsent. After one
+`addToQueue` call, success requires either an increased count of the requested
+recording with exactly one new queued UID, or a different known current UID for
+that recording which was not already in the initial queue. The recording that
+was already playing cannot confirm its own new request. An ambiguous pair of new
+UIDs remains unconfirmed.
+
+An explicit false acknowledgement, lost response, malformed observation or
+confirmation timeout carries `dispatched:true` and retains the request's cached
+outcome. The Python wrapper also treats a malformed success object or missing
+occurrence UID as uncertain. Callers inspect actual state before another decision;
+none of these outcomes causes an automatic replay.
 
 ## Playback clock
 
@@ -112,6 +222,16 @@ remain unchanged while later reads correctly report the same held position.
 `nowPlaying` also includes separate pause/buffering flags and the calculated
 `progressMs` consumed by the stage.
 
+Both `nowPlaying.clockValid` and `playbackState.clockValid` identify a real clock
+anchor. A finite nonnegative position is required, including an actual zero;
+playing also requires a finite positive source timestamp no more than 1,000
+milliseconds ahead of `observedAt`. Explicitly paused or
+buffering positions can be valid without a timestamp because they are held rather
+than extrapolated. The compatibility defaults of position zero and timestamp now
+never establish validity. Consumers hold when `clockValid` is false. The bridge
+does not impose a freshness deadline: karaoke derives its deadline from the actual
+Spotify `observedAt` plus 10,000 milliseconds.
+
 The party service normally refreshes its public state every 2.5 seconds. A
 verified transport response applies its fresh `status` through the same request
 reconciliation and publishes `/api/state` and `state.json` before returning.
@@ -123,15 +243,21 @@ command acknowledgement as its response.
 
 ```sh
 python3 -m unittest discover -s tools/party_dj -p test_spotify_bridge.py -v
+PYTHONPATH=build/party-deps python3 -m unittest discover -s tools/party_dj -p test_spotify_native.py -v
 node --check tools/party_dj/spotify_bridge.js
 ```
 
 Tests execute the real bridge in Node with isolated PlayerAPI and Connect
 fixtures. They cover exact target dispatch, held and zero positions, buffering,
 false acknowledgements, device changes, the synthetic-state transfer guard,
-native fallback and retained queue request IDs. Queue-move fixtures additionally
-cover repeated recordings, UID/anchor validation, stale revisions/order,
-concurrent changes, full context/history preservation and unconfirmed commands.
+native fallback and retained queue request IDs. Explicit pause-state fixtures
+cover caller identity checks, missing pause flags, invalid/future clocks,
+idempotent fresh no-ops, current/device races, single dispatch and unconfirmed
+results. Queue-move fixtures additionally
+cover repeated recordings, UID/anchor validation, atomic permutations, required
+current/device preconditions, stale revisions/order, concurrent changes,
+full context/history retention, no-ops and unconfirmed commands. Python fixtures
+also check argument/error propagation and serialization through confirmation.
 No live Spotify control is sent.
 
 `SpotifyClient.call` rereads the bridge file on every invocation. Updating that

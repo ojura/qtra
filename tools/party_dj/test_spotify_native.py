@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import io
 import json
+import concurrent.futures
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -52,6 +54,35 @@ class FakeDaemon:
         return io.BytesIO(json.dumps(value).encode())
 
 
+class DiscoveryDaemon:
+    def __init__(self):
+        self.pages = []
+        self.calls = []
+
+    def urlopen(self, request, timeout=None):
+        address = urlsplit(request.full_url)
+        body = json.loads(request.data) if request.data else None
+        self.calls.append((address.path, body))
+        if address.port == 9224:
+            raise URLError('No native endpoint in this fixture')
+        if address.path == '/targets':
+            value = self.pages
+        elif address.path == '/attach':
+            value = {'sessionId': 'existing-page-session'}
+        elif address.path == '/prepare':
+            value = {'sessionId': body['sessionId'], 'readiness': 'dom'}
+        elif address.path == '/eval':
+            result = {'ready': True} if body['expression'].startswith('(async') else {'nowPlaying': {'uid': 'fixture-current'}}
+            value = {'result': {'type': 'object', 'value': result}}
+        elif address.path == '/release':
+            value = {'released': True}
+        elif address.path == '/cdp' and body.get('method') == 'Target.detachFromTarget':
+            value = {'result': {}}
+        else:
+            raise AssertionError(f'Unexpected fixture request: {address.path} {body}')
+        return io.BytesIO(json.dumps(value).encode())
+
+
 class SpotifyTransportTests(unittest.TestCase):
     def client_and_daemon(self, failure):
         daemon = FakeDaemon(failure)
@@ -91,6 +122,56 @@ class SpotifyTransportTests(unittest.TestCase):
     def test_missing_session_protocol_error_releases_and_reattaches(self):
         self.assert_transport_recovery('protocol')
 
+    def test_ordinary_operations_never_create_or_prepare_a_missing_controller(self):
+        daemon = DiscoveryDaemon()
+        client = native.SpotifyClient()
+        client.created_web_target = 'no-longer-listed-controller'
+        with patch.object(native.urllib.request, 'urlopen', daemon.urlopen), \
+                patch.object(native.websocket, 'create_connection', side_effect=AssertionError('No real socket')):
+            for name, arguments in (
+                    ('status', ()), ('search', ('fixture song',)),
+                    ('enqueue', ('spotify:track:' + 'a' * 22, 'fixture-request')),
+                    ('move_queue', ('two', 'one', ['one', 'two'])),
+                    ('reorder_queue', (['two', 'one'], ['one', 'two'], 'current', 'device')),
+                    ('set_paused', (True, 'current', 'device'))):
+                with self.subTest(operation=name):
+                    with self.assertRaisesRegex(native.SpotifyError, 'spotify_reconnect.py ensure') as caught:
+                        getattr(client, name)(*arguments)
+                    if name in ('enqueue', 'move_queue', 'reorder_queue', 'set_paused'):
+                        self.assertFalse(caught.exception.dispatched)
+            client.close()
+        self.assertTrue(any(path == '/targets' for path, body in daemon.calls))
+        self.assertFalse(any(path in ('/attach', '/prepare', '/eval', '/cdp') for path, body in daemon.calls))
+
+    def test_later_existing_controller_discovery_attaches_without_creating_a_target(self):
+        daemon = DiscoveryDaemon()
+        client = native.SpotifyClient()
+        with patch.object(native.urllib.request, 'urlopen', daemon.urlopen), \
+                patch.object(native.websocket, 'create_connection', side_effect=AssertionError('No real socket')):
+            with self.assertRaises(native.SpotifyTransportError):
+                client.status()
+            daemon.pages = [{'type': 'page', 'url': 'https://open.spotify.com/', 'targetId': 'already-existing'}]
+            self.assertEqual(client.status()['nowPlaying']['uid'], 'fixture-current')
+            self.assertEqual(client.mode, 'native-via-web-controller')
+            client.close()
+        attaches = [body for path, body in daemon.calls if path == '/attach']
+        self.assertEqual(attaches, [{'targetId': 'already-existing'}])
+        self.assertEqual(sum(path == '/prepare' for path, body in daemon.calls), 1)
+        self.assertFalse(any(path == '/cdp' and body.get('method') == 'Target.createTarget' for path, body in daemon.calls))
+
+    def test_native_debugging_path_does_not_require_or_create_a_browser_controller(self):
+        client = native.SpotifyClient()
+        target = {'id': 'native-xpui', 'type': 'page', 'url': 'spotify:app:xpui',
+                  'webSocketDebuggerUrl': 'ws://fixture.invalid/native'}
+        with patch.object(client, '_http', return_value=[target]) as http, \
+                patch.object(native.websocket, 'create_connection') as connect:
+            client._connect()
+            self.assertEqual(client.mode, 'native')
+            self.assertEqual(client.target, 'native-xpui')
+            http.assert_called_once_with('http://127.0.0.1:9224/json/list', timeout=1)
+            connect.assert_called_once_with('ws://fixture.invalid/native', timeout=25, suppress_origin=True)
+            client.close()
+
     def test_spotify_application_exception_preserves_session_and_dispatch_status(self):
         client, daemon = self.client_and_daemon('application')
         with self.assertRaises(native.SpotifyError) as caught:
@@ -103,6 +184,164 @@ class SpotifyTransportTests(unittest.TestCase):
         self.assertEqual(client.evaluate('42'), 42)
         self.assertEqual([body['sessionId'] for path, body in daemon.calls if path == '/eval'],
                          ['old-session', 'old-session'])
+
+    def test_enqueue_requires_exact_complete_confirmation_and_never_replays_uncertainty(self):
+        uri, request_id = 'spotify:track:' + 'a' * 22, 'fixture-request'
+        valid = {'queued': True, 'uri': uri, 'requestId': request_id, 'uid': 'observed-new-uid'}
+        for result in (None, False, [], {}, {'queued': True}, {**valid, 'queued': 1},
+                       {**valid, 'uid': None}, {**valid, 'uid': ' '},
+                       {**valid, 'uri': 'other'}, {**valid, 'requestId': 'other'}):
+            with self.subTest(result=result):
+                client = native.SpotifyClient()
+                with patch.object(client, 'evaluate', side_effect=[{'ready': True}, result]) as evaluate:
+                    with self.assertRaises(native.SpotifyError) as caught:
+                        client.enqueue(uri, request_id)
+                self.assertTrue(caught.exception.dispatched)
+                self.assertEqual(evaluate.call_count, 2)
+        client = native.SpotifyClient()
+        with patch.object(client, 'evaluate', side_effect=[{'ready': True}, valid]) as evaluate:
+            self.assertEqual(client.enqueue(uri, request_id), valid)
+        self.assertEqual(evaluate.call_count, 2)
+
+    def test_enqueue_preserves_explicit_preflight_and_uncertain_errors_once(self):
+        for dispatched in (False, True, None):
+            client = native.SpotifyClient()
+            with patch.object(client, 'evaluate', side_effect=[{'ready': True},
+                    {'error': 'Queue observation unavailable', 'dispatched': dispatched}]) as evaluate:
+                with self.assertRaises(native.SpotifyError) as caught:
+                    client.enqueue('spotify:track:' + 'a' * 22, 'stable-request')
+            self.assertIs(caught.exception.dispatched, dispatched)
+            self.assertEqual(evaluate.call_count, 2)
+        client = native.SpotifyClient()
+        with patch.object(client, 'evaluate', side_effect=[{'ready': True},
+                native.SpotifyTransportError('Enqueue response lost')]) as evaluate:
+            with self.assertRaises(native.SpotifyError) as caught:
+                client.enqueue('spotify:track:' + 'a' * 22, 'stable-request')
+        self.assertTrue(caught.exception.dispatched)
+        self.assertEqual(evaluate.call_count, 2)
+
+    def test_reorder_wrapper_preserves_all_preconditions_and_never_retries_errors(self):
+        arguments = (['second', 'first'], ['first', 'second'], 'current-uid', 'device-id')
+        for dispatched in (False, True):
+            with self.subTest(dispatched=dispatched):
+                client = native.SpotifyClient()
+                with patch.object(client, 'evaluate', side_effect=[{'ready': True},
+                        {'error': 'Queue changed', 'dispatched': dispatched}]) as evaluate:
+                    with self.assertRaises(native.SpotifyError) as caught:
+                        client.reorder_queue(*arguments)
+                self.assertEqual(caught.exception.dispatched, dispatched)
+                self.assertEqual(evaluate.call_count, 2)
+                expression = evaluate.call_args_list[1].args[0]
+                self.assertTrue(expression.startswith('window.__laricsDJ["reorderQueue"]('))
+                sent = json.loads(expression.split('...', 1)[1][:-1])
+                self.assertEqual(sent, list(arguments))
+
+    def test_queue_bootstrap_failures_are_definitely_undispatched(self):
+        for operation, arguments in (
+                ('move_queue', ('second', 'first', ['first', 'second'])),
+                ('reorder_queue', (['second', 'first'], ['first', 'second'], 'current', 'device')),
+                ('set_paused', (True, 'current', 'device'))):
+            for failure in ({'ready': False, 'error': 'Player loading'}, None, 'loading',
+                            native.SpotifyTransportError('Bootstrap response lost')):
+                with self.subTest(operation=operation, failure=str(failure)):
+                    client = native.SpotifyClient()
+                    with patch.object(client, 'evaluate', side_effect=[failure]) as evaluate:
+                        with self.assertRaises(native.SpotifyError) as caught:
+                            getattr(client, operation)(*arguments)
+                    self.assertFalse(caught.exception.dispatched)
+                    self.assertEqual(evaluate.call_count, 1)
+            client = native.SpotifyClient()
+            with patch.object(native.Path, 'read_text', side_effect=OSError('Missing bootstrap')):
+                with patch.object(client, 'evaluate') as evaluate:
+                    with self.assertRaises(native.SpotifyError) as caught:
+                        getattr(client, operation)(*arguments)
+            self.assertFalse(caught.exception.dispatched)
+            evaluate.assert_not_called()
+
+    def test_lost_queue_method_response_stays_uncertain_and_is_not_retried(self):
+        client = native.SpotifyClient()
+        with patch.object(client, 'evaluate', side_effect=[{'ready': True},
+                native.SpotifyTransportError('Method response lost')]) as evaluate:
+            with self.assertRaises(native.SpotifyTransportError) as caught:
+                client.reorder_queue(['second', 'first'], ['first', 'second'], 'current', 'device')
+        self.assertTrue(caught.exception.dispatched)
+        self.assertEqual(evaluate.call_count, 2)
+
+    def test_set_paused_preserves_explicit_arguments_and_fresh_success_or_error(self):
+        for paused in (True, False):
+            for result in (
+                    {'ok': True, 'changed': False, 'paused': paused, 'status': {'nowPlaying': {'paused': paused}}},
+                    {'error': 'Current occurrence changed', 'dispatched': False},
+                    {'error': 'Confirmation timed out', 'dispatched': True}):
+                with self.subTest(paused=paused, result=result):
+                    client = native.SpotifyClient()
+                    def evaluate(expression):
+                        self.assertTrue(client.lock._is_owned(), 'Explicit playback left the shared operation lock.')
+                        if expression.startswith('(async'):
+                            return {'ready': True}
+                        return result
+                    with patch.object(client, 'evaluate', side_effect=evaluate) as called:
+                        if 'error' in result:
+                            with self.assertRaises(native.SpotifyError) as caught:
+                                client.set_paused(paused, 'current', 'device')
+                            self.assertEqual(caught.exception.dispatched, result['dispatched'])
+                        else:
+                            self.assertEqual(client.set_paused(paused, 'current', 'device'), result)
+                    self.assertEqual(called.call_count, 2)
+                    expression = called.call_args_list[-1].args[0]
+                    self.assertTrue(expression.startswith('window.__laricsDJ["setPaused"]('))
+                    self.assertEqual(json.loads(expression.split('...', 1)[1][:-1]), [paused, 'current', 'device'])
+
+    def test_lost_set_paused_response_stays_uncertain_without_retry(self):
+        client = native.SpotifyClient()
+        with patch.object(client, 'evaluate', side_effect=[{'ready': True},
+                native.SpotifyTransportError('Playback response lost')]) as evaluate:
+            with self.assertRaises(native.SpotifyTransportError) as caught:
+                client.set_paused(True, 'current', 'device')
+        self.assertTrue(caught.exception.dispatched)
+        self.assertEqual(evaluate.call_count, 2)
+
+    def test_reorder_holds_the_shared_client_lock_through_confirmation(self):
+        client = native.SpotifyClient()
+        entered, release, observer_started = threading.Event(), threading.Event(), threading.Event()
+        operations = []
+        fresh = {'nowPlaying': {'uid': 'current'}, 'queue': [{'uid': 'second'}, {'uid': 'first'}]}
+
+        def evaluate(expression):
+            if expression.startswith('(async'):
+                return {'ready': True}
+            if '["reorderQueue"]' in expression:
+                operations.append('reorder-dispatched')
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError('Test did not release reorder confirmation.')
+                operations.append('reorder-confirmed')
+                return {'ok': True, 'moved': True, 'status': fresh}
+            if '["status"]' in expression:
+                operations.append('status-observed')
+                return fresh
+            raise AssertionError('Unexpected fixture operation: ' + expression[:80])
+
+        def observe():
+            free = client.lock.acquire(blocking=False)
+            if free:
+                client.lock.release()
+            observer_started.set()
+            self.assertFalse(free, 'Reorder did not hold the shared Spotify client lock.')
+            return client.status()
+
+        with patch.object(client, 'evaluate', side_effect=evaluate):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                reorder = pool.submit(client.reorder_queue, ['second', 'first'], ['first', 'second'], 'current', 'device')
+                try:
+                    self.assertTrue(entered.wait(5))
+                    observed = pool.submit(observe)
+                    self.assertTrue(observer_started.wait(5))
+                finally:
+                    release.set()
+                self.assertEqual(reorder.result(timeout=5)['status'], fresh)
+                self.assertEqual(observed.result(timeout=5), fresh)
+        self.assertEqual(operations, ['reorder-dispatched', 'reorder-confirmed', 'status-observed'])
 
 
 if __name__ == '__main__':

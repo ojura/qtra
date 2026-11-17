@@ -72,15 +72,10 @@ class SpotifyClient:
             return
         targets = self._http(self.daemon + '/targets')
         candidates = [x for x in targets if x.get('type') == 'page' and x.get('url', '').startswith('https://open.spotify.com/')]
-        if candidates:
-            target = candidates[0]['targetId']
-        elif self.created_web_target:
-            target = self.created_web_target
-        else:
-            result = self._http(self.daemon + '/cdp', {'method': 'Target.createTarget',
-                'params': {'url': 'https://open.spotify.com/', 'background': True}})
-            target = result['result']['targetId']
-            self.created_web_target = target
+        if not candidates:
+            raise SpotifyTransportError('No existing Spotify browser controller is available. '
+                'Run spotify_reconnect.py ensure explicitly to prepare the connection.')
+        target = candidates[0]['targetId']
         self.session = self._http(self.daemon + '/attach', {'targetId': target})['sessionId']
         self._http(self.daemon + '/prepare', {'sessionId': self.session, 'readiness': 'dom', 'timeout_seconds': 15})
         self.mode = 'native-via-web-controller'
@@ -185,18 +180,44 @@ class SpotifyClient:
             result = self.evaluate(f'window.__laricsDJ.enqueue({json.dumps(uri)}, {json.dumps(request_id)})')
             if isinstance(result, dict) and result.get('error'):
                 raise SpotifyError(result['error'], dispatched=result.get('dispatched', True))
+            if (not isinstance(result, dict) or result.get('queued') is not True
+                    or result.get('uri') != uri or result.get('requestId') != request_id
+                    or not isinstance(result.get('uid'), str) or not result['uid'].strip()):
+                raise SpotifyError('Spotify returned an incomplete queue-addition confirmation; inspect the actual queue.',
+                                   dispatched=True)
             return result
 
     def control(self, action):
         return self.call('control', action)
 
+    def _guarded_change(self, operation, *arguments):
+        # Keep the same lock through preparation, dispatch and observation. A
+        # bootstrap failure is definitely unsent; losing the method response is
+        # uncertain and must never trigger a retry here.
+        with self.lock:
+            try:
+                bootstrap = (Path(__file__).parent / 'spotify_bridge.js').read_text()
+                ready = self.evaluate(bootstrap)
+                if not isinstance(ready, dict) or not ready.get('ready'):
+                    detail = ready.get('error') if isinstance(ready, dict) else None
+                    raise SpotifyError(detail or 'Spotify is still loading.')
+                expression = f'window.__laricsDJ[{json.dumps(operation)}](...{json.dumps(arguments, ensure_ascii=False)})'
+            except Exception as error:
+                raise SpotifyError(str(error), dispatched=False) from error
+            result = self.evaluate(expression)
+            if isinstance(result, dict) and result.get('error'):
+                raise SpotifyError(result['error'], dispatched=result.get('dispatched', True))
+            return result
+
     def move_queue(self, uid, before_uid, expected_queued_uids):
-        # call() holds the same RLock as status/search/enqueue through bootstrap,
-        # dispatch and observation. A failed move is never retried here.
-        result = self.call('moveQueue', uid, before_uid, expected_queued_uids)
-        if isinstance(result, dict) and result.get('error'):
-            raise SpotifyError(result['error'], dispatched=result.get('dispatched', True))
-        return result
+        return self._guarded_change('moveQueue', uid, before_uid, expected_queued_uids)
+
+    def reorder_queue(self, ordered_queued_uids, expected_queued_uids, expected_current_uid, expected_device_id):
+        return self._guarded_change('reorderQueue', ordered_queued_uids, expected_queued_uids,
+                                    expected_current_uid, expected_device_id)
+
+    def set_paused(self, paused, expected_current_uid, expected_device_id):
+        return self._guarded_change('setPaused', paused, expected_current_uid, expected_device_id)
 
 
 def main():
