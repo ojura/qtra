@@ -193,6 +193,9 @@ class PartyStage(unittest.TestCase):
         first = self.run_stage(stateFile=str(self.state_file), fullscreen=True)
         self.assertEqual(first["revision"], 1)
         self.assertEqual(first["trackTitle"], "Atomic Song")
+        self.assertTrue(first["panelVisible"], "the guest desk did not open with the stage")
+        self.key("Escape")
+        self.assertTrue(self.run_stage()["panelVisible"], "Escape hid the permanent guest desk")
         self.state["caption"] = {"id": "one", "text": "Prvi refren.", "seconds": .1,
                                  "createdAt": int(time.time() * 1000)}
         self.state["revision"] = 2
@@ -253,8 +256,12 @@ class PartyStage(unittest.TestCase):
         self.assertEqual(self.composer_text(), "long", "cancel did not restore the search draft")
         self.assertEqual(self.run_stage()["composerMode"], "message")
 
+        pages_before = self.client.request("object.get", {"objectName": "partySuggestionPages", "property": "currentIndex"})
         self.set_text("partyMessage", "robot")
-        self.eventually(lambda: self.run_stage()["searchCount"] == 1, "search response was not displayed")
+        self.assertEqual(self.client.request("object.get", {"objectName": "partySuggestionPages", "property": "currentIndex"}), pages_before,
+                         "typing replaced the suggestions page with a loading view")
+        self.assertFalse(self.client.request("object.get", {"objectName": "partyResults", "property": "enabled"}), "stale results remained selectable")
+        self.eventually(lambda: self.run_stage()["suggestionState"] == "results", "search response was not displayed")
         self.client.request("object.set", {"objectName": "partyResults", "property": "currentRow", "value": 0})
         self.assertEqual(self.run_stage()["composerMode"], "dedication")
         dedication = "Za cijelu ekipu.\nI robote koji još plešu."
@@ -278,28 +285,33 @@ class PartyStage(unittest.TestCase):
         self.assertEqual(self.magic_bounds(), bounds, "search failure changed the Magic box bounds")
         prefix = "More groove, please <3"
         self.run_stage(composerDraft={"text": prefix, "cursor": len(prefix), "anchor": len(prefix)})
-        self.key("Return")
-        self.eventually(lambda: self.composer_text() == prefix + "\n", "Enter did not insert a newline")
-        self.assertFalse(self.server.posts, "plain Enter sent a message")
+        self.key("shift+Return")
+        self.eventually(lambda: self.composer_text() == prefix + "\n", "Shift+Enter did not insert a newline")
+        self.assertFalse(self.server.posts, "Shift+Enter sent a message")
         message = prefix + "\nAnd something Croatian."
         self.run_stage(composerDraft={"text": message, "cursor": len(message), "anchor": len(message)})
         self.server.reject_messages = 1
-        self.key("ctrl+Return")
-        self.eventually(lambda: "Message interrupted" in self.run_stage()["panelNotice"], "Ctrl+Enter did not attempt chat submission")
+        self.key("Return")
+        self.eventually(lambda: "Message interrupted" in self.run_stage()["panelNotice"], "Enter did not attempt chat submission")
         self.assertEqual(self.composer_text(), message, "failed chat submission lost the multiline draft")
-        self.key("ctrl+Return")
+        self.key("Return")
         self.eventually(lambda: len(self.server.posts) == 1, "composer did not send the guest message")
         self.assertEqual(self.server.posts[0]["text"], message, "multiline text was changed during submission")
         self.assertEqual(self.server.message_attempts[0]["requestId"], self.server.message_attempts[1]["requestId"])
         self.eventually(lambda: self.composer_text() == "", "successful message did not clear the composer")
+        self.assertEqual(self.run_stage()["panelNotice"], "", "successful send left a verbose status message")
         self.assertEqual(self.magic_bounds(), bounds, "chat submission changed the Magic box bounds")
         self.server.messages.append({"id": 3, "role": "assistant", "name": "DJ", "text": "Groove is on its way.", "createdAt": int(time.time() * 1000)})
         self.eventually(lambda: self.run_stage()["chatCount"] == 3, "the real reply did not appear or a message was duplicated")
+        self.server.messages[1]["status"] = "read"
+        self.eventually(lambda: "✓" in self.client.request("object.get", {"objectName": "partyChat", "property": "plainText"}),
+                        "an existing message did not receive its seen check")
+        self.assertEqual(self.run_stage()["chatCount"], 3, "receipt refresh duplicated a message")
         capture = os.environ.get("PARTY_STAGE_CAPTURE")
         if capture:
             self.run_stage(capture=capture)
         self.run_stage(panel=False)
-        self.assertFalse(self.run_stage()["panelVisible"])
+        self.assertTrue(self.run_stage()["panelVisible"], "a legacy panel=false request hid the permanent desk")
         self.run_stage(restore=True)
         objects = self.client.request("object.list", {})
         names = {o.get("objectName") for o in objects}

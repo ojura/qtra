@@ -32,7 +32,7 @@ python3 tools/launch_party_stage.py --fullscreen
 The launcher reuses the exact existing socket and recorded module IDs. It checks
 for a same-user process with the requested binary and socket before starting a
 new host. It writes `qtra.pid`, `qtra-modules.json`, and `qtra.log` beside the state
-file. `--panel` opens the native request desk. `--state-file`, `--base-url`,
+file. The native request desk is always open (`--panel` remains compatible). `--state-file`, `--base-url`,
 `--socket`, `--runtime-dir`, and `--build-dir` select an alternative local setup.
 
 For manual runtime control, start qtra with a dedicated socket:
@@ -56,7 +56,7 @@ once and remain resident. Releasing the party module removes its widgets and
 shortcuts, restores the prior menu/status-bar visibility and title, and restores
 the effect actions to the states they had when the stage took control.
 
-Party-stage requests also accept `panel:true|false`, `fullscreen:true|false`, a
+Party-stage requests also accept `panel:true|false` (both keep the desk open), `fullscreen:true|false`, a
 `requestBaseUrl` override for the local API, an
 inline `state` object, and `capture:"/absolute/path.png"`. Captures include the
 native overlay and request panel. `restore:true` releases the stage. Every run
@@ -71,20 +71,27 @@ Qt's `plainText` property.
 
 ## Guest controls
 
-- Click **Zatraži pjesmu · R**, or press **R**, to open the native request and chat
-  panel. Its bottom **Magic box** accepts a song, artist, or a message to the DJ.
-  Typing shows debounced song results above the box; **Pošalji poruku** always
+- The native request and chat panel stays open. Click **Zatraži pjesmu · R**, or
+  press **R**, to focus its bottom **Magic box**, which accepts a song, artist, or a
+  message to the DJ. Typing shows debounced results above it; **Pošalji poruku (Enter)** always
   sends chat until a song is explicitly selected.
 - Selecting a result shows the chosen song in the same reserved area and turns
   the box into an optional dedication. **Pošalji pjesmu** sends that song and
   dedication. **Odustani od pjesme** restores the original query and cursor.
-- **Enter** adds a new line. **Ctrl+Enter** and the Send button submit the current
+- **Shift+Enter** adds a new line. **Enter** and the Send button submit the current
   message or selected song. The multiline composer wraps and displays about four
-  lines; the panel uses 23-pixel text. Incoming DJ replies stay in the transcript.
-- The sidebar is 480 pixels wide. Its suggestion area, composer, help and status
+  lines; the panel uses 29-pixel text, larger controls and proportional spacing.
+  Incoming DJ replies stay in the transcript.
+- A grey check beside a guest message means the DJ has marked it read. Receipt
+  refreshes update existing messages without adding duplicates or verbose send
+  confirmations beneath the composer.
+- The sidebar is 600 pixels wide. Its suggestion area, composer, help and status
   rows keep their allocated bounds through loading, selection, empty results and
-  errors. Long titles are elided with full text available in tooltips.
-- **Escape** closes the panel first, then leaves fullscreen on the next press.
+  errors. While typing, existing results stay in place with a quiet activity bar;
+  stale choices are disabled until the new results arrive. Hover highlights and
+  pixel scrolling make the list easier to scan. Long titles are elided with full
+  text available in tooltips.
+- **Escape** does nothing. The panel has no close button and remains visible.
 - **F11** toggles fullscreen.
 - The QR opens the separate guest page on phones. The native panel uses the
   loopback service URL, independently of the phone-facing address.
@@ -123,14 +130,15 @@ the main accent to cyan; other values use warm orange.
 `scene.graphicsScale` defaults to 1. It scales the robot fleet, delivered records,
 and book/photo cards immediately; 1.5 makes the graphics fifty percent larger.
 The stage reports the applied value as `graphicsScale` in runtime status. Photo
-cards fit between the header and the reserved caption band. Idle robots move into
-the side margins while a book image is visible. Large delivery robots fit within
-those same vertical bounds. Labels grow with the robots. The request controls,
+cards fit below the header and extend to the bottom above the queue footer. Their
+titles and captions overlay the image. Idle robots move into the side margins
+while a book image is visible; robot paths retain fixed caption clearance.
+Labels grow with the robots. The request controls,
 QR and current-track panel keep their readable size.
 
-The caption band is reserved even between cues. Book images and robot paths keep
-the same bounds when a caption appears, disappears or wraps onto more lines.
-Long captions fit within that band by reducing their own font size.
+Book images and robot paths keep the same bounds when a caption appears,
+disappears or wraps onto more lines; captions never resize the photo.
+Long captions fit their fixed maximum height by reducing their own font size.
 
 The effect index controls existing qtra geometry independently of the stage mode:
 
@@ -181,7 +189,7 @@ The integration test owns an Xvfb display, qtra process, and HTTP fixture. It
 exercises atomic state replacement, caption dwell and deduplication, recovery
 from invalid JSON, real named-action changes, native search and request widgets,
 multiline chat and dedications, query restoration, failed-send retries, stale
-search replies, fixed Magic box bounds, real Enter/Ctrl+Enter keyboard behavior,
+search replies, fixed Magic box bounds, real Enter/Shift+Enter/Escape keyboard behavior,
 incoming replies, and complete stage release. The keyboard checks use `xdotool`
 on the test's private X display. Set
 `PARTY_STAGE_CAPTURE` to an absolute PNG path to inspect the actual window.
