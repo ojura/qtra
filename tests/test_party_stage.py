@@ -56,7 +56,8 @@ class Service(BaseHTTPRequestHandler):
         if url.path == "/api/chat":
             after = int(parse_qs(url.query).get("after", [0])[0])
             return self.reply({"messages": [m for m in self.server.messages if m["id"] > after],
-                               "dj": {"status": "listening", "lastSeen": int(time.time() * 1000)}})
+                               "dj": {"status": "listening", "lastSeen": int(time.time() * 1000),
+                                      "processingMessageIds": self.server.processing_ids}})
         self.send_error(404)
 
     def do_POST(self):
@@ -77,6 +78,8 @@ class Service(BaseHTTPRequestHandler):
             message = {"id": len(self.server.messages) + 1, "role": "user",
                        "name": data["name"], "text": data["text"], "createdAt": int(time.time() * 1000)}
             self.server.messages.append(message)
+            if self.server.message_reply_gate:
+                self.server.message_reply_gate.wait(10)
             return self.reply({"message": message})
         self.send_error(404)
 
@@ -123,6 +126,8 @@ class PartyStage(unittest.TestCase):
         self.server.searches, self.server.requests, self.server.posts = [], [], []
         self.server.request_attempts, self.server.message_attempts = [], []
         self.server.reject_requests = self.server.reject_messages = 0
+        self.server.message_reply_gate = None
+        self.server.processing_ids = []
         self.server.messages = [{"id": 1, "role": "assistant", "name": "DJ",
                                  "text": "Welcome to the lab. What should play next?", "createdAt": int(time.time() * 1000)}]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -332,6 +337,83 @@ class PartyStage(unittest.TestCase):
         self.assertNotIn("partyRequestAction", names)
         self.eventually(lambda: not checked("actionOrbitSphere") and not checked("actionMobiusRing") and not checked("actionWireframe"), "release did not restore the prior scene actions")
         self.assertIn("pid", self.client.request("hello", {}))
+
+    def test_chat_processing_and_smooth_idle_return(self):
+        stamp = int(time.time() * 1000)
+        self.server.messages = [{"id": i, "role": "user" if i == 30 else "assistant", "name": "Laptop", "status": "read",
+                                 "text": f"Original test message {i}.\nThe conversation keeps its place.", "createdAt": stamp + i}
+                                for i in range(1, 31)]
+        self.server.processing_ids = [30]
+        self.run_stage(stateFile=str(self.state_file), fullscreen=False)
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        subprocess.run(["xdotool", "windowsize", windows[-1], "2560", "1600"], env=self.environment, check=True)
+
+        def scroll(prop):
+            return self.client.request("object.get", {"objectName": "partyChatScroll", "property": prop})
+
+        def chat_key(combination):
+            subprocess.run(["xdotool", "windowfocus", windows[-1]], env=self.environment, check=True)
+            self.client.request("object.invoke", {"objectName": "partyChat", "method": "setFocus"})
+            subprocess.run(["xdotool", "key", "--clearmodifiers", combination], env=self.environment, check=True)
+
+        self.eventually(lambda: self.run_stage()["chatCount"] == 30 and scroll("maximum") > 0 and scroll("value") == scroll("maximum"),
+                        "initial history did not smoothly reach the bottom")
+        self.assertEqual(self.run_stage()["processingCount"], 1)
+        self.assertIn("●", self.client.request("object.get", {"objectName": "partyChat", "property": "plainText"}))
+        self.assertIn("radi", self.client.request("object.get", {"objectName": "partyDjPresence", "property": "text"}))
+        bounds = self.magic_bounds()
+        height = scroll("maximum")
+        capture = os.environ.get("PARTY_CHAT_CAPTURE")
+        if capture:
+            self.run_stage(capture=capture)
+        self.server.processing_ids = []
+        self.eventually(lambda: self.run_stage()["processingCount"] == 0, "explicit completion did not clear the processing dot")
+        self.assertNotIn("●", self.client.request("object.get", {"objectName": "partyChat", "property": "plainText"}))
+        self.assertEqual(scroll("maximum"), height, "the processing badge changed transcript height")
+        self.assertEqual(self.magic_bounds(), bounds)
+
+        old_bottom = scroll("value")
+        self.server.messages.append({"id": 31, "role": "assistant", "text": "A new reply.\n" * 5, "createdAt": stamp + 31})
+        self.eventually(lambda: old_bottom < scroll("value") < scroll("maximum"), "incoming chat jumped instead of animating")
+        chat_key("Home")
+        idle_started = time.monotonic()
+        self.eventually(lambda: scroll("value") == 0, "user scrolling did not interrupt following")
+        time.sleep(.65)
+        self.assertEqual(scroll("value"), 0, "the canceled animation pulled the reader back down")
+        self.server.messages.append({"id": 32, "role": "assistant", "text": "This reply waits while you read.", "createdAt": stamp + 32})
+        self.eventually(lambda: self.run_stage()["chatCount"] == 32, "the new reply did not arrive")
+        self.assertEqual(scroll("value"), 0, "an incoming reply moved the reader away from older messages")
+        self.eventually(lambda: scroll("value") > 0, "idle chat did not return to the bottom", seconds=23)
+        self.assertGreaterEqual(time.monotonic() - idle_started, 19.3, "idle return started before 20 seconds without interaction")
+        self.assertLess(scroll("value"), scroll("maximum"), "idle return jumped instead of animating")
+        self.eventually(lambda: scroll("value") == scroll("maximum"), "idle animation did not finish", seconds=3)
+        self.assertEqual(self.magic_bounds(), bounds)
+
+        old_bottom = scroll("value")
+        message = "The guest sends a message.\nKeep this reply at the bottom."
+        self.run_stage(composerDraft={"text": message, "cursor": len(message), "anchor": len(message)})
+        self.key("Return")
+        self.eventually(lambda: len(self.server.posts) == 1, "the guest message was not sent")
+        deadline = time.monotonic() + .8
+        while time.monotonic() < deadline:
+            self.assertGreaterEqual(scroll("value"), old_bottom, "sending a message jumped the transcript upward")
+            time.sleep(.04)
+        self.eventually(lambda: scroll("value") == scroll("maximum"), "the sent message was not followed to the bottom")
+        self.assertEqual(self.composer_text(), "")
+        chat_key("Home")
+        self.eventually(lambda: scroll("value") == 0, "the reader could not revisit the history")
+        self.server.message_reply_gate = threading.Event()
+        self.run_stage(composerDraft={"text": "Reply from earlier in the history.", "cursor": 33, "anchor": 33})
+        self.key("Return")
+        try:
+            self.eventually(lambda: self.run_stage()["chatCount"] == 34, "chat polling did not deliver the held POST message")
+            self.assertEqual(scroll("value"), 0, "polling moved the reader before their held send completed")
+        finally:
+            self.server.message_reply_gate.set()
+        self.eventually(lambda: len(self.server.posts) == 2 and scroll("value") == scroll("maximum"),
+                        "an already-polled successful send did not follow the guest message")
+        self.assertEqual(self.magic_bounds(), bounds)
 
     def test_karaoke_clock_note_and_stable_lyric_area(self):
         self.run_stage(stateFile=str(self.state_file), fullscreen=False)

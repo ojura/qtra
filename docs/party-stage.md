@@ -85,6 +85,14 @@ Qt's `plainText` property.
 - A grey check beside a guest message means the DJ has marked it read. Receipt
   refreshes update existing messages without adding duplicates or verbose send
   confirmations beneath the composer.
+- An orange dot means the DJ is actively working on that message. It follows the
+  explicit `dj.processingMessageIds` array from the chat API and clears when the
+  work ends. The fixed presence row also says that the DJ is working.
+- Incoming messages scroll smoothly while the transcript is following its
+  bottom. Sending a guest message follows it to the bottom as well. Typing,
+  scrolling or clicking interrupts that motion. After about
+  20 seconds without interaction, the conversation eases back to the latest
+  message; ongoing typing or dragging keeps the current position.
 - The sidebar is 600 pixels wide. Suggestions float over the bottom of the
   conversation, directly above the composer, and disappear when there are no
   results. The transcript and composer keep the same bounds throughout loading,
@@ -179,7 +187,7 @@ page number, separate from the PDF page number.
 |---|---|
 | `GET /api/search?q=...` | `{tracks:[{id,uri,title,artist,album,artUrl,durationMs}],error?}` |
 | `POST /api/request` with `{requestId,uri,requestedBy,dedication}` | Request status, optionally inside `request` |
-| `GET /api/chat?after=...` | `{messages:[{id,role,name,text,createdAt}],dj:{status,lastSeen}}` |
+| `GET /api/chat?after=...` | `{messages:[{id,role,name,text,createdAt}],dj:{status,lastSeen,processingMessageIds}}` |
 | `POST /api/message` with `{guestId,name,text,requestId}` | `{message:{id,role,name,text,createdAt}}` |
 
 ## Verification

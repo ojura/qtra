@@ -5,11 +5,13 @@
 #include "cube_widget.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QDockWidget>
 #include <QElapsedTimer>
+#include <QEasingCurve>
 #include <QFile>
 #include <QFontMetricsF>
 #include <QHash>
@@ -34,6 +36,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
+#include <QPropertyAnimation>
 #include <QQueue>
 #include <QPushButton>
 #include <QScrollBar>
@@ -235,9 +238,19 @@ public:
         });
         layout->addWidget(name_);
         presence_ = new QLabel(QStringLiteral("Razgovor s DJ-em"), body); presence_->setWordWrap(true); layout->addWidget(presence_);
+        presence_->setObjectName(QStringLiteral("partyDjPresence"));
         presence_->setFixedHeight(73); presence_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         chat_ = new QTextBrowser(body); chat_->setObjectName(QStringLiteral("partyChat"));
         chat_->setOpenExternalLinks(false); chat_->setMinimumHeight(175); layout->addWidget(chat_, 1);
+        chat_->verticalScrollBar()->setObjectName(QStringLiteral("partyChatScroll"));
+        chatScroll_ = new QPropertyAnimation(chat_->verticalScrollBar(), QByteArrayLiteral("value"), this);
+        chatScroll_->setObjectName(QStringLiteral("partyChatScrollAnimation"));
+        chatScroll_->setEasingCurve(QEasingCurve::InOutCubic);
+        connect(chat_->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int, int) {
+            // QTextBrowser can finish laying out new paragraphs after setHtml.
+            // Keep following that later extent until the reader interacts.
+            if (followingBottom_) animateChatToBottom(220);
+        });
         suggestionArea_ = new QWidget(body); auto* suggestionArea = suggestionArea_;
         suggestionArea->setObjectName(QStringLiteral("partySuggestions"));
         suggestionArea->setFixedHeight(255); suggestionArea->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
@@ -289,6 +302,17 @@ public:
         notice_ = new QLabel(body);
         notice_->setWordWrap(true); notice_->setTextFormat(Qt::PlainText); notice_->setFixedHeight(73);
         notice_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); layout->addWidget(notice_);
+        for (QWidget* control : std::array<QWidget*, 11>{name_, message_, message_->viewport(), chat_, chat_->viewport(),
+                                chat_->verticalScrollBar(), results_, results_->viewport(), results_->verticalScrollBar(), send_, cancelSong_})
+            control->installEventFilter(this);
+        idleClock_.start(); idleReturn_.setInterval(250);
+        connect(&idleReturn_, &QTimer::timeout, this, [this] {
+            if (isVisible() && idleClock_.elapsed() >= 20000 && QApplication::mouseButtons() == Qt::NoButton
+                && !chat_->verticalScrollBar()->isSliderDown()) {
+                animateChatToBottom(800); idleClock_.restart();
+            }
+        });
+        idleReturn_.start();
         updateComposerMode(); composerChanged();
         setWidget(body);
         chatPoll_.setInterval(1500);
@@ -306,7 +330,8 @@ public:
     {
         const QUrl next(url);
         if (next == base_) return;
-        base_ = next; cursor_.clear(); messages_ = {}; messageIds_.clear(); chatFetches_ = 0; chat_->clear();
+        base_ = next; cursor_.clear(); messages_ = {}; messageIds_.clear(); processingIds_.clear(); chatFetches_ = 0;
+        chatScroll_->stop(); followingBottom_ = false; chat_->clear();
         if (isVisible()) fetchChat();
     }
     QJsonObject status() const
@@ -323,6 +348,7 @@ public:
         return {{QStringLiteral("panelVisible"), isVisible()}, {QStringLiteral("chatCount"), messages_.size()},
                 {QStringLiteral("panelBounds"), bounds},
                 {QStringLiteral("selectedCancelFits"), selectedPage_->rect().contains(cancelSong_->geometry())},
+                {QStringLiteral("processingCount"), processingIds_.size()},
                 {QStringLiteral("searchCount"), results_->count()}, {QStringLiteral("panelNotice"), notice_->text()},
                 {QStringLiteral("composerMode"), selectedTrack_.isEmpty() ? QStringLiteral("message") : QStringLiteral("dedication")},
                 {QStringLiteral("suggestionState"), suggestionState_}, {QStringLiteral("selectedTrack"), text(selectedTrack_, "title")}};
@@ -349,7 +375,12 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
     {
-        if (watched == message_ && (event->type() == QEvent::Move || event->type() == QEvent::Resize))
+        if (event->type() == QEvent::KeyPress || event->type() == QEvent::Wheel || event->type() == QEvent::MouseButtonPress
+            || event->type() == QEvent::MouseButtonRelease
+            || (event->type() == QEvent::MouseMove && static_cast<QMouseEvent*>(event)->buttons() != Qt::NoButton)) {
+            idleClock_.restart(); chatScroll_->stop(); followingBottom_ = false;
+        }
+        if ((watched == message_ || watched == chat_) && (event->type() == QEvent::Move || event->type() == QEvent::Resize))
             updateSuggestionOverlay();
         if (watched == message_ && event->type() == QEvent::KeyPress) {
             auto* key = static_cast<QKeyEvent*>(event);
@@ -363,6 +394,14 @@ protected:
 private:
     static QString uuid() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     QString name() const { return name_->text().trimmed().isEmpty() ? QStringLiteral("Gost") : name_->text().trimmed(); }
+    void animateChatToBottom(int duration = 450)
+    {
+        auto* scroll = chat_->verticalScrollBar();
+        chatScroll_->stop(); followingBottom_ = true;
+        if (scroll->value() >= scroll->maximum()) return;
+        chatScroll_->setDuration(duration); chatScroll_->setStartValue(scroll->value()); chatScroll_->setEndValue(scroll->maximum());
+        chatScroll_->start();
+    }
     void updateSuggestionOverlay()
     {
         // This child floats over the transcript and never participates in its
@@ -540,9 +579,8 @@ private:
             updateComposerMode(); composerChanged();
         });
     }
-    void appendMessages(const QJsonArray& incoming)
+    void appendMessages(const QJsonArray& incoming, bool changed = false, bool followBottom = false)
     {
-        bool changed = false;
         for (const auto& value : incoming) {
             const auto message = value.toObject(); const QString id = message.value(QStringLiteral("id")).toVariant().toString();
             if (id.isEmpty()) continue;
@@ -558,8 +596,13 @@ private:
             }
             messageIds_.insert(id); messages_.append(message); changed = true;
         }
-        if (!changed) return;
-        auto* scroll = chat_->verticalScrollBar(); const bool atBottom = scroll->value() >= scroll->maximum() - 8;
+        if (!changed) {
+            if (followBottom) animateChatToBottom();
+            return;
+        }
+        auto* scroll = chat_->verticalScrollBar();
+        const bool atBottom = followBottom || scroll->value() >= scroll->maximum() - 8 || followingBottom_;
+        chatScroll_->stop(); followingBottom_ = false;
         const int oldScroll = scroll->value(); QString html;
         QList<QJsonObject> ordered;
         for (const auto& value : messages_) ordered.append(value.toObject());
@@ -571,13 +614,17 @@ private:
         for (const auto& message : ordered) {
             const bool dj = text(message, "role") == QStringLiteral("assistant");
             const QString author = dj ? QStringLiteral("DJ") : text(message, "name", QStringLiteral("Gost"));
-            const QString receipt = !dj && text(message, "status") == QStringLiteral("read")
-                ? QStringLiteral(" <span style='color:#8994a6'>✓</span>") : QString();
+            const bool processing = !dj && processingIds_.contains(message.value(QStringLiteral("id")).toVariant().toString());
+            const QString receipt = dj ? QString() : QStringLiteral(" <span style='font-family:monospace;color:%1'>%2</span>")
+                .arg(processing ? QStringLiteral("#ffb16c") : text(message, "status") == QStringLiteral("read")
+                     ? QStringLiteral("#8994a6") : QStringLiteral("#080f1d"), processing ? QStringLiteral("●")
+                     : text(message, "status") == QStringLiteral("read") ? QStringLiteral("✓") : QStringLiteral("&nbsp;"));
             html += QStringLiteral("<p style='margin:8px 0 13px'><b style='color:%1'>%2</b>%3<br><span style='color:#f0f2f7'>%4</span></p>")
                 .arg(dj ? QStringLiteral("#ff9a58") : QStringLiteral("#7de4ed"), author.toHtmlEscaped(), receipt,
                      text(message, "text").toHtmlEscaped().replace(QChar('\n'), QStringLiteral("<br>")));
         }
-        chat_->setHtml(html); scroll->setValue(atBottom ? scroll->maximum() : oldScroll);
+        chat_->setHtml(html); scroll->setValue(oldScroll);
+        if (atBottom) animateChatToBottom();
     }
     void fetchChat()
     {
@@ -590,14 +637,19 @@ private:
             chatBusy_ = false;
             if (!error.isEmpty()) { presence_->setText(QStringLiteral("DJ veza: ") + error); return; }
             const auto incoming = data.value(QStringLiteral("messages")).toArray();
-            appendMessages(incoming);
+            const auto dj = data.value(QStringLiteral("dj")).toObject();
+            QSet<QString> processing;
+            for (const auto& id : dj.value(QStringLiteral("processingMessageIds")).toArray()) processing.insert(id.toVariant().toString());
+            const bool processingChanged = processing != processingIds_; processingIds_ = processing;
+            appendMessages(incoming, processingChanged);
             // Only a fetched history response advances the read cursor. A POST
             // can finish while older replies are still in flight.
             // Receipt refreshes revisit recent IDs without skipping any IDs that
             // still need to arrive through the incremental history cursor.
             if (!receipts && !incoming.isEmpty()) cursor_ = incoming.last().toObject().value(QStringLiteral("id")).toVariant().toString();
-            const auto dj = data.value(QStringLiteral("dj")).toObject();
-            presence_->setText(QStringLiteral("Razgovor s DJ-em · ") + text(dj, "status", QStringLiteral("uživo")));
+            presence_->setText(processingIds_.isEmpty()
+                ? QStringLiteral("Razgovor s DJ-em · ") + text(dj, "status", QStringLiteral("uživo"))
+                : QStringLiteral("DJ radi na poruci…"));
         });
     }
     void sendMessage()
@@ -611,13 +663,15 @@ private:
         call(QStringLiteral("/api/message"), &data, [this, words](QJsonObject data, QString error) {
             messageBusy_ = false; updateComposerMode();
             if (!error.isEmpty()) { setNotice(error); return; }
-            appendMessages(QJsonArray{data.value(QStringLiteral("message"))});
+            appendMessages(QJsonArray{data.value(QStringLiteral("message"))}, false, true);
             if (message_->toPlainText().trimmed() == words) message_->clear();
             lastMessage_.clear(); setNotice(QString()); fetchChat();
         });
     }
     QNetworkAccessManager network_{this};
-    QTimer searchDelay_, chatPoll_;
+    QTimer searchDelay_, chatPoll_, idleReturn_;
+    QElapsedTimer idleClock_;
+    QPropertyAnimation* chatScroll_;
     QUrl base_{QStringLiteral("http://127.0.0.1:8787")};
     QLineEdit* name_;
     QPlainTextEdit* message_;
@@ -633,10 +687,10 @@ private:
     int savedQueryCursor_ = 0, savedQueryAnchor_ = 0;
     QJsonObject selectedTrack_;
     QJsonArray messages_;
-    QSet<QString> messageIds_;
+    QSet<QString> messageIds_, processingIds_;
     quint64 searchVersion_ = 0;
     quint64 chatFetches_ = 0;
-    bool chatBusy_ = false, requestBusy_ = false, messageBusy_ = false;
+    bool chatBusy_ = false, requestBusy_ = false, messageBusy_ = false, followingBottom_ = false;
 };
 
 class PartyStage final : public QWidget {
