@@ -6,6 +6,9 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QBuffer>
+#include <QCache>
+#include <QCursor>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -16,6 +19,8 @@
 #include <QFileInfo>
 #include <QFontMetricsF>
 #include <QHash>
+#include <QHelpEvent>
+#include <QHBoxLayout>
 #include <QHideEvent>
 #include <QImageReader>
 #include <QJsonArray>
@@ -35,6 +40,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPlainTextEdit>
+#include <QPixmap>
 #include <QPointer>
 #include <QProgressBar>
 #include <QProcess>
@@ -52,6 +58,7 @@
 #include <QTextCursor>
 #include <QTextLayout>
 #include <QTimer>
+#include <QToolTip>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QUuid>
@@ -82,6 +89,22 @@ QFont stageFont(double pixels, bool bold = false)
     result.setPixelSize(std::max(10, qRound(pixels)));
     result.setWeight(bold ? QFont::DemiBold : QFont::Normal);
     return result;
+}
+QCursor djCursor(Qt::CursorShape shape = Qt::ArrowCursor)
+{
+    QPixmap image(48, 48); image.fill(Qt::transparent);
+    QPainter p(&image); p.setRenderHint(QPainter::Antialiasing);
+    if (shape == Qt::IBeamCursor) {
+        QPainterPath beam; beam.moveTo(24, 5); beam.lineTo(24, 43);
+        beam.moveTo(16, 5); beam.lineTo(32, 5); beam.moveTo(16, 43); beam.lineTo(32, 43);
+        p.setPen(QPen(QColor("#07111e"), 7, Qt::SolidLine, Qt::RoundCap)); p.drawPath(beam);
+        p.setPen(QPen(QColor("#f1fbff"), 3, Qt::SolidLine, Qt::RoundCap)); p.drawPath(beam);
+        p.end(); return QCursor(image, 24, 24);
+    }
+    QPainterPath arrow; arrow.moveTo(7, 4); arrow.lineTo(7, 36); arrow.lineTo(16, 28);
+    arrow.lineTo(23, 44); arrow.lineTo(30, 40); arrow.lineTo(23, 25); arrow.lineTo(37, 25); arrow.closeSubpath();
+    p.setPen(QPen(QColor("#07111e"), 3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); p.setBrush(QColor("#f1fbff")); p.drawPath(arrow);
+    p.end(); return QCursor(image, 7, 4);
 }
 void panel(QPainter& p, const QRectF& r, const QColor& stroke, double opacity = 0.84)
 {
@@ -204,7 +227,8 @@ struct Cue {
 
 class RequestDesk final : public QDockWidget {
 public:
-    explicit RequestDesk(QMainWindow* window) : QDockWidget(QStringLiteral("DJ · pjesme i razgovor"), window)
+    explicit RequestDesk(QMainWindow* window, const QString& baseUrl)
+        : QDockWidget(QStringLiteral("DJ · pjesme i razgovor"), window), base_(baseUrl)
     {
         setObjectName(QStringLiteral("partyRequestPanel"));
         setAllowedAreas(Qt::RightDockWidgetArea);
@@ -222,11 +246,16 @@ public:
             "QListWidget::item { padding:10px 4px; border-bottom:1px solid #202d43; }"
             "QListWidget::item:hover { background:#203b4b; color:#e5fcff; }"
             "QListWidget::item:selected { background:#3b3040; color:#fff3e5; }"
+            "QScrollBar:vertical { background:#13243a; border:0; }"
+            "QScrollBar::handle:vertical { background:#9bb5d1; border-radius:4px; }"
+            "QScrollBar::handle:vertical:hover { background:#d4efff; }"
             "QPushButton { background:#ff8a42; color:#121725; border:0; border-radius:10px; padding:14px; font-weight:600; }"
+            "QPushButton#partyDescribeButton,QPushButton#partyDraftButton { background:#234250; color:#ddf8ff; font-size:27px; }"
             "QPushButton:disabled { background:#364258; color:#9ba9be; }"
+            "QPushButton#partyDescribeButton:disabled,QPushButton#partyDraftButton:disabled { background:#263545; color:#91a0b5; }"
             "QPushButton:hover { background:#ffad72; }"));
         auto* body = new QWidget(this); body->setObjectName(QStringLiteral("partyDeskBody"));
-        auto* layout = new QVBoxLayout(body); layout->setContentsMargins(21, 19, 21, 19); layout->setSpacing(11);
+        auto* layout = new QVBoxLayout(body); layout->setContentsMargins(21, 19, 21, 10); layout->setSpacing(11);
         auto* heading = new QLabel(QStringLiteral("Daj pjesmu. Reci DJ-u."), body);
         heading->setObjectName(QStringLiteral("partyDeskHeading")); heading->setWordWrap(true); layout->addWidget(heading);
         name_ = new QLineEdit(body); name_->setObjectName(QStringLiteral("partyName"));
@@ -243,6 +272,10 @@ public:
         presence_->setObjectName(QStringLiteral("partyDjPresence"));
         presence_->setFixedHeight(73); presence_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         chat_ = new QTextBrowser(body); chat_->setObjectName(QStringLiteral("partyChat"));
+        chat_->setOpenLinks(false);
+        connect(chat_, &QTextBrowser::anchorClicked, this, [this](const QUrl& url) {
+            if (url.scheme() == QStringLiteral("recall") && url.path().toLongLong() == lastSentId_) recallMessage();
+        });
         chat_->setOpenExternalLinks(false); chat_->setMinimumHeight(175); layout->addWidget(chat_, 1);
         chat_->verticalScrollBar()->setObjectName(QStringLiteral("partyChatScroll"));
         chatScroll_ = new QPropertyAnimation(chat_->verticalScrollBar(), QByteArrayLiteral("value"), this);
@@ -255,7 +288,7 @@ public:
         });
         suggestionArea_ = new QWidget(body); auto* suggestionArea = suggestionArea_;
         suggestionArea->setObjectName(QStringLiteral("partySuggestions"));
-        suggestionArea->setFixedHeight(255); suggestionArea->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        suggestionArea->setFixedHeight(340); suggestionArea->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         auto* suggestionLayout = new QVBoxLayout(suggestionArea); suggestionLayout->setContentsMargins(0, 0, 0, 0); suggestionLayout->setSpacing(0);
         searchActivity_ = new QProgressBar(suggestionArea); searchActivity_->setObjectName(QStringLiteral("partySearchActivity"));
         searchActivity_->setTextVisible(false); searchActivity_->setFixedHeight(5); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
@@ -291,6 +324,12 @@ public:
         message_->setLineWrapMode(QPlainTextEdit::WidgetWidth); message_->setTabChangesFocus(true);
         message_->installEventFilter(this);
         message_->setFixedHeight(178); layout->addWidget(message_);
+        auto* actions = new QWidget(body); actions->setObjectName(QStringLiteral("partyMessageActions")); actions->setFixedHeight(62);
+        auto* actionLayout = new QHBoxLayout(actions); actionLayout->setContentsMargins(0, 0, 0, 0); actionLayout->setSpacing(11);
+        describe_ = new QPushButton(QStringLiteral("Traži po opisu"), actions); describe_->setObjectName(QStringLiteral("partyDescribeButton"));
+        alternate_ = new QPushButton(QStringLiteral("Vrati skicu"), actions); alternate_->setObjectName(QStringLiteral("partyDraftButton"));
+        for (auto* button : {describe_, alternate_}) { button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding); actionLayout->addWidget(button, 1); }
+        layout->addWidget(actions);
         magicHelp_ = new QLabel(body); magicHelp_->setObjectName(QStringLiteral("partyMagicHelp"));
         magicHelp_->setWordWrap(true); magicHelp_->setTextFormat(Qt::RichText); magicHelp_->setFixedHeight(73);
         magicHelp_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); layout->addWidget(magicHelp_);
@@ -301,15 +340,26 @@ public:
         connect(results_, &QListWidget::itemSelectionChanged, this, [this] { chooseSong(); });
         connect(cancelSong_, &QPushButton::clicked, this, [this] { cancelSong(); });
         connect(send_, &QPushButton::clicked, this, [this] { sendMagic(); });
-        notice_ = new QLabel(body);
-        notice_->setWordWrap(true); notice_->setTextFormat(Qt::PlainText); notice_->setFixedHeight(73);
-        notice_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); layout->addWidget(notice_);
-        for (QWidget* control : std::array<QWidget*, 11>{name_, message_, message_->viewport(), chat_, chat_->viewport(),
-                                chat_->verticalScrollBar(), results_, results_->viewport(), results_->verticalScrollBar(), send_, cancelSong_})
+        connect(describe_, &QPushButton::clicked, this, [this] { beginDescription(); });
+        connect(alternate_, &QPushButton::clicked, this, [this] { restoreAlternateDraft(); });
+        descriptionPoll_.setInterval(1500);
+        connect(&descriptionPoll_, &QTimer::timeout, this, [this] { pollDescription(); });
+        notice_ = new QLabel(body); notice_->setObjectName(QStringLiteral("partyNotice"));
+        notice_->setWordWrap(true); notice_->setTextFormat(Qt::PlainText); notice_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        notice_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        notice_->setStyleSheet(QStringLiteral("background:#1d3446; color:#e7f8ff; border:1px solid #6bafc6; border-radius:10px; padding:9px; font-size:26px;"));
+        notice_->hide(); noticeDismiss_.setSingleShot(true); noticeDismiss_.setInterval(6000);
+        connect(&noticeDismiss_, &QTimer::timeout, notice_, &QWidget::hide);
+        for (QWidget* control : std::array<QWidget*, 13>{name_, message_, message_->viewport(), chat_, chat_->viewport(),
+                                chat_->verticalScrollBar(), results_, results_->viewport(), results_->verticalScrollBar(), send_, cancelSong_, describe_, alternate_})
+        {
             control->installEventFilter(this);
+            control->setCursor(djCursor(control->cursor().shape()));
+        }
         idleClock_.start(); idleReturn_.setInterval(250);
         connect(&idleReturn_, &QTimer::timeout, this, [this] {
-            if (isVisible() && idleClock_.elapsed() >= 20000 && QApplication::mouseButtons() == Qt::NoButton
+            refreshWorkBadges();
+            if (isVisible() && idleClock_.elapsed() >= 120000 && QApplication::mouseButtons() == Qt::NoButton
                 && !chat_->verticalScrollBar()->isSliderDown()) {
                 animateChatToBottom(800); idleClock_.restart();
             }
@@ -332,7 +382,8 @@ public:
     {
         const QUrl next(url);
         if (next == base_) return;
-        base_ = next; cursor_.clear(); messages_ = {}; messageIds_.clear(); processingIds_.clear(); chatFetches_ = 0;
+        base_ = next; cursor_.clear(); messages_ = {}; messageIds_.clear(); processingIds_.clear(); messageWork_ = {}; workPresentation_ = {}; chatFetches_ = 0;
+        withdrawnIds_.clear(); lastSentId_ = 0; recallBusy_ = false; alternateDraft_ = {}; cancelDescription(); ++searchVersion_;
         chatScroll_->stop(); followingBottom_ = false; chat_->clear();
         if (isVisible()) fetchChat();
     }
@@ -350,12 +401,29 @@ public:
         return {{QStringLiteral("panelVisible"), isVisible()}, {QStringLiteral("chatCount"), messages_.size()},
                 {QStringLiteral("panelBounds"), bounds},
                 {QStringLiteral("selectedCancelFits"), selectedPage_->rect().contains(cancelSong_->geometry())},
-                {QStringLiteral("processingCount"), processingIds_.size()},
+                {QStringLiteral("processingCount"), activeWorkCount()}, {QStringLiteral("workStates"), workStates()},
+                {QStringLiteral("lastSentMessageId"), lastSentId_}, {QStringLiteral("recallBusy"), recallBusy_},
+                {QStringLiteral("alternateDraftAvailable"), !alternateDraft_.isEmpty()},
+                {QStringLiteral("descriptionId"), descriptionId_}, {QStringLiteral("descriptionStatus"), descriptionStatus_},
+                {QStringLiteral("chatQuietMs"), idleClock_.elapsed()}, {QStringLiteral("chatIdleReturnMs"), 120000},
+                {QStringLiteral("composerCursorPixels"), message_->viewport()->cursor().pixmap().width()},
                 {QStringLiteral("searchCount"), results_->count()}, {QStringLiteral("panelNotice"), notice_->text()},
+                {QStringLiteral("panelNoticeVisible"), notice_->isVisible()},
+                {QStringLiteral("panelBottomGap"), widget()->height() - send_->geometry().bottom() - 1},
                 {QStringLiteral("composerMode"), selectedTrack_.isEmpty() ? QStringLiteral("message") : QStringLiteral("dedication")},
                 {QStringLiteral("suggestionState"), suggestionState_}, {QStringLiteral("selectedTrack"), text(selectedTrack_, "title")}};
     }
     QJsonObject draft() const
+    {
+        auto result = editorDraft();
+        result.insert(QStringLiteral("lastSentMessageId"), lastSentId_);
+        result.insert(QStringLiteral("alternateDraft"), alternateDraft_);
+        result.insert(QStringLiteral("alternateDraftLabel"), alternateLabel_);
+        if (descriptionActive_) result.insert(QStringLiteral("description"),
+            QJsonObject{{QStringLiteral("text"), descriptionText_}, {QStringLiteral("requestId"), descriptionRequestId_}});
+        return result;
+    }
+    QJsonObject editorDraft() const
     {
         const auto cursor = message_->textCursor();
         return {{QStringLiteral("text"), message_->toPlainText()}, {QStringLiteral("cursor"), cursor.position()},
@@ -366,18 +434,34 @@ public:
     void showNotice(const QString& words) { setNotice(words); }
     void restoreDraft(const QJsonObject& draft)
     {
-        selectedTrack_ = draft.value(QStringLiteral("selectedTrack")).toObject();
-        if (text(selectedTrack_, "uri").isEmpty()) selectedTrack_ = {};
-        savedQuery_ = text(draft, "query");
-        savedQueryCursor_ = static_cast<int>(number(draft, "queryCursor", savedQuery_.size()));
-        savedQueryAnchor_ = static_cast<int>(number(draft, "queryAnchor", savedQueryCursor_));
-        setComposerText(text(draft, "text"), static_cast<int>(number(draft, "cursor", text(draft, "text").size())),
-                        static_cast<int>(number(draft, "anchor", number(draft, "cursor", text(draft, "text").size()))));
-        updateComposerMode(); composerChanged();
+        if (draft.contains(QStringLiteral("lastSentMessageId"))) lastSentId_ = static_cast<qint64>(number(draft, "lastSentMessageId", 0));
+        if (draft.contains(QStringLiteral("alternateDraft"))) {
+            alternateDraft_ = draft.value(QStringLiteral("alternateDraft")).toObject();
+            alternateLabel_ = text(draft, "alternateDraftLabel", QStringLiteral("Vrati skicu"));
+        }
+        applyEditorDraft(draft);
+        const auto description = draft.value(QStringLiteral("description")).toObject();
+        if (!description.isEmpty() && text(description, "text") == message_->toPlainText().trimmed() && selectedTrack_.isEmpty()) {
+            descriptionRequestId_ = text(description, "requestId"); beginDescription(true);
+        }
     }
+    void recallLatest() { recallMessage(); }
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
     {
+        if (watched == chat_->viewport() && event->type() == QEvent::ToolTip) {
+            auto* help = static_cast<QHelpEvent*>(event);
+            const QString anchor = chat_->anchorAt(help->pos());
+            if (anchor.startsWith(QStringLiteral("work:"))) {
+                const QString id = anchor.mid(5);
+                QToolTip::showText(help->globalPos(), workTooltip(messageWork_.value(id).toObject()), chat_->viewport());
+                return true;
+            }
+        }
+        if (event->type() == QEvent::CursorChange) {
+            if (auto* widget = qobject_cast<QWidget*>(watched); widget && widget->cursor().shape() != Qt::BitmapCursor)
+                widget->setCursor(djCursor(widget->cursor().shape()));
+        }
         if (event->type() == QEvent::KeyPress || event->type() == QEvent::Wheel || event->type() == QEvent::MouseButtonPress
             || event->type() == QEvent::MouseButtonRelease
             || (event->type() == QEvent::MouseMove && static_cast<QMouseEvent*>(event)->buttons() != Qt::NoButton)) {
@@ -403,6 +487,17 @@ protected:
         return QDockWidget::eventFilter(watched, event);
     }
 private:
+    void applyEditorDraft(const QJsonObject& draft)
+    {
+        selectedTrack_ = draft.value(QStringLiteral("selectedTrack")).toObject();
+        if (text(selectedTrack_, "uri").isEmpty()) selectedTrack_ = {};
+        savedQuery_ = text(draft, "query");
+        savedQueryCursor_ = static_cast<int>(number(draft, "queryCursor", savedQuery_.size()));
+        savedQueryAnchor_ = static_cast<int>(number(draft, "queryAnchor", savedQueryCursor_));
+        setComposerText(text(draft, "text"), static_cast<int>(number(draft, "cursor", text(draft, "text").size())),
+                        static_cast<int>(number(draft, "anchor", number(draft, "cursor", text(draft, "text").size()))));
+        updateComposerMode(); composerChanged();
+    }
     static QString uuid() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
     QString name() const { return name_->text().trimmed().isEmpty() ? QStringLiteral("Gost") : name_->text().trimmed(); }
     void animateChatToBottom(int duration = 450)
@@ -419,7 +514,7 @@ private:
         // layout. Showing results or a selected song cannot move the composer.
         const QRect composer = message_->geometry();
         const QRect chat = chat_->geometry();
-        const int height = std::max(1, std::min(255, chat.height()));
+        const int height = std::max(1, std::min(340, chat.height()));
         suggestionArea_->setFixedHeight(height);
         suggestionArea_->setGeometry(composer.x(), std::max(chat.y(), composer.y() - 11 - height), composer.width(), height);
         const bool compact = height < 230;
@@ -430,13 +525,20 @@ private:
         const bool selected = !selectedTrack_.isEmpty();
         const bool results = results_->count() > 0 &&
             (suggestionState_ == QStringLiteral("results") || suggestionState_ == QStringLiteral("loading"));
-        suggestionArea_->setVisible(selected || results);
-        if (selected || results) suggestionArea_->raise();
+        suggestionArea_->setVisible(selected || results || descriptionActive_);
+        if (selected || results || descriptionActive_) suggestionArea_->raise();
+        notice_->setGeometry(chat.x() + 8, chat.y() + 8,
+                             std::max(1, chat.width() - 16), std::min(88, chat.height() - 16));
+        if (notice_->isVisible()) notice_->raise();
     }
     void setNotice(const QString& words)
     {
         notice_->setToolTip(words);
-        notice_->setText(QFontMetrics(stageFont(29)).elidedText(words, Qt::ElideRight, 1025));
+        const int lineWidth = std::max(120, chat_->width() - 54);
+        notice_->setText(QFontMetrics(stageFont(26)).elidedText(words, Qt::ElideRight, lineWidth * 2));
+        notice_->setVisible(!words.isEmpty());
+        if (words.isEmpty()) noticeDismiss_.stop();
+        else { updateSuggestionOverlay(); notice_->raise(); noticeDismiss_.start(); }
     }
     void suggestionHint(const QString& words, const QString& state)
     {
@@ -446,6 +548,7 @@ private:
     }
     void setComposerText(const QString& words, int position, int anchor)
     {
+        ++composerGeneration_;
         const QSignalBlocker block(message_);
         message_->setPlainText(words);
         auto cursor = message_->textCursor();
@@ -458,16 +561,21 @@ private:
         const bool song = !selectedTrack_.isEmpty();
         message_->setPlaceholderText(song ? QStringLiteral("Posveta uz pjesmu (po želji)…")
                                          : QStringLiteral("Magic box: pjesma, izvođač ili poruka DJ-u…"));
-        magicHelp_->setText(QStringLiteral("<b style=\"color:#7de4ed\">Tab: qtra ↔ Spotify</b><br>Shift+Enter: novi red"));
+        magicHelp_->setText(QStringLiteral("<b style=\"color:#7de4ed\">Tab: qtra ↔ Spotify</b><br>Shift+Enter: novi red · Esc: vrati"));
         send_->setText(song ? QStringLiteral("Pošalji pjesmu (Enter)") : QStringLiteral("Pošalji poruku (Enter)"));
-        const bool busy = requestBusy_ || messageBusy_;
+        const bool busy = requestBusy_ || messageBusy_ || recallBusy_;
         send_->setEnabled(!busy && (song || !message_->toPlainText().trimmed().isEmpty()));
         cancelSong_->setEnabled(!busy);
+        describe_->setEnabled(!busy && !song && !descriptionBusy_
+            && !(descriptionActive_ && descriptionStatus_ == QStringLiteral("pending"))
+            && message_->toPlainText().trimmed().size() >= 3 && message_->toPlainText().trimmed().size() <= 1500);
+        alternate_->setEnabled(!busy && !alternateDraft_.isEmpty());
+        alternate_->setText(alternateLabel_);
         if (song) {
             searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
             const QFontMetrics fm(stageFont(29));
             selectedTitle_->setText(fm.elidedText(text(selectedTrack_, "title"), Qt::ElideRight, 500));
-            selectedTitle_->setToolTip(text(selectedTrack_, "title"));
+            selectedTitle_->setToolTip(trackTooltip(selectedTrack_));
             selectedArtist_->setText(fm.elidedText(text(selectedTrack_, "artist"), Qt::ElideRight, 500));
             selectedArtist_->setToolTip(text(selectedTrack_, "artist"));
             suggestions_->setCurrentWidget(selectedPage_); suggestionState_ = QStringLiteral("selected");
@@ -476,7 +584,7 @@ private:
     }
     void composerChanged()
     {
-        ++searchVersion_; updateComposerMode();
+        ++composerGeneration_; ++searchVersion_; cancelDescription(); updateComposerMode();
         if (!selectedTrack_.isEmpty()) { searchDelay_.stop(); return; }
         if (message_->toPlainText().trimmed().size() < 2) {
             { const QSignalBlocker block(results_); results_->clear(); }
@@ -495,24 +603,24 @@ private:
     }
     void chooseSong()
     {
-        if (requestBusy_ || messageBusy_ || !selectedTrack_.isEmpty() || !results_->currentItem() || results_->selectedItems().isEmpty()) return;
+        if (requestBusy_ || messageBusy_ || recallBusy_ || !selectedTrack_.isEmpty() || !results_->currentItem() || results_->selectedItems().isEmpty()) return;
         const auto track = QJsonObject::fromVariantMap(results_->currentItem()->data(Qt::UserRole).toMap());
         if (text(track, "uri").isEmpty()) return;
         savedQuery_ = message_->toPlainText();
         savedQueryCursor_ = message_->textCursor().position(); savedQueryAnchor_ = message_->textCursor().anchor();
-        selectedTrack_ = track; ++searchVersion_; searchDelay_.stop(); setComposerText(QString(), 0, 0);
+        selectedTrack_ = track; ++searchVersion_; searchDelay_.stop(); cancelDescription(); setComposerText(QString(), 0, 0);
         updateComposerMode(); setNotice(QStringLiteral("Pjesma je odabrana. Možeš dodati posvetu.")); message_->setFocus();
     }
     void cancelSong()
     {
-        if (requestBusy_ || messageBusy_) return;
+        if (requestBusy_ || messageBusy_ || recallBusy_) return;
         selectedTrack_ = {};
         setComposerText(savedQuery_, savedQueryCursor_, savedQueryAnchor_); savedQuery_.clear();
         updateComposerMode(); composerChanged(); setNotice(QStringLiteral("Pjesma nije poslana. Upit je vraćen.")); message_->setFocus();
     }
     void sendMagic()
     {
-        if (requestBusy_ || messageBusy_) return;
+        if (requestBusy_ || messageBusy_ || recallBusy_) return;
         selectedTrack_.isEmpty() ? sendMessage() : requestTrack();
     }
     using Done = std::function<void(QJsonObject, QString)>;
@@ -541,31 +649,136 @@ private:
         call(QStringLiteral("/api/search?") + args.toString(QUrl::FullyEncoded), nullptr, [this, version](QJsonObject data, QString error) {
             if (version != searchVersion_ || !selectedTrack_.isEmpty()) return;
             results_->setEnabled(true); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
-            const QSignalBlocker block(results_);
-            results_->clear();
             if (!error.isEmpty()) {
+                { const QSignalBlocker block(results_); results_->clear(); }
                 suggestionHint(QStringLiteral("Pretraga trenutačno ne radi.\nPoruku i dalje možeš poslati DJ-u."), QStringLiteral("error"));
                 setNotice(error); return;
             }
-            const QFontMetrics fm(stageFont(29));
-            // The results page can still be hidden while its first reply arrives.
-            // Measure its already-laid-out stack so the first titles are not
-            // elided to a hidden viewport's initial size.
-            const int width = std::max(150, suggestions_->width() - 58);
-            for (const auto& value : data.value(QStringLiteral("tracks")).toArray()) {
-                const QJsonObject track = value.toObject();
-                auto* item = new QListWidgetItem(fm.elidedText(text(track, "title"), Qt::ElideRight, width)
-                    + QStringLiteral("\n") + fm.elidedText(text(track, "artist"), Qt::ElideRight, width), results_);
-                item->setData(Qt::UserRole, track.toVariantMap());
-                item->setToolTip(text(track, "title") + QStringLiteral("\n") + text(track, "artist"));
-                item->setSizeHint(QSize(0, 95));
+            showTracks(data.value(QStringLiteral("tracks")).toArray());
+        });
+    }
+    static QJsonObject matchDetails(const QJsonObject& track)
+    {
+        if (track.contains(QStringLiteral("matchBasis")))
+            return {{QStringLiteral("basis"), track.value(QStringLiteral("matchBasis"))},
+                    {QStringLiteral("rationale"), track.value(QStringLiteral("rationale"))},
+                    {QStringLiteral("confidence"), track.value(QStringLiteral("confidence"))},
+                    {QStringLiteral("sources"), track.value(QStringLiteral("sources"))}};
+        return track.value(QStringLiteral("match")).toObject();
+    }
+    static QString matchBasis(const QJsonObject& track)
+    {
+        const QString basis = text(matchDetails(track), "basis");
+        if (basis == QStringLiteral("title")) return QStringLiteral("Po naslovu");
+        if (basis == QStringLiteral("literal_lyrics")) return QStringLiteral("Doslovni stih");
+        if (basis == QStringLiteral("semantic")) return QStringLiteral("Po značenju");
+        return {};
+    }
+    static QString trackTooltip(const QJsonObject& track)
+    {
+        QString html = QStringLiteral("<qt><b>%1</b><br>%2")
+            .arg(text(track, "title").toHtmlEscaped(), text(track, "artist").toHtmlEscaped());
+        const QString basis = matchBasis(track);
+        if (!basis.isEmpty()) {
+            const auto match = matchDetails(track);
+            html += QStringLiteral("<br><br><b>%1</b><br>%2").arg(basis,
+                text(match, "rationale").left(1200).toHtmlEscaped().replace(QChar('\n'), QStringLiteral("<br>")));
+            const auto confidence = match.value(QStringLiteral("confidence"));
+            if (confidence.isDouble() && std::isfinite(confidence.toDouble()) && confidence.toDouble() >= 0 && confidence.toDouble() <= 1)
+                html += QStringLiteral("<br>Procjena podudaranja: %1%").arg(qRound(confidence.toDouble() * 100));
+            int shown = 0;
+            for (const auto& value : match.value(QStringLiteral("sources")).toArray()) {
+                const auto source = value.toObject(); const QUrl url(text(source, "url"), QUrl::StrictMode);
+                if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty()
+                    || (url.scheme() != QStringLiteral("https") && url.scheme() != QStringLiteral("http"))) continue;
+                html += QStringLiteral("<br><br>%1<br>%2").arg(text(source, "label", url.host()).left(160).toHtmlEscaped(),
+                    url.toDisplayString(QUrl::FullyEncoded).toHtmlEscaped());
+                if (++shown == 4) break;
             }
-            results_->setCurrentRow(-1);
-            if (results_->count()) {
-                suggestions_->setCurrentWidget(results_); suggestionState_ = QStringLiteral("results");
-                updateSuggestionOverlay();
-            }
-            else suggestionHint(QStringLiteral("Nema pjesama za taj upit.\nPoruku možeš poslati DJ-u."), QStringLiteral("empty"));
+        }
+        return html + QStringLiteral("</qt>");
+    }
+    void showTracks(const QJsonArray& tracks, const QString& note = {})
+    {
+        const QSignalBlocker block(results_); results_->clear(); results_->setEnabled(true);
+        const QFontMetrics fm(stageFont(29)); const int width = std::max(150, suggestions_->width() - 58);
+        for (const auto& value : tracks) {
+            const QJsonObject track = value.toObject();
+            if (text(track, "uri").isEmpty()) continue;
+            const QString basis = matchBasis(track);
+            QString label = fm.elidedText(text(track, "title"), Qt::ElideRight, width)
+                + QStringLiteral("\n") + fm.elidedText(text(track, "artist"), Qt::ElideRight, width);
+            if (!basis.isEmpty()) label += QStringLiteral("\n") + basis;
+            auto* item = new QListWidgetItem(label, results_);
+            item->setData(Qt::UserRole, track.toVariantMap());
+            item->setToolTip(trackTooltip(track));
+            item->setSizeHint(QSize(0, basis.isEmpty() ? 95 : 128));
+        }
+        results_->setCurrentRow(-1);
+        if (results_->count()) {
+            suggestions_->setCurrentWidget(results_); suggestionState_ = QStringLiteral("results"); updateSuggestionOverlay();
+        } else suggestionHint(note.isEmpty() ? QStringLiteral("Nema pjesama za taj upit.\nPoruku možeš poslati DJ-u.") : note,
+                              QStringLiteral("empty"));
+        if (!note.isEmpty()) setNotice(note);
+    }
+    void cancelDescription()
+    {
+        descriptionPoll_.stop(); descriptionActive_ = false; descriptionBusy_ = false;
+        descriptionId_.clear(); descriptionStatus_.clear();
+    }
+    void applyDescriptionReply(const QJsonObject& data, const QString& error)
+    {
+        descriptionBusy_ = false;
+        const auto search = data.value(QStringLiteral("search")).toObject();
+        const QString id = search.value(QStringLiteral("id")).toVariant().toString(), status = text(search, "status");
+        if (!error.isEmpty() || id.isEmpty() || (status != QStringLiteral("pending") && status != QStringLiteral("resolved"))
+            || (!descriptionId_.isEmpty() && descriptionId_ != id)) {
+            descriptionPoll_.stop(); descriptionStatus_ = QStringLiteral("error");
+            searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
+            suggestionHint(QStringLiteral("Pretraga po opisu nije dovršena.\nMožeš pokušati ponovno ili urediti upit."), QStringLiteral("description-error"));
+            setNotice(error.isEmpty() ? QStringLiteral("DJ je vratio nečitljiv odgovor pretrage.") : error);
+            updateComposerMode(); return;
+        }
+        descriptionId_ = id; descriptionStatus_ = status;
+        if (status == QStringLiteral("pending")) {
+            const QString note = text(search, "note");
+            suggestionHint(note.isEmpty() ? QStringLiteral("DJ traži pjesmu po opisu…\nRezultati će se pojaviti ovdje.") : note,
+                           QStringLiteral("description-pending"));
+            searchActivity_->setRange(0, 0); descriptionPoll_.start();
+        } else {
+            descriptionPoll_.stop(); searchActivity_->setRange(0, 1); searchActivity_->setValue(0);
+            showTracks(search.value(QStringLiteral("tracks")).toArray(), text(search, "note"));
+        }
+        updateComposerMode();
+    }
+    void beginDescription(bool restoring = false)
+    {
+        const QString words = message_->toPlainText().trimmed();
+        if (words.size() < 3 || words.size() > 1500 || !selectedTrack_.isEmpty() || requestBusy_ || messageBusy_ || recallBusy_ || descriptionBusy_) return;
+        if (!restoring && !(descriptionStatus_ == QStringLiteral("error") && descriptionText_ == words)) descriptionRequestId_ = uuid();
+        if (descriptionRequestId_.isEmpty()) descriptionRequestId_ = uuid();
+        ++searchVersion_; searchDelay_.stop(); descriptionPoll_.stop();
+        descriptionText_ = words; descriptionId_.clear(); descriptionStatus_ = QStringLiteral("pending");
+        descriptionActive_ = true; descriptionBusy_ = true; results_->setEnabled(false);
+        suggestionHint(QStringLiteral("DJ traži pjesmu po opisu…\nRezultati će se pojaviti ovdje."), QStringLiteral("description-pending"));
+        searchActivity_->setRange(0, 0); updateComposerMode();
+        const quint64 version = searchVersion_;
+        const QJsonObject data{{QStringLiteral("guestId"), guestId_}, {QStringLiteral("requestId"), descriptionRequestId_},
+                              {QStringLiteral("text"), words}};
+        call(QStringLiteral("/api/search/describe"), &data, [this, version](QJsonObject data, QString error) {
+            if (version != searchVersion_ || !descriptionActive_ || !selectedTrack_.isEmpty()) return;
+            applyDescriptionReply(data, error);
+        });
+    }
+    void pollDescription()
+    {
+        if (!descriptionActive_ || descriptionBusy_ || descriptionId_.isEmpty() || !selectedTrack_.isEmpty()) return;
+        descriptionBusy_ = true; const quint64 version = searchVersion_; const QString id = descriptionId_;
+        QUrlQuery query; query.addQueryItem(QStringLiteral("id"), id);
+        call(QStringLiteral("/api/search/describe?") + query.toString(QUrl::FullyEncoded), nullptr,
+             [this, version, id](QJsonObject data, QString error) {
+            if (version != searchVersion_ || !descriptionActive_ || id != descriptionId_ || !selectedTrack_.isEmpty()) return;
+            applyDescriptionReply(data, error);
         });
     }
     void requestTrack()
@@ -583,7 +796,7 @@ private:
             requestBusy_ = false;
             if (!error.isEmpty()) { updateComposerMode(); setNotice(error); return; }
             const QString status = text(data, "status", text(data.value(QStringLiteral("request")).toObject(), "status"));
-            setNotice(title + (status == QStringLiteral("queued") ? QStringLiteral(" · dodano u red.") : QStringLiteral(" · zahtjev je stigao DJ-u.")));
+            setNotice(title + (status == QStringLiteral("queued") ? QStringLiteral(" — dodano u red.") : QStringLiteral(" — zahtjev je stigao DJ-u.")));
             selectedTrack_ = {}; savedQuery_.clear(); lastRequestSignature_.clear();
             if (message_->toPlainText().trimmed() == words) setComposerText(QString(), 0, 0);
             updateComposerMode(); composerChanged();
@@ -591,21 +804,26 @@ private:
     }
     void appendMessages(const QJsonArray& incoming, bool changed = false, bool followBottom = false)
     {
+        bool conversationActivity = false;
         for (const auto& value : incoming) {
             const auto message = value.toObject(); const QString id = message.value(QStringLiteral("id")).toVariant().toString();
-            if (id.isEmpty()) continue;
+            if (id.isEmpty() || withdrawnIds_.contains(id)) continue;
             if (messageIds_.contains(id)) {
                 for (qsizetype i = 0; i < messages_.size(); ++i) {
                     const auto previous = messages_[i].toObject();
                     if (previous.value(QStringLiteral("id")).toVariant().toString() == id) {
-                        if (previous != message) { messages_[i] = message; changed = true; }
+                        if (previous != message) {
+                            conversationActivity |= text(previous, "text") != text(message, "text");
+                            messages_[i] = message; changed = true;
+                        }
                         break;
                     }
                 }
                 continue;
             }
-            messageIds_.insert(id); messages_.append(message); changed = true;
+            messageIds_.insert(id); messages_.append(message); changed = true; conversationActivity = true;
         }
+        if (conversationActivity) idleClock_.restart();
         if (!changed) {
             if (followBottom) animateChatToBottom();
             return;
@@ -624,16 +842,34 @@ private:
         for (const auto& message : ordered) {
             const bool dj = text(message, "role") == QStringLiteral("assistant");
             const QString author = dj ? QStringLiteral("DJ") : text(message, "name", QStringLiteral("Gost"));
-            const bool processing = !dj && processingIds_.contains(message.value(QStringLiteral("id")).toVariant().toString());
+            const QString id = message.value(QStringLiteral("id")).toVariant().toString();
             const QString receipt = dj ? QString() : QStringLiteral(" <span style='font-family:monospace;color:%1'>%2</span>")
-                .arg(processing ? QStringLiteral("#ffb16c") : text(message, "status") == QStringLiteral("read")
-                     ? QStringLiteral("#8994a6") : QStringLiteral("#080f1d"), processing ? QStringLiteral("●")
-                     : text(message, "status") == QStringLiteral("read") ? QStringLiteral("✓") : QStringLiteral("&nbsp;"));
-            html += QStringLiteral("<p style='margin:8px 0 13px'><b style='color:%1'>%2</b>%3<br><span style='color:#f0f2f7'>%4</span></p>")
+                .arg(text(message, "status") == QStringLiteral("read") ? QStringLiteral("#8994a6") : QStringLiteral("#080f1d"),
+                     text(message, "status") == QStringLiteral("read") ? QStringLiteral("✓") : QStringLiteral("&nbsp;"));
+            QString work;
+            if (!dj) {
+                const bool recorded = messageWork_.contains(id);
+                const QString state = recorded ? effectiveWork(messageWork_.value(id).toObject())
+                    : processingIds_.contains(id) ? QStringLiteral("active") : QString();
+                QString mark = QStringLiteral("&nbsp;"), colour = QStringLiteral("#080f1d");
+                if (state == QStringLiteral("active")) { mark = QStringLiteral("●"); colour = QStringLiteral("#ffb16c"); }
+                else if (state == QStringLiteral("waiting")) { mark = QStringLiteral("◷"); colour = QStringLiteral("#a8b9cb"); }
+                else if (state == QStringLiteral("blocked")) { mark = QStringLiteral("◇"); colour = QStringLiteral("#f2c476"); }
+                else if (state == QStringLiteral("unconfirmed")) { mark = QStringLiteral("?"); colour = QStringLiteral("#f2c476"); }
+                else if (state == QStringLiteral("completed")) { mark = QStringLiteral("◆"); colour = QStringLiteral("#8ed8bd"); }
+                else if (state == QStringLiteral("cancelled")) { mark = QStringLiteral("–"); colour = QStringLiteral("#8593a6"); }
+                work = recorded ? QStringLiteral(" <a href='work:%1' style='font-family:monospace;color:%2;text-decoration:none'>%3</a>").arg(id.toHtmlEscaped(), colour, mark)
+                    : QStringLiteral(" <span style='font-family:monospace;color:%1'>%2</span>").arg(colour, mark);
+            }
+            const QString recall = dj ? QString() : canRecall(message)
+                ? QStringLiteral(" <a href='recall:%1' style='color:#b3e1ee;font-family:monospace;font-size:24px;text-decoration:none'>×</a>").arg(lastSentId_)
+                : QStringLiteral(" <span style='font-family:monospace;font-size:24px'>&nbsp;</span>");
+            html += QStringLiteral("<p style='margin:8px 0 13px'><b style='color:%1'>%2</b>%3%4%5<br><span style='color:#f0f2f7'>%6</span></p>")
                 .arg(dj ? QStringLiteral("#ff9a58") : QStringLiteral("#7de4ed"), author.toHtmlEscaped(), receipt,
+                     work, recall,
                      text(message, "text").toHtmlEscaped().replace(QChar('\n'), QStringLiteral("<br>")));
         }
-        chat_->setHtml(html); scroll->setValue(oldScroll);
+        chat_->setHtml(html); scroll->setValue(oldScroll); workPresentation_ = workStates();
         if (atBottom) animateChatToBottom();
     }
     void fetchChat()
@@ -647,17 +883,19 @@ private:
             chatBusy_ = false;
             if (!error.isEmpty()) { presence_->setText(QStringLiteral("DJ veza: ") + error); return; }
             const auto incoming = data.value(QStringLiteral("messages")).toArray();
+            const bool withdrawn = withdrawMessages(data.value(QStringLiteral("withdrawnMessageIds")).toArray());
             const auto dj = data.value(QStringLiteral("dj")).toObject();
+            const bool workChanged = mergeWork(incoming, dj.value(QStringLiteral("messageWork")).toObject());
             QSet<QString> processing;
             for (const auto& id : dj.value(QStringLiteral("processingMessageIds")).toArray()) processing.insert(id.toVariant().toString());
             const bool processingChanged = processing != processingIds_; processingIds_ = processing;
-            appendMessages(incoming, processingChanged);
+            appendMessages(incoming, processingChanged || withdrawn || workChanged);
             // Only a fetched history response advances the read cursor. A POST
             // can finish while older replies are still in flight.
             // Receipt refreshes revisit recent IDs without skipping any IDs that
             // still need to arrive through the incremental history cursor.
             if (!receipts && !incoming.isEmpty()) cursor_ = incoming.last().toObject().value(QStringLiteral("id")).toVariant().toString();
-            presence_->setText(processingIds_.isEmpty()
+            presence_->setText(activeWorkCount() == 0
                 ? QStringLiteral("Razgovor s DJ-em · ") + text(dj, "status", QStringLiteral("uživo"))
                 : QStringLiteral("DJ radi na poruci…"));
         });
@@ -668,47 +906,192 @@ private:
         if (words.size() > 1500) { setNotice(QStringLiteral("Poruka može imati do 1500 znakova.")); return; }
         if (words != lastMessage_) { messageId_ = uuid(); lastMessage_ = words; }
         const QJsonObject data{{QStringLiteral("guestId"), guestId_}, {QStringLiteral("name"), name()},
-                              {QStringLiteral("text"), words}, {QStringLiteral("requestId"), messageId_}};
+                              {QStringLiteral("text"), words}, {QStringLiteral("requestId"), messageId_},
+                              {QStringLiteral("source"), QStringLiteral("native")}};
+        const quint64 generation = composerGeneration_;
         messageBusy_ = true; updateComposerMode();
-        call(QStringLiteral("/api/message"), &data, [this, words](QJsonObject data, QString error) {
+        call(QStringLiteral("/api/message"), &data, [this, words, generation](QJsonObject data, QString error) {
             messageBusy_ = false; updateComposerMode();
             if (!error.isEmpty()) { setNotice(error); return; }
-            appendMessages(QJsonArray{data.value(QStringLiteral("message"))}, false, true);
-            if (message_->toPlainText().trimmed() == words) message_->clear();
+            const auto sent = data.value(QStringLiteral("message")).toObject();
+            lastSentId_ = static_cast<qint64>(number(sent, "id", 0));
+            appendMessages(QJsonArray{sent}, false, true);
+            if (generation == composerGeneration_ && message_->toPlainText().trimmed() == words) message_->clear();
             lastMessage_.clear(); setNotice(QString()); fetchChat();
         });
     }
+    bool withdrawMessages(const QJsonArray& ids)
+    {
+        bool changed = false;
+        for (const auto& value : ids) {
+            const QString id = value.toVariant().toString(); if (id.isEmpty()) continue;
+            withdrawnIds_.insert(id);
+            for (qsizetype i = messages_.size(); i-- > 0;) {
+                if (messages_[i].toObject().value(QStringLiteral("id")).toVariant().toString() == id) {
+                    messages_.removeAt(i); messageIds_.remove(id); changed = true;
+                }
+            }
+        }
+        if (changed) idleClock_.restart();
+        return changed;
+    }
+    void restoreAlternateDraft()
+    {
+        if (alternateDraft_.isEmpty() || requestBusy_ || messageBusy_ || recallBusy_) return;
+        const auto current = editorDraft(), alternate = alternateDraft_;
+        alternateDraft_ = current; alternateLabel_ = QStringLiteral("Vrati skicu");
+        applyEditorDraft(alternate); setNotice(QStringLiteral("Skica je vraćena. Druga je i dalje sačuvana.")); message_->setFocus();
+    }
+    bool canRecall(const QJsonObject& message) const
+    {
+        const QString id = message.value(QStringLiteral("id")).toVariant().toString();
+        return lastSentId_ > 0 && id == QString::number(lastSentId_) && text(message, "role") == QStringLiteral("user")
+            && (text(message, "status", QStringLiteral("delivered")) == QStringLiteral("delivered") || text(message, "status") == QStringLiteral("read"))
+            && number(message, "acceptedAt", 0) <= 0 && !processingIds_.contains(id) && !messageWork_.contains(id)
+            && !message.value(QStringLiteral("work")).isObject() && !withdrawnIds_.contains(id);
+    }
+    void recallMessage()
+    {
+        if (recallBusy_ || requestBusy_ || messageBusy_) return;
+        if (lastSentId_ <= 0) { setNotice(QStringLiteral("Nema tvoje zadnje poslane poruke za povlačenje.")); return; }
+        for (const auto& value : messages_) {
+            const auto message = value.toObject();
+            if (number(message, "id", 0) == lastSentId_ && !canRecall(message)) {
+                setNotice(QStringLiteral("DJ je već preuzeo tu poruku. Skica je sačuvana.")); return;
+            }
+        }
+        const qint64 id = lastSentId_; const quint64 generation = composerGeneration_;
+        const auto before = editorDraft(); const QUrl base = base_;
+        const QPointer<QWidget> focus = QApplication::focusWidget();
+        const QJsonObject data{{QStringLiteral("guestId"), guestId_}, {QStringLiteral("messageId"), id}};
+        recallBusy_ = true; updateComposerMode();
+        call(QStringLiteral("/api/message/recall"), &data, [this, id, generation, before, base, focus](QJsonObject data, QString error) {
+            if (base != base_) return;
+            recallBusy_ = false;
+            const auto recalled = data.value(QStringLiteral("recalled")).toObject();
+            if (!error.isEmpty() || number(recalled, "id", -1) != id || !recalled.value(QStringLiteral("text")).isString()) {
+                setNotice(error.isEmpty() ? QStringLiteral("Poruka nije povučena. Skica je sačuvana.") : error); updateComposerMode(); return;
+            }
+            const QString words = text(recalled, "text");
+            const QJsonObject recovered{{QStringLiteral("text"), words}, {QStringLiteral("cursor"), words.size()},
+                                       {QStringLiteral("anchor"), words.size()}};
+            const bool unchanged = generation == composerGeneration_ && before == editorDraft();
+            const bool removed = withdrawMessages(QJsonArray{id}); appendMessages({}, removed);
+            lastSentId_ = 0;
+            if (unchanged) {
+                alternateDraft_ = before; alternateLabel_ = QStringLiteral("Vrati skicu"); applyEditorDraft(recovered);
+                setNotice(QStringLiteral("Poruka je povučena. Uredi je; prethodna skica je sačuvana."));
+                if (QApplication::focusWidget() == focus.data()) message_->setFocus();
+            } else {
+                alternateDraft_ = recovered; alternateLabel_ = QStringLiteral("Uredi povučenu");
+                setNotice(QStringLiteral("Poruka je povučena. Nova skica je ostala; „Uredi povučenu” otvara povučeni tekst."));
+            }
+            updateComposerMode();
+        });
+    }
+    static QString effectiveWork(const QJsonObject& work)
+    {
+        QString state = text(work, "effectiveState", text(work, "state"));
+        if (state == QStringLiteral("active") && number(work, "activeUntil", 0) <= QDateTime::currentMSecsSinceEpoch())
+            return QStringLiteral("unconfirmed");
+        if (state == QStringLiteral("active") || state == QStringLiteral("waiting") || state == QStringLiteral("blocked")
+            || state == QStringLiteral("completed") || state == QStringLiteral("cancelled") || state == QStringLiteral("unconfirmed")) return state;
+        return QStringLiteral("unconfirmed");
+    }
+    static QString workTooltip(const QJsonObject& work)
+    {
+        const QString state = effectiveWork(work);
+        QString words = state == QStringLiteral("active") ? QStringLiteral("DJ radi na ovome.")
+            : state == QStringLiteral("waiting") ? QStringLiteral("Čeka sljedeći korak.")
+            : state == QStringLiteral("blocked") ? QStringLiteral("Rad je blokiran.")
+            : state == QStringLiteral("completed") ? QStringLiteral("Rad je dovršen.")
+            : state == QStringLiteral("cancelled") ? QStringLiteral("Rad je otkazan.")
+            : QStringLiteral("Aktivni rad nije ponovno potvrđen.");
+        for (const auto& field : {QStringLiteral("summary"), QStringLiteral("outcome"), QStringLiteral("evidence")}) {
+            const auto value = work.value(field); QString detail;
+            if (value.isString()) detail = value.toString();
+            else if (value.isArray()) detail = QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+            else if (value.isObject()) detail = QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+            if (!detail.isEmpty()) words += QChar('\n') + detail.left(800);
+        }
+        return QStringLiteral("<qt>") + words.toHtmlEscaped().replace(QChar('\n'), QStringLiteral("<br>")) + QStringLiteral("</qt>");
+    }
+    bool mergeWork(const QJsonArray& incoming, const QJsonObject& updates)
+    {
+        auto next = messageWork_;
+        const auto remember = [&](const QString& id, const QJsonObject& work) {
+            if (id.isEmpty()) return;
+            const auto previous = next.value(id).toObject();
+            if (!previous.isEmpty() && number(work, "updatedAt", 0) < number(previous, "updatedAt", 0)) return;
+            next.insert(id, work);
+        };
+        for (const auto& value : incoming) {
+            const auto message = value.toObject();
+            if (message.value(QStringLiteral("work")).isObject())
+                remember(message.value(QStringLiteral("id")).toVariant().toString(), message.value(QStringLiteral("work")).toObject());
+        }
+        for (auto it = updates.begin(); it != updates.end(); ++it) if (it.value().isObject()) remember(it.key(), it.value().toObject());
+        if (next == messageWork_) return false;
+        messageWork_ = next; return true;
+    }
+    QJsonObject workStates() const
+    {
+        QJsonObject states;
+        for (auto it = messageWork_.begin(); it != messageWork_.end(); ++it) states.insert(it.key(), effectiveWork(it.value().toObject()));
+        return states;
+    }
+    int activeWorkCount() const
+    {
+        QSet<QString> active;
+        for (const auto& id : processingIds_) if (!messageWork_.contains(id)) active.insert(id);
+        for (auto it = messageWork_.begin(); it != messageWork_.end(); ++it)
+            if (effectiveWork(it.value().toObject()) == QStringLiteral("active")) active.insert(it.key());
+        return active.size();
+    }
+    void refreshWorkBadges()
+    {
+        if (workStates() == workPresentation_) return;
+        appendMessages({}, true);
+        if (activeWorkCount() == 0 && presence_->text() == QStringLiteral("DJ radi na poruci…"))
+            presence_->setText(QStringLiteral("Razgovor s DJ-em"));
+    }
     QNetworkAccessManager network_{this};
-    QTimer searchDelay_, chatPoll_, idleReturn_;
+    QTimer searchDelay_, chatPoll_, idleReturn_, descriptionPoll_, noticeDismiss_;
     QElapsedTimer idleClock_;
     QPropertyAnimation* chatScroll_;
-    QUrl base_{QStringLiteral("http://127.0.0.1:8787")};
+    QUrl base_;
     QLineEdit* name_;
     QPlainTextEdit* message_;
     QListWidget* results_;
     QStackedWidget* suggestions_;
     QProgressBar* searchActivity_;
     QWidget *selectedPage_, *suggestionArea_;
-    QPushButton *send_, *cancelSong_;
+    QPushButton *send_, *cancelSong_, *describe_, *alternate_;
     QLabel *presence_, *notice_, *suggestionHint_, *selectedTitle_, *selectedArtist_, *magicHelp_;
     QTextBrowser* chat_;
     QString guestId_, cursor_, requestId_, lastRequestSignature_, messageId_, lastMessage_;
     QString savedQuery_, suggestionState_;
+    QString descriptionId_, descriptionText_, descriptionRequestId_, descriptionStatus_;
+    QString alternateLabel_ = QStringLiteral("Vrati skicu");
+    QJsonObject alternateDraft_, messageWork_, workPresentation_;
+    qint64 lastSentId_ = 0;
     int savedQueryCursor_ = 0, savedQueryAnchor_ = 0;
     QJsonObject selectedTrack_;
     QJsonArray messages_;
-    QSet<QString> messageIds_, processingIds_;
-    quint64 searchVersion_ = 0;
+    QSet<QString> messageIds_, processingIds_, withdrawnIds_;
+    quint64 searchVersion_ = 0, composerGeneration_ = 0;
     quint64 chatFetches_ = 0;
     bool chatBusy_ = false, requestBusy_ = false, messageBusy_ = false, followingBottom_ = false;
+    bool recallBusy_ = false, descriptionActive_ = false, descriptionBusy_ = false;
 };
 
 class PartyStage final : public QWidget {
 public:
-    explicit PartyStage(CubeWidget* cube, const QString& stateFile)
+    explicit PartyStage(CubeWidget* cube, const QString& stateFile, const QString& requestBaseUrl = {})
         : QWidget(cube), cube_(cube), originalTitle_(cube->window()->windowTitle())
     {
         setObjectName(QStringLiteral("partyStage"));
+        if (!requestBaseUrl.isEmpty()) setProperty("requestBaseUrl", requestBaseUrl);
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setAttribute(Qt::WA_NoSystemBackground);
         setAutoFillBackground(false);
@@ -719,9 +1102,14 @@ public:
         frame_.setInterval(33);
         connect(&frame_, &QTimer::timeout, this, [this] { tick(); });
         poll_.setInterval(250);
-        connect(&poll_, &QTimer::timeout, this, [this] { readState(); });
+        connect(&poll_, &QTimer::timeout, this, [this] { readState(); updatePlaybackControl(); });
         poll_.start();
         auto* window = cube->window();
+        originalCursor_ = window->cursor(); cursorWasSet_ = window->testAttribute(Qt::WA_SetCursor);
+        window->setCursor(djCursor());
+        playbackButton_ = new QPushButton(cube_); playbackButton_->setObjectName(QStringLiteral("partyPlaybackButton"));
+        playbackButton_->setFocusPolicy(Qt::NoFocus); playbackButton_->setCursor(djCursor());
+        connect(playbackButton_, &QPushButton::clicked, this, [this] { setPlaybackPaused(); });
         if (auto* main = qobject_cast<QMainWindow*>(window)) {
             menuWasVisible_ = main->menuBar()->isVisible(); statusWasVisible_ = main->statusBar()->isVisible();
             main->menuBar()->hide(); main->statusBar()->hide();
@@ -740,10 +1128,10 @@ public:
             w->isFullScreen() ? w->showNormal() : w->showFullScreen();
         });
         escapeAction_ = new QAction(this);
+        escapeAction_->setObjectName(QStringLiteral("partyRecallAction")); escapeAction_->setAutoRepeat(false);
         escapeAction_->setShortcut(QKeySequence(Qt::Key_Escape));
         window->addAction(escapeAction_);
-        // Escape is intentionally consumed: the guest desk stays available.
-        connect(escapeAction_, &QAction::triggered, this, [] {});
+        connect(escapeAction_, &QAction::triggered, this, [this] { if (desk_) desk_->recallLatest(); });
         spotifyAction_ = new QAction(QStringLiteral("Spotify · Tab"), this);
         spotifyAction_->setObjectName(QStringLiteral("partySpotifyAction"));
         spotifyAction_->setShortcut(QKeySequence(Qt::Key_Tab)); spotifyAction_->setAutoRepeat(false);
@@ -766,6 +1154,9 @@ public:
     }
     ~PartyStage() override
     {
+        for (auto* manager : {&artworkNetwork_, &controlNetwork_})
+            for (auto* reply : manager->findChildren<QNetworkReply*>()) { disconnect(reply, nullptr, this, nullptr); reply->abort(); }
+        delete playbackButton_;
         delete desk_.data();
         if (cube_) {
             for (auto it = effectBefore_.begin(); it != effectBefore_.end(); ++it) {
@@ -775,6 +1166,8 @@ public:
             }
             cube_->removeEventFilter(this);
             cube_->window()->setWindowTitle(originalTitle_);
+            if (cursorWasSet_) cube_->window()->setCursor(originalCursor_);
+            else cube_->window()->unsetCursor();
             if (auto* main = qobject_cast<QMainWindow*>(cube_->window())) {
                 main->menuBar()->setVisible(menuWasVisible_); main->statusBar()->setVisible(statusWasVisible_);
             }
@@ -788,7 +1181,7 @@ public:
         if (!file.open(QIODevice::ReadOnly)) { fileError_ = file.errorString(); return; }
         const QByteArray data = file.read(1024 * 1024 + 1);
         if (data.size() > 1024 * 1024) { fileError_ = QStringLiteral("State exceeds 1 MiB"); return; }
-        if (data == bytes_) { fileError_.clear(); return; }
+        if (!data.isEmpty() && data == bytes_) { fileError_.clear(); return; }
         QJsonParseError error;
         const QJsonDocument document = QJsonDocument::fromJson(data, &error);
         if (error.error != QJsonParseError::NoError || !document.isObject()) {
@@ -814,6 +1207,8 @@ public:
             }
         }
         const QJsonObject now = state.value(QStringLiteral("nowPlaying")).toObject();
+        updateTrackClock(now);
+        loadArtwork(now);
         const QString track = text(now, "uri", text(now, "id", text(now, "title") + text(now, "artist")));
         if (!text(now, "title").isEmpty() && track != lastTrack_) {
             lastTrack_ = track;
@@ -842,6 +1237,7 @@ public:
         setProperty("graphicsScale", graphicsScale());
         setProperty("trackTitle", text(now, "title"));
         applyEffect();
+        updatePlaybackControl();
         update();
     }
     QJsonObject status() const
@@ -855,10 +1251,24 @@ public:
                 {QStringLiteral("effect"), effectIndex_}, {QStringLiteral("effectError"), effectError_},
                 {QStringLiteral("fileError"), fileError_}, {QStringLiteral("paintCount"), QString::number(paints_)},
                 {QStringLiteral("requestUrl"), requestUrl()},
+                {QStringLiteral("djCursorPixels"), cube_->window()->cursor().pixmap().width()},
                 {QStringLiteral("windowToggleConfigured"), spotifyAction_->isEnabled()},
                 {QStringLiteral("windowToggleBusy"), !toggleProcess_.isNull()}, {QStringLiteral("windowToggleError"), windowToggleError_},
                 {QStringLiteral("trackTitle"), text(state_.value(QStringLiteral("nowPlaying")).toObject(), "title")},
                 {QStringLiteral("bookLoaded"), !book_.isNull()}, {QStringLiteral("qrLoaded"), !qr_.isNull()}};
+        result.insert(QStringLiteral("artwork"), QJsonObject{{QStringLiteral("loaded"), !artwork_.isNull()},
+            {QStringLiteral("url"), artworkUrl_}, {QStringLiteral("error"), artworkError_},
+            {QStringLiteral("cacheSize"), artworkCache_.size()}, {QStringLiteral("busy"), !artworkReply_.isNull()}});
+        const auto control = playbackView();
+        const QRect r = playbackButton_->geometry();
+        result.insert(QStringLiteral("playbackControl"), QJsonObject{{QStringLiteral("enabled"), control.enabled},
+            {QStringLiteral("paused"), control.paused}, {QStringLiteral("known"), control.known},
+            {QStringLiteral("busy"), playbackBusy_}, {QStringLiteral("reason"), control.reason},
+            {QStringLiteral("bounds"), QJsonArray{r.x(), r.y(), r.width(), r.height()}}});
+        result.insert(QStringLiteral("queuePreview"), queuePreview_);
+        result.insert(QStringLiteral("trackProgressMs"), trackProgress());
+        result.insert(QStringLiteral("trackClockValid"), trackClockKnown_ && trackClockTrusted_
+            && (!trackClockPlaying_ || QDateTime::currentMSecsSinceEpoch() <= trackClockStamp_ + 10000));
         result.insert(QStringLiteral("panelVisible"), false);
         if (desk_) {
             const auto values = desk_->status();
@@ -867,6 +1277,7 @@ public:
         const auto karaoke = karaokeFrame();
         QJsonObject singing{{QStringLiteral("active"), karaoke.visible}, {QStringLiteral("positionMs"), karaoke.position},
             {QStringLiteral("status"), karaoke.status}, {QStringLiteral("phase"), karaoke.phase},
+            {QStringLiteral("clockState"), karaoke.clockState},
             {QStringLiteral("countInMs"), karaoke.countIn},
             {QStringLiteral("lineIndex"), karaoke.lineIndex}, {QStringLiteral("syllableIndex"), karaoke.syllableIndex},
             {QStringLiteral("text"), text(karaoke.line, "text")}, {QStringLiteral("nextText"), text(karaoke.next, "text")}};
@@ -891,7 +1302,7 @@ public:
         if (!desk_) {
             auto* window = qobject_cast<QMainWindow*>(cube_->window());
             if (!window) { QDesktopServices::openUrl(QUrl(requestUrl())); return; }
-            desk_ = new RequestDesk(window); desk_->setBase(requestUrl());
+            desk_ = new RequestDesk(window, requestUrl());
         }
         desk_->show();
     }
@@ -909,12 +1320,12 @@ public:
                                   && !text(config, "data").isEmpty());
     }
 protected:
-    void showEvent(QShowEvent* e) override { frame_.start(); QWidget::showEvent(e); }
-    void hideEvent(QHideEvent* e) override { frame_.stop(); QWidget::hideEvent(e); }
+    void showEvent(QShowEvent* e) override { frame_.start(); QWidget::showEvent(e); updatePlaybackControl(); }
+    void hideEvent(QHideEvent* e) override { frame_.stop(); if (playbackButton_) playbackButton_->hide(); QWidget::hideEvent(e); }
     bool eventFilter(QObject* o, QEvent* e) override
     {
         if (o == cube_) {
-            if (e->type() == QEvent::Resize) { setGeometry(cube_->rect()); raise(); }
+            if (e->type() == QEvent::Resize) { setGeometry(cube_->rect()); raise(); updatePlaybackControl(); }
             if (e->type() == QEvent::MouseButtonRelease) {
                 auto* mouse = static_cast<QMouseEvent*>(e);
                 if (mouse->button() == Qt::LeftButton && requestRect_.contains(mouse->position())) {
@@ -982,20 +1393,28 @@ protected:
             const double infoWidth = std::min(w * .53, 690 * u);
             const QRectF playing(margin, 89 * u, infoWidth, 105 * u);
             panel(p, playing, orange);
+            const QRectF cover(playing.x() + 10 * u, playing.y() + 11 * u, 82 * u, 82 * u);
+            p.setPen(QPen(alpha(orange, .35), 1)); p.setBrush(QColor("#142135")); p.drawRoundedRect(cover, 7 * u, 7 * u);
+            if (!artwork_.isNull()) {
+                const QSizeF fitted = QSizeF(artwork_.size()).scaled(cover.size(), Qt::KeepAspectRatio);
+                const QRectF image(cover.center() - QPointF(fitted.width() / 2, fitted.height() / 2), fitted);
+                p.setRenderHint(QPainter::SmoothPixmapTransform); p.drawImage(image, artwork_);
+            } else {
+                p.setPen(alpha(orange, .8)); p.setFont(stageFont(37 * u)); p.drawText(cover, Qt::AlignCenter, QStringLiteral("♪"));
+            }
+            const double textInset = 106 * u;
             p.setPen(orange); p.setFont(stageFont(11 * u, true));
-            p.drawText(playing.adjusted(19 * u, 12 * u, -19 * u, 0), Qt::AlignTop,
+            p.drawText(playing.adjusted(textInset, 12 * u, -19 * u, 0), Qt::AlignTop,
                        now.value(QStringLiteral("playing")).toBool() ? QStringLiteral("Sada svira") : QStringLiteral("Na repertoaru"));
             p.setPen(white); p.setFont(stageFont(25 * u, true));
-            p.drawText(playing.adjusted(19 * u, 33 * u, -19 * u, -30 * u), Qt::AlignLeft | Qt::AlignVCenter,
-                       QFontMetrics(p.font()).elidedText(title, Qt::ElideRight, qRound(infoWidth - 38 * u)));
+            p.drawText(playing.adjusted(textInset, 33 * u, -19 * u, -30 * u), Qt::AlignLeft | Qt::AlignVCenter,
+                       QFontMetrics(p.font()).elidedText(title, Qt::ElideRight, qRound(infoWidth - textInset - 19 * u)));
             p.setPen(QColor("#b9c7db")); p.setFont(stageFont(14 * u));
-            p.drawText(playing.adjusted(19 * u, 71 * u, -19 * u, 0), Qt::AlignTop,
-                       QFontMetrics(p.font()).elidedText(artist, Qt::ElideRight, qRound(infoWidth - 38 * u)));
+            p.drawText(playing.adjusted(textInset, 71 * u, -19 * u, 0), Qt::AlignTop,
+                       QFontMetrics(p.font()).elidedText(artist, Qt::ElideRight, qRound(infoWidth - textInset - 19 * u)));
             const double duration = number(now, "durationMs", 0);
-            if (duration > 0) {
-                const double elapsed = now.value(QStringLiteral("playing")).toBool()
-                    ? std::max(0.0, double(QDateTime::currentMSecsSinceEpoch()) - number(now, "observedAt", QDateTime::currentMSecsSinceEpoch())) : 0;
-                const double progress = unit((number(now, "progressMs", 0) + elapsed) / duration);
+            if (duration > 0 && trackClockKnown_) {
+                const double progress = unit(trackProgress() / duration);
                 p.setPen(Qt::NoPen); p.setBrush(alpha(orange, .14)); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, infoWidth - 34 * u, 3 * u), 1.5, 1.5);
                 p.setBrush(orange); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, (infoWidth - 34 * u) * progress, 3 * u), 1.5, 1.5);
             }
@@ -1044,10 +1463,32 @@ protected:
         drawKaraoke(p, w, h, u, orange);
         drawCaption(p, w, h, u, white, orange);
 
+        queuePreview_ = {};
+        const auto queue = state_.value(QStringLiteral("queue")).toArray();
+        if (!queue.isEmpty()) {
+            const int count = std::min(int(queue.size()), std::clamp(int(w / (250 * u)), 1, 4));
+            const double gap = 8 * u, cell = (w - 2 * margin - gap * (count - 1)) / count;
+            for (int i = 0; i < count; ++i) {
+                const auto track = queue[i].toObject();
+                const QRectF box(margin + i * (cell + gap), h - 35 * u, cell, 31 * u);
+                panel(p, box, orange, .92);
+                p.setFont(stageFont(15 * u, true)); p.setPen(orange);
+                p.drawText(QRectF(box.x() + 5 * u, box.y(), 21 * u, box.height()), Qt::AlignVCenter, QString::number(i + 1));
+                p.setFont(stageFont(13 * u, true)); p.setPen(white);
+                p.drawText(box.adjusted(28 * u, 1 * u, -6 * u, -13 * u), Qt::AlignVCenter,
+                    QFontMetrics(p.font()).elidedText(text(track, "title"), Qt::ElideRight, qRound(cell - 34 * u)));
+                const QString detail = text(track, "status") == QStringLiteral("pending") ? QStringLiteral("Zahtjev čeka DJ-a") : text(track, "artist");
+                p.setFont(stageFont(9 * u)); p.setPen(QColor("#b9c7db"));
+                p.drawText(box.adjusted(28 * u, 17 * u, -6 * u, -1 * u), Qt::AlignVCenter,
+                    QFontMetrics(p.font()).elidedText(detail, Qt::ElideRight, qRound(cell - 34 * u)));
+                queuePreview_.append(QJsonObject{{QStringLiteral("title"), text(track, "title")},
+                    {QStringLiteral("uid"), text(track, "uid")}, {QStringLiteral("bounds"), QJsonArray{box.x(), box.y(), box.width(), box.height()}}});
+            }
+            return;
+        }
         p.setFont(stageFont(11 * u)); p.setPen(QColor("#a3b3c9"));
         const auto mood = state_.value(QStringLiteral("mood")).toObject();
         QString moodLabel = text(mood, "label", QStringLiteral("Dobra frekvencija"));
-        const auto queue = state_.value(QStringLiteral("queue")).toArray();
         QString next;
         if (!queue.isEmpty()) {
             const auto q = queue.first().toObject();
@@ -1061,10 +1502,186 @@ protected:
                    moodLabel + QStringLiteral("  ·  F11"));
     }
 private:
+    double trackProgress() const
+    {
+        if (!trackClockKnown_) return 0;
+        const double elapsed = trackClockPlaying_ ? std::clamp(double(QDateTime::currentMSecsSinceEpoch()) - trackClockStamp_, 0.0, 10000.0) : 0;
+        return std::clamp(trackClockPosition_ + elapsed, 0.0, std::max(0.0, trackClockDuration_));
+    }
+    void updateTrackClock(const QJsonObject& track)
+    {
+        const QString key = text(track, "uid", text(track, "uri", text(track, "id", text(track, "title"))));
+        double held = trackProgress();
+        if (key != trackClockKey_) { trackClockKnown_ = false; held = 0; trackClockKey_ = key; }
+        const auto position = track.value(QStringLiteral("progressMs"));
+        const auto spotify = state_.value(QStringLiteral("spotify")).toObject();
+        const auto playback = state_.value(QStringLiteral("playbackState")).toObject();
+        const auto stampValue = track.contains(QStringLiteral("observedAt")) ? track.value(QStringLiteral("observedAt")) : spotify.value(QStringLiteral("observedAt"));
+        const double stamp = stampValue.toDouble();
+        const bool running = track.value(QStringLiteral("playing")).toBool() && !track.value(QStringLiteral("paused")).toBool()
+            && !track.value(QStringLiteral("buffering")).toBool() && !playback.value(QStringLiteral("paused")).toBool()
+            && !playback.value(QStringLiteral("buffering")).toBool();
+        const bool valid = !key.isEmpty() && position.isDouble() && std::isfinite(position.toDouble()) && position.toDouble() >= 0
+            && (!track.contains(QStringLiteral("clockValid")) || track.value(QStringLiteral("clockValid")).toBool())
+            && (!playback.contains(QStringLiteral("clockValid")) || playback.value(QStringLiteral("clockValid")).toBool())
+            && (!spotify.contains(QStringLiteral("connected")) || spotify.value(QStringLiteral("connected")).toBool())
+            && (!running || (stampValue.isDouble() && std::isfinite(stamp) && stamp > 0 && stamp <= QDateTime::currentMSecsSinceEpoch()));
+        trackClockTrusted_ = valid;
+        if (valid) {
+            trackClockKnown_ = true; trackClockPosition_ = position.toDouble(); trackClockStamp_ = stamp;
+            trackClockDuration_ = std::max(0.0, number(track, "durationMs", 0)); trackClockPlaying_ = running;
+        } else { trackClockPosition_ = held; trackClockPlaying_ = false; }
+    }
+    struct PlaybackView {
+        bool enabled = false, known = false, paused = true;
+        QString uid, device, reason;
+    };
+    PlaybackView playbackView() const
+    {
+        PlaybackView view;
+        const auto now = state_.value(QStringLiteral("nowPlaying")).toObject();
+        const auto playback = state_.value(QStringLiteral("playbackState")).toObject();
+        const auto spotify = state_.value(QStringLiteral("spotify")).toObject();
+        const auto paused = playback.value(QStringLiteral("paused"));
+        view.known = paused.isBool() && !now.isEmpty(); view.paused = paused.toBool(true);
+        view.uid = text(now, "uid"); view.device = text(playback.value(QStringLiteral("device")).toObject(), "id");
+        const auto stampValue = spotify.value(QStringLiteral("observedAt"));
+        const double stamp = stampValue.toDouble(), age = QDateTime::currentMSecsSinceEpoch() - stamp;
+        const QUrl base(requestUrl());
+        const bool local = (base.scheme() == QStringLiteral("http") || base.scheme() == QStringLiteral("https"))
+            && (base.host() == QStringLiteral("127.0.0.1") || base.host() == QStringLiteral("localhost") || base.host() == QStringLiteral("::1"));
+        if (playbackBusy_) view.reason = QStringLiteral("Provjeravam promjenu reprodukcije…");
+        else if (!spotify.value(QStringLiteral("connected")).toBool()) view.reason = QStringLiteral("Spotify nije povezan.");
+        else if (!stampValue.isDouble() || !std::isfinite(stamp) || age < -1000 || age > 10000 || stamp < playbackRefreshAfter_
+                 || spotify.value(QStringLiteral("stale")).toBool()) view.reason = QStringLiteral("Čekam svježe stanje Spotifyja.");
+        else if (now.value(QStringLiteral("buffering")).toBool() || playback.value(QStringLiteral("buffering")).toBool()) view.reason = QStringLiteral("Spotify učitava pjesmu.");
+        else if (!view.known || !now.value(QStringLiteral("clockValid")).isBool() || !now.value(QStringLiteral("clockValid")).toBool()
+                 || (playback.contains(QStringLiteral("clockValid")) && !playback.value(QStringLiteral("clockValid")).toBool())
+                 || (now.value(QStringLiteral("paused")).isBool() && now.value(QStringLiteral("paused")).toBool() != view.paused))
+            view.reason = QStringLiteral("Položaj i stanje pjesme još nisu potvrđeni.");
+        else if (view.uid.isEmpty() || view.device.isEmpty()) view.reason = QStringLiteral("Čekam točnu pjesmu i uređaj.");
+        else if (!local || !QFileInfo::exists(QFileInfo(stateFile_).dir().filePath(QStringLiteral("admin-token"))))
+            view.reason = QStringLiteral("Kontrola treba privatnu lokalnu DJ vezu.");
+        else view.enabled = true;
+        return view;
+    }
+    void updatePlaybackControl()
+    {
+        if (!playbackButton_ || !cube_) return;
+        const double u = std::clamp(std::min(width() / 1280.0, height() / 800.0), .65, 2.0);
+        const double infoWidth = std::min(width() * .53, 690 * u);
+        playbackButton_->setGeometry(qRound(34 * u + infoWidth - 190 * u), qRound(27 * u), qRound(190 * u), qRound(43 * u));
+        const auto control = playbackView();
+        playbackButton_->setEnabled(control.enabled);
+        playbackButton_->setText(playbackBusy_ ? QStringLiteral("Provjeravam…") : !control.enabled ? QStringLiteral("Status nedostupan")
+            : control.paused ? QStringLiteral("Pauzirano  ▶") : QStringLiteral("Svira  Ⅱ"));
+        playbackButton_->setToolTip(control.enabled ? control.paused ? QStringLiteral("Nastavi ovu pjesmu na istom uređaju.")
+            : QStringLiteral("Pauziraj ovu pjesmu na istom uređaju.") : control.reason);
+        playbackButton_->setStyleSheet(QStringLiteral("QPushButton { font:600 %1px 'DejaVu Sans'; color:#ddfff4; background:#1b4a44; border:1px solid #6bc6ab; border-radius:9px; padding:4px; } QPushButton:disabled { color:#aab5c5; background:#263141; border-color:#536174; } QPushButton:hover:enabled { background:#276258; }").arg(qRound(17 * u)));
+        playbackButton_->setVisible(isVisible()); playbackButton_->raise();
+    }
+    void refreshPlaybackState()
+    {
+        QNetworkRequest request(QUrl(requestUrl()).resolved(QUrl(QStringLiteral("/api/state"))));
+        request.setTransferTimeout(8000); request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+        auto* reply = controlNetwork_.get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply] {
+            const auto document = QJsonDocument::fromJson(reply->readAll());
+            const auto incoming = document.object(), spotify = incoming.value(QStringLiteral("spotify")).toObject();
+            const double previousStamp = number(state_.value(QStringLiteral("spotify")).toObject(), "observedAt", 0);
+            const bool revisionCurrent = number(incoming, "revision", -1) >= number(state_, "revision", 0);
+            const bool observationCurrent = !spotify.value(QStringLiteral("connected")).toBool()
+                || (spotify.value(QStringLiteral("observedAt")).isDouble() && number(spotify, "observedAt", -1) >= previousStamp);
+            if (reply->error() == QNetworkReply::NoError && document.isObject() && !spotify.isEmpty()
+                && revisionCurrent && observationCurrent) applyState(incoming);
+            playbackBusy_ = false; reply->deleteLater(); updatePlaybackControl();
+        });
+    }
+    void setPlaybackPaused()
+    {
+        const auto control = playbackView(); if (!control.enabled) return;
+        QFile file(QFileInfo(stateFile_).dir().filePath(QStringLiteral("admin-token")));
+        if (!file.open(QIODevice::ReadOnly)) { if (desk_) desk_->showNotice(QStringLiteral("Privatna DJ kontrola nije dostupna.")); return; }
+        const QByteArray token = file.read(4097).trimmed();
+        if (token.isEmpty() || token.size() > 4096 || token.contains('\n') || token.contains('\r')) {
+            if (desk_) desk_->showNotice(QStringLiteral("Privatna DJ kontrola nije dostupna.")); return;
+        }
+        const QJsonObject data{{QStringLiteral("paused"), !control.paused}, {QStringLiteral("expectedCurrentUid"), control.uid},
+                              {QStringLiteral("expectedDeviceId"), control.device}, {QStringLiteral("source"), QStringLiteral("native")}};
+        QNetworkRequest request(QUrl(requestUrl()).resolved(QUrl(QStringLiteral("/api/admin/playback"))));
+        request.setRawHeader("Authorization", "Bearer " + token); request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        request.setRawHeader("X-DJ-Operator", "qtra-native");
+        request.setTransferTimeout(12000); request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+        playbackBusy_ = true; const qint64 started = QDateTime::currentMSecsSinceEpoch(); updatePlaybackControl();
+        auto* reply = controlNetwork_.post(request, QJsonDocument(data).toJson(QJsonDocument::Compact));
+        connect(reply, &QNetworkReply::finished, this, [this, reply, started, desired = !control.paused, uid = control.uid, device = control.device] {
+            const auto document = QJsonDocument::fromJson(reply->readAll()); const auto result = document.object();
+            const auto observed = result.value(QStringLiteral("status")).toObject();
+            const auto actual = observed.value(QStringLiteral("playbackState")).toObject();
+            const auto current = observed.value(QStringLiteral("nowPlaying")).toObject();
+            const bool confirmed = reply->error() == QNetworkReply::NoError && result.value(QStringLiteral("ok")).toBool()
+                && text(result, "action") == QStringLiteral("setPaused") && actual.value(QStringLiteral("paused")).isBool()
+                && actual.value(QStringLiteral("paused")).toBool() == desired && text(current, "uid") == uid
+                && text(actual.value(QStringLiteral("device")).toObject(), "id") == device
+                && number(observed, "observedAt", 0) >= started;
+            if (confirmed) {
+                if (desk_ && number(observed, "observedAt", 0) >= number(state_.value(QStringLiteral("spotify")).toObject(), "observedAt", 0))
+                    desk_->showNotice(desired ? QStringLiteral("Spotify potvrđuje pauzu.") : QStringLiteral("Spotify potvrđuje reprodukciju."));
+            } else {
+                const QString error = text(result, "error", reply->errorString());
+                const bool untouched = result.value(QStringLiteral("dispatched")).isBool() && !result.value(QStringLiteral("dispatched")).toBool();
+                if (desk_) desk_->showNotice((untouched ? QStringLiteral("Nije promijenjeno: ") : QStringLiteral("Ishod provjeravam: ")) + error);
+            }
+            playbackRefreshAfter_ = started;
+            reply->deleteLater(); refreshPlaybackState(); updatePlaybackControl();
+        });
+    }
+    void loadArtwork(const QJsonObject& track)
+    {
+        QString wanted = text(track, "artUrl");
+        if (wanted.isEmpty()) wanted = text(track, "image");
+        if (wanted.isEmpty()) wanted = text(track.value(QStringLiteral("image")).toObject(), "url");
+        const QUrl url(wanted, QUrl::StrictMode);
+        if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() || wanted.size() > 2048
+            || (url.scheme() != QStringLiteral("http") && url.scheme() != QStringLiteral("https"))) wanted.clear();
+        if (wanted == artworkUrl_ && (!artwork_.isNull() || !artworkReply_.isNull() || QDateTime::currentMSecsSinceEpoch() < artworkRetryAt_)) return;
+        const quint64 version = ++artworkVersion_;
+        if (artworkReply_) artworkReply_->abort();
+        artworkReply_ = nullptr; artworkUrl_ = wanted; artwork_ = {}; artworkBytes_.clear(); artworkError_.clear();
+        if (wanted.isEmpty()) return;
+        if (const auto* cached = artworkCache_.object(wanted)) { artwork_ = *cached; return; }
+        QNetworkRequest request{QUrl(wanted)}; request.setTransferTimeout(8000);
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        auto* reply = artworkNetwork_.get(request); artworkReply_ = reply;
+        const auto consume = [this, reply, version] {
+            if (version != artworkVersion_) return;
+            constexpr qsizetype limit = 2 * 1024 * 1024;
+            artworkBytes_ += reply->read(std::max<qsizetype>(0, limit + 1 - artworkBytes_.size()));
+            if (artworkBytes_.size() > limit) { artworkError_ = QStringLiteral("Cover exceeds 2 MiB"); reply->abort(); }
+        };
+        connect(reply, &QNetworkReply::readyRead, this, consume);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, version, wanted, consume] {
+            if (version != artworkVersion_) { reply->deleteLater(); return; }
+            consume(); artworkReply_ = nullptr;
+            if (reply->error() == QNetworkReply::NoError && artworkError_.isEmpty()) {
+                QBuffer buffer(&artworkBytes_); buffer.open(QIODevice::ReadOnly); QImageReader reader(&buffer);
+                const QSize size = reader.size(); const QByteArray format = reader.format().toLower();
+                if (size.isValid() && size.width() <= 4096 && size.height() <= 4096
+                    && (format == "jpeg" || format == "png" || format == "webp")) {
+                    reader.setScaledSize(size.scaled(320, 320, Qt::KeepAspectRatio)); reader.setAutoTransform(true);
+                    artwork_ = reader.read();
+                    if (!artwork_.isNull()) artworkCache_.insert(wanted, new QImage(artwork_));
+                    else artworkError_ = reader.errorString();
+                } else artworkError_ = QStringLiteral("Unsupported cover size or format");
+            } else if (artworkError_.isEmpty()) artworkError_ = reply->errorString();
+            artworkBytes_.clear(); artworkRetryAt_ = QDateTime::currentMSecsSinceEpoch() + 30000;
+            reply->deleteLater(); update();
+        });
+    }
     struct KaraokeFrame {
         bool visible = false;
         QJsonObject sheet, line, next;
-        QString status, phase;
+        QString status, phase, clockState;
         double position = 0, progress = 0, countIn = 0;
         int lineIndex = -1, syllableIndex = -1;
     };
@@ -1076,8 +1693,28 @@ private:
         if (!frame.sheet.value(QStringLiteral("enabled")).toBool() || lines.isEmpty()) return frame;
         frame.visible = true; frame.status = text(frame.sheet, "status", QStringLiteral("waiting"));
         const double stamp = QDateTime::currentMSecsSinceEpoch();
-        const double elapsed = frame.status == QStringLiteral("playing")
-            ? std::max(0.0, stamp - number(frame.sheet, "sampledAt", stamp)) : 0;
+        const auto sampleValue = frame.sheet.value(QStringLiteral("sampledAt"));
+        const auto positionValue = frame.sheet.value(QStringLiteral("positionMs"));
+        const bool finiteClock = sampleValue.isDouble() && std::isfinite(sampleValue.toDouble()) && sampleValue.toDouble() <= stamp
+            && positionValue.isDouble() && std::isfinite(positionValue.toDouble());
+        const double sampledAt = number(frame.sheet, "sampledAt", stamp);
+        const bool spotify = text(frame.sheet, "source") == QStringLiteral("spotify");
+        const auto playback = state_.value(QStringLiteral("nowPlaying")).toObject();
+        frame.clockState = text(frame.sheet, "clockState", frame.status == QStringLiteral("playing") ? QStringLiteral("running") : frame.status);
+        const bool valid = !frame.sheet.contains(QStringLiteral("clockValid")) || frame.sheet.value(QStringLiteral("clockValid")).toBool();
+        const bool playbackHeld = spotify && ((playback.contains(QStringLiteral("clockValid")) && !playback.value(QStringLiteral("clockValid")).toBool())
+            || playback.value(QStringLiteral("paused")).toBool() || playback.value(QStringLiteral("buffering")).toBool()
+            || (playback.contains(QStringLiteral("playing")) && !playback.value(QStringLiteral("playing")).toBool()));
+        const double deadline = number(frame.sheet, "clockValidUntil", 0);
+        const bool canAdvance = frame.status == QStringLiteral("playing") && finiteClock && valid && !playbackHeld
+            && (!spotify || (deadline > 0 && frame.clockState == QStringLiteral("running")));
+        const double elapsed = canAdvance ? std::max(0.0, (spotify ? std::min(stamp, deadline) : stamp) - sampledAt) : 0;
+        if (frame.status == QStringLiteral("playing") && (!canAdvance || (spotify && stamp >= deadline))) {
+            frame.status = QStringLiteral("held");
+            if (spotify && canAdvance && stamp >= deadline) frame.clockState = QStringLiteral("stale");
+            else if (!finiteClock || !valid) frame.clockState = QStringLiteral("invalid");
+            else if (playbackHeld) frame.clockState = QStringLiteral("held");
+        }
         // The backend already applies the offset. A negative anchor must stay
         // signed until elapsed time has been added, or delayed lyrics jump early.
         const double duration = std::max(1.0, number(frame.sheet, "durationMs", 1));
@@ -1149,6 +1786,7 @@ private:
         QString stateLabel;
         if (frame.status == QStringLiteral("waiting")) stateLabel = QStringLiteral("Čekamo pjesmu");
         else if (frame.status == QStringLiteral("paused")) stateLabel = QStringLiteral("Pauza");
+        else if (frame.status == QStringLiteral("held")) stateLabel = QStringLiteral("Čekamo položaj pjesme");
         else if (frame.phase == QStringLiteral("finished")) stateLabel = QStringLiteral("Bravo, ekipa!");
         else if (frame.countIn > 0) stateLabel = QStringLiteral("Za %1 s").arg(static_cast<int>(std::ceil(frame.countIn / 1000)));
         else if (frame.phase == QStringLiteral("outro")) stateLabel = QStringLiteral("Završni taktovi");
@@ -1415,6 +2053,21 @@ private:
     QPointer<RequestDesk> desk_;
     QPointer<QWidget> returnFocus_;
     QPointer<QProcess> toggleProcess_;
+    QPointer<QPushButton> playbackButton_;
+    QNetworkAccessManager artworkNetwork_{this}, controlNetwork_{this};
+    QPointer<QNetworkReply> artworkReply_;
+    QCache<QString, QImage> artworkCache_{8};
+    QImage artwork_;
+    QByteArray artworkBytes_;
+    QString artworkUrl_, artworkError_;
+    quint64 artworkVersion_ = 0;
+    qint64 artworkRetryAt_ = 0, playbackRefreshAfter_ = 0;
+    bool playbackBusy_ = false;
+    QJsonArray queuePreview_;
+    QString trackClockKey_;
+    double trackClockPosition_ = 0, trackClockStamp_ = 0, trackClockDuration_ = 0;
+    bool trackClockKnown_ = false, trackClockPlaying_ = false, trackClockTrusted_ = false;
+    QCursor originalCursor_;
     QString originalTitle_, stateFile_, fileError_, qrPath_, bookPath_, lastTrack_, lastRequest_, missionText_, effectError_;
     QHash<QString, bool> effectBefore_;
     QJsonObject state_, karaokeGeometry_, windowToggle_;
@@ -1434,7 +2087,7 @@ private:
     double nextEffectCheck_ = 0;
     std::size_t aside_ = 0;
     quint64 paints_ = 0;
-    bool menuWasVisible_ = true, statusWasVisible_ = true;
+    bool menuWasVisible_ = true, statusWasVisible_ = true, cursorWasSet_ = false;
 };
 
 QPointer<PartyStage> stage;
@@ -1451,7 +2104,9 @@ void run(const RuntimeAgentHost* host)
     if (request.value(QStringLiteral("restore")).toBool()) { release(host); return; }
     auto* cube = static_cast<CubeWidget*>(host->find_qobject(host->agent_context, "cubeView"));
     if (!cube) { host->fail(host->invocation_context, "cubeView was not found"); return; }
-    if (!stage) stage = new PartyStage(cube, text(request, "stateFile", QDir::homePath() + QStringLiteral("/.local/state/larics-dj/state.json")));
+    if (!stage) stage = new PartyStage(cube,
+        text(request, "stateFile", QDir::homePath() + QStringLiteral("/.local/state/larics-dj/state.json")),
+        text(request, "requestBaseUrl"));
     else if (request.contains(QStringLiteral("stateFile"))) stage->setStateFile(text(request, "stateFile"));
     if (request.contains(QStringLiteral("state"))) stage->applyState(request.value(QStringLiteral("state")).toObject());
     if (request.contains(QStringLiteral("requestBaseUrl"))) stage->setRequestBaseUrl(text(request, "requestBaseUrl"));

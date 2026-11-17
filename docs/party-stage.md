@@ -46,7 +46,10 @@ The launcher starts `tools/party_dj/window_toggle.py` once and reports its statu
 in `windowToggle`. It owns `window-toggle.pid`, `window-toggle.sock`, and
 `window-toggle.log` beside the state file. Its `status` and `stop` commands inspect
 or release the binding; they do not change playback. The Qt action works in qtra
-on Wayland or X11. The return binding requires native Spotify's X11 window.
+on Wayland or X11. The return binding and Spotify's F11 binding require native
+Spotify's X11 window. The helper tracks each key independently, so an F11 conflict
+does not remove an available Tab binding; both release when qtra's return action
+or owner disappears.
 
 For manual runtime control, start qtra with a dedicated socket:
 
@@ -66,8 +69,8 @@ Use the [runtime protocol](protocol.md) or `tools/agentctl.py` to load these mod
 Calling the two scene modules with `restore` registers their named actions and
 leaves them inactive. The party state selects them afterwards. Modules are loaded
 once and remain resident. Releasing the party module removes its widgets and
-shortcuts, restores the prior menu/status-bar visibility and title, and restores
-the effect actions to the states they had when the stage took control.
+shortcuts, restores the prior menu/status-bar visibility, title and window cursor,
+and restores the effect actions to the states they had when the stage took control.
 
 Party-stage requests also accept `panel:true|false` (both keep the desk open), `fullscreen:true|false`, a
 `requestBaseUrl` override for the local API, an
@@ -77,7 +80,9 @@ returns its current revision, scene, effect, cue, pending cue count, loaded imag
 status, panel state, and state-file or missing-effect errors.
 
 `getComposerDraft:true` also returns `composerDraft`, containing the multiline
-text, cursor/anchor positions, selected track and saved query. Pass that object
+text, cursor/anchor positions, selected track, saved query, latest successfully
+sent message ID, and any alternate draft saved during recall. An active descriptive
+search retains its text and request UUID for an idempotent resume. Pass that object
 as `composerDraft` to restore the active Magic box intent during a hot reload.
 The name field remains `partyName`; the composer is `partyMessage` and exposes
 Qt's `plainText` property.
@@ -95,6 +100,18 @@ Qt's `plainText` property.
   press **R**, to focus its bottom **Magic box**, which accepts a song, artist, or a
   message to the DJ. Typing shows debounced results above it; **Pošalji poruku (Enter)** always
   sends chat until a song is explicitly selected.
+- Exact song or artist queries use the direct catalogue search after a 330ms
+  typing debounce. **Traži po opisu** explicitly asks the DJ to resolve a remembered
+  description. The panel shows that work as pending and polls its result while
+  the same query remains active. Editing cancels that view and immediately returns
+  to the ordinary catalogue path; a late descriptive reply cannot replace it.
+  Resolved candidates still require selection and Send.
+  When the resolver supplies a match basis, the row labels it as title, literal
+  lyric or semantic matching. Its tooltip shows the supplied rationale, optional
+  confidence, and up to four HTTP(S) source labels/URLs; the selected song retains
+  the same explanation and complete track data. Ordinary catalogue results do not
+  acquire an inferred basis or confidence. Tooltips escape supplied text and do
+  not fetch or open source links.
 - Selecting a result shows the chosen song in the floating suggestion panel and turns
   the box into an optional dedication. **Pošalji pjesmu** sends that song and
   dedication. **Odustani od pjesme** restores the original query and cursor.
@@ -105,24 +122,57 @@ Qt's `plainText` property.
 - A grey check beside a guest message means the DJ has marked it read. Receipt
   refreshes update existing messages without adding duplicates or verbose send
   confirmations beneath the composer.
-- An orange dot means the DJ is actively working on that message. It follows the
-  explicit `dj.processingMessageIds` array from the chat API and clears when the
-  work ends. The fixed presence row also says that the DJ is working.
+- **Escape**, or the small **×** beside the latest pending own message, recalls it
+  only before the DJ has accepted it for processing. A read receipt alone keeps
+  recall available; an acceptance timestamp, durable work record or legacy active
+  processing claim closes it. The text returns to
+  the composer for editing. **Vrati skicu** restores the previous draft, including
+  any selected song, dedication and text selection. If typing races the reply,
+  the new draft stays in place and **Uredi povučenu** opens the recovered text.
+  A failed recall preserves the draft. Escape never closes the panel or changes
+  fullscreen.
+- Work marks are separate from the grey read check: orange **●** means active
+  work, **◷** means waiting, **◇** means blocked, **?** means an active lease expired
+  without confirmation, green **◆** means completed, and **–** means cancelled.
+  Hover a work mark for its actual summary, outcome and evidence. `chat.work` and
+  `dj.messageWork` update existing rows even when no new chat arrives. An expired
+  lease never becomes a completion check. Legacy `processingMessageIds` is used
+  only for messages that have no durable work record yet.
 - Incoming messages scroll smoothly while the transcript is following its
   bottom. Sending a guest message follows it to the bottom as well. Typing,
   scrolling or clicking interrupts that motion. After about
-  20 seconds without interaction, the conversation eases back to the latest
-  message; ongoing typing or dragging keeps the current position.
+  two minutes without input or a new/edited message from either the guest or DJ,
+  the conversation eases back to the latest message. Ongoing typing, scrolling,
+  dragging or replies restart that quiet period; receipt and heartbeat refreshes
+  do not.
 - The sidebar is 600 pixels wide. Suggestions float over the bottom of the
   conversation, directly above the composer, and disappear when there are no
   results. The transcript and composer keep the same bounds throughout loading,
   selection, empty results and errors. While typing, existing results stay in
   place with a quiet activity bar;
   stale choices are disabled until the new results arrive. Hover highlights and
-  pixel scrolling make the list easier to scan. Long titles are elided with full
-  text available in tooltips.
-- **Escape** does nothing. The panel has no close button and remains visible.
-- **F11** toggles fullscreen.
+  pixel scrolling make the list easier to scan. The popup is up to 340 pixels high,
+  clamped to the available transcript. Long titles are elided with full text in
+  tooltips. Scrollbars retain their thin width with a lighter, contrasting thumb.
+- Send sits ten pixels above the panel bottom. Short outcome/error notices appear
+  for six seconds over the transcript, without reserving an empty footer or
+  moving the composer, button or results.
+- The DJ window and its controls use a 48-pixel cursor. Releasing the stage restores
+  the previous window cursor; the desktop cursor setting and other apps retain
+  their own size.
+- **F11** toggles qtra fullscreen. In native Spotify, plain **F11** toggles only its
+  focused window; Caps/Num Lock variants work too. Modified F11 and other apps
+  retain their own behavior. This does not switch to qtra or affect playback.
+- The current-track card includes its supplied album cover. Up to four upcoming
+  titles/artists appear in the existing bottom strip, without moving captions or
+  the guest controls. Pending requests are labelled as waiting for the DJ.
+- The visible playback button reports the observed state and accepts one explicit
+  pause/resume click. It is disabled for a disconnected, stale, buffering or invalid
+  clock, missing occurrence/device, unavailable private local control, or an
+  in-flight request. The client does not retry or toggle an uncertain command.
+  The current-track progress bar also holds its last accepted position on an
+  invalid/future clock and caps interpolation at the ten-second observation
+  deadline; an invalid compatibility value cannot reset it to zero.
 - The QR opens the separate guest page on phones. The native panel uses the
   loopback service URL, independently of the phone-facing address.
 
@@ -141,7 +191,7 @@ error in its runtime status. It reads at most 1 MiB.
 | Field | Meaning |
 |---|---|
 | `revision` | State version, echoed in stage status |
-| `nowPlaying` | `title`, `artist`, `uri` or `id`, `playing`, `progressMs`, `durationMs`, `observedAt` in epoch milliseconds |
+| `nowPlaying` | `title`, `artist`, `uid`, `uri` or `id`, `playing`, `paused`, `buffering`, `clockValid`, `progressMs`, `durationMs`, `observedAt` in epoch milliseconds |
 | `queue` | Tracks with `title`, `artist`, `uri` or `id`, `requestedBy` |
 | `scene` | `mode`, `energy` from 0 to 1, `palette`, `effect` from 0 to 7, `graphicsScale` from 0.75 to 2 |
 | `caption` | `id`, `text`, `seconds`, `createdAt` in epoch milliseconds |
@@ -215,9 +265,40 @@ page number, separate from the PDF page number.
 | Request | Expected response |
 |---|---|
 | `GET /api/search?q=...` | `{tracks:[{id,uri,title,artist,album,artUrl,durationMs}],error?}` |
+| `POST /api/search/describe` with `{guestId,requestId,text}` | `{search:{id,text,status:"pending"\|"resolved",tracks:[],note}}` |
+| `GET /api/search/describe?id=...` | The same descriptive-search result; resolved tracks use the catalogue format |
 | `POST /api/request` with `{requestId,uri,requestedBy,dedication}` | Request status, optionally inside `request` |
-| `GET /api/chat?after=...` | `{messages:[{id,role,name,text,createdAt}],dj:{status,lastSeen,processingMessageIds}}` |
-| `POST /api/message` with `{guestId,name,text,requestId}` | `{message:{id,role,name,text,createdAt}}` |
+| `GET /api/chat?after=...` | `{messages:[{id,role,name,text,createdAt,status,readAt,acceptedAt,work}],withdrawnMessageIds:[],dj:{status,lastSeen,processingMessageIds,messageWork}}` |
+| `POST /api/message` with `{guestId,name,text,requestId,source:"native"}` | `{message:{id,role,name,text,createdAt}}` |
+| `POST /api/message/recall` with `{guestId,messageId}` | `{recalled:{id,text,requestId}}`; retries of a successful recall return the same result |
+| Authenticated `POST /api/admin/playback` with `{paused,expectedCurrentUid,expectedDeviceId,source:"native"}` | `{ok,action:"setPaused",paused,changed,device,status}`; failures report `dispatched` |
+
+The native API base is supplied to the RequestDesk constructor before any initial
+visibility-triggered fetch. `requestBaseUrl` overrides the state file's local URL;
+private callers should provide it on their first stage run, including when testing
+missing or malformed state. Descriptive jobs poll at 1.5-second intervals only
+while the same editor intent is active. `acceptedAt` permanently removes the recall
+affordance even after a processing lease ends. Withdrawal IDs remove existing
+transcript rows; they do not discard a pending recall retry's identity.
+
+Resolved candidates use `track.match:{basis,rationale,confidence?,sources}`. The
+native reader also accepts the explicit flat `matchBasis/rationale/confidence/sources`
+shape during service upgrades. A work record contains `state`, `effectiveState`,
+`summary`, `outcome`, `evidence`, `updatedAt` and `activeUntil`; the UI keeps the
+latest record and derives an expired active lease as `unconfirmed` locally too.
+
+Playback authentication is read only on an explicit click from `admin-token`
+beside the configured state file, and sent only to the loopback API with
+`X-DJ-Operator:qtra-native`. It never appears in status or artwork requests.
+After either success or uncertainty the client reads canonical published state;
+raw command observations cannot replace request/dedication metadata. HTTP refreshes
+older than the current file observation or revision are ignored. The server owns
+the fresh occurrence/device check and single explicit transport operation.
+
+Artwork uses `nowPlaying.artUrl` (or a supplied `image` URL), one asynchronous
+request, an eight-image cache, a 2MiB response cap, a 4096-pixel source-side limit,
+and a 320-pixel decoded image. Late replies from an older URL are discarded.
+Painting performs no network or file work; a failed cover keeps a musical placeholder.
 
 ## Verification
 
@@ -225,14 +306,27 @@ page number, separate from the PDF page number.
 python3 -m unittest discover -s tests -p test_party_stage.py -v
 ```
 
-The integration test owns an Xvfb display, qtra process, and HTTP fixture. It
+The integration test owns an Xvfb display, qtra process, and HTTP fixture, and
+checks their display, PID and private service port before input. It rejects host
+display mode and supplies the service URL before stage construction. It
 exercises atomic state replacement, caption dwell and deduplication, recovery
 from invalid JSON, real named-action changes, native search and request widgets,
 multiline chat and dedications, query restoration, failed-send retries, stale
 search replies, fixed Magic box bounds, real Enter/Shift+Enter/Escape keyboard behavior,
-incoming replies, and complete stage release. The keyboard checks use `xdotool`
+incoming replies, recall failure/racing edits/idempotent recovery, explicit
+descriptive search and stale resolution, scoped cursor dimensions, compact footer
+bounds, and complete stage release. The idle-return test waits for the actual
+two-minute quiet interval and checks that an incoming DJ reply resets it.
+The keyboard checks use `xdotool`
 on the test's private X display. Set
-`PARTY_STAGE_CAPTURE` to an absolute PNG path to inspect the actual window.
+`PARTY_STAGE_CAPTURE` to an absolute PNG path to inspect the private window; the
+same run also writes `native-ux-search.png` and `native-ux-empty.png` beside it.
+It also writes `native-artwork-queue.png` from the cover/control fixture. The
+private tests cover stale artwork, cache/response bounds, separate durable/read
+marks, explicit attributed playback, no retry after uncertain dispatch, and a
+delayed canonical HTTP reply racing a newer state file.
+`python3 -m unittest discover -s tests -p test_window_toggle.py -v` runs the
+separate private Tab/F11 lifecycle fixture.
 
 ## Procedural dance act
 
@@ -310,14 +404,21 @@ comic acts, readable payoff lines, changing motion, and smooth handovers.
 ## Karaoke
 
 `state.karaoke` is either `null` or an enabled cue sheet with `title`, `source`,
-`status`, `positionMs`, `sampledAt`, `durationMs`, `offsetMs`, and `lines`. Each
+`status`, `positionMs`, `sampledAt`, `durationMs`, `offsetMs`, `clockState`,
+`clockValidUntil`, and `lines`. Each
 line supplies `text`, `startMs`, `endMs`, and ordered `syllables` with the same
 timing fields and text fragments. Spaces in those fragments are preserved.
 
-The native stage adds elapsed time only while `status` is `playing`. It keeps the
-signed `positionMs` anchor until after interpolation, then clamps to the song's
-duration. The service has already applied `offsetMs`. Paused and waiting clocks
-hold still; seeks select the corresponding line immediately.
+The native stage adds elapsed time only while `status` is `playing` with finite,
+nonfuture clock samples. For Spotify, `clockValidUntil` is the actual observation
+time plus 10,000ms; interpolation stops exactly at that deadline and the status
+becomes `held`. `clockState` must be `running`, and `nowPlaying.clockValid:false`,
+pause or buffering also holds the clock. A frozen stale sample never continues
+advancing or resets to its original anchor. Manual cues use their explicit clock
+without a Spotify lease. The signed `positionMs` anchor is retained until after
+interpolation, then clamped to the song's duration. The service has already applied
+`offsetMs`. Paused and waiting clocks hold still; seeks select the corresponding
+line immediately.
 
 A fixed lyric panel shows the active and next lines. The current syllable changes
 color while a musical note travels across it and bounces. Text keeps the same
@@ -327,5 +428,6 @@ between the header and subtitle band, leaving the guest desk and photo bounds
 unchanged. Native status includes its current line, syllable, clock, and geometry.
 
 The private-display test uses the original text “Roboti pjevaju.” to exercise
-pause, interpolation, negative anchors, gaps, seeks and stable lyric bounds.
+pause, interpolation, negative anchors, gaps, seeks, exact deadline holds, invalid
+clock samples, and stable lyric bounds.
 `PARTY_KARAOKE_CAPTURE=/absolute/path.png` saves its actual rendered frame.
