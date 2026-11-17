@@ -226,6 +226,171 @@ class PartyDance(unittest.TestCase):
                          or self.stage.server.message_attempts, "a visual form issued a playback or guest action")
         self.run_dance(restore=True)
 
+    def test_shared_scene_budget_and_independent_generation_release(self):
+        self.stage.run_stage(composerDraft={"text": "Jedan zajednički prostor, isti nacrt.", "cursor": 20, "anchor": 4})
+        draft = self.stage.editor_draft()
+        first = self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path, act="kolo")
+        self.assertTrue(self.beats.subscribed.wait(3))
+
+        def scene_id():
+            objects = [o for o in self.client.request("object.list", {}) if o.get("objectName") == "partySceneDepth"]
+            self.assertLessEqual(len(objects), 1, "separate module registries duplicated the compositor")
+            return objects[0]["id"] if objects else None
+
+        self.stage.eventually(lambda: self.stage.run_stage()["sceneDepth"]["owners"] == 2
+                              and self.run_dance()["frames"] >= 3, "both modules did not join the scene")
+        shared = scene_id()
+        self.assertIsNotNone(shared)
+        scene = self.stage.run_stage()["sceneDepth"]
+        self.assertEqual(scene["error"], "")
+        self.assertTrue(any(a["name"].startswith("dance.kolo.dancer.") for a in scene["actors"]))
+        self.assertTrue(any(a["name"] == "fleet-VIV" for a in scene["actors"]))
+        self.assertLessEqual(len(scene["actors"]), 46)
+        capture = os.environ.get("PARTY_DEPTH_CAPTURE")
+        if capture:
+            self.stage.run_stage(capture=str(Path(capture).with_suffix(".kolo.png")))
+
+        # A real4K widget exercises the wide streamer path under the same12M
+        # allocation ceiling. All seven ribbons and both prop holders survive.
+        window = subprocess.check_output(["xdotool", "search", "--pid", str(self.stage.process.pid), "--name", "LARICS"],
+                                         env=self.stage.environment, text=True).splitlines()[-1]
+        subprocess.run(["xdotool", "windowsize", "--sync", window, "3840", "2160"],
+                       env=self.stage.environment, check=True)
+        before = self.run_dance()["frames"]
+        self.run_dance(act="streamers")
+        self.stage.eventually(lambda: self.run_dance()["frames"] > before + 2
+                              and self.run_dance()["height"] >= 2100, "the4K actor surface did not render")
+        large = self.stage.run_stage()["sceneDepth"]
+        names = [a["name"] for a in large["actors"]]
+        self.assertEqual(sum(n.startswith("dance.streamer.") for n in names), 7, large)
+        self.assertEqual(sum(n.startswith("dance.fan.") for n in names), 2, large)
+        self.assertLess(large["rasterScale"], 1, "the oversize scene did not adapt its total sampling budget")
+        self.assertLessEqual(large["rasterPixels"], 12000000)
+        self.assertEqual(large["error"], "")
+        if capture:
+            self.stage.run_stage(capture=str(Path(capture).with_suffix(".streamers4k.png")))
+        subprocess.run(["xdotool", "windowsize", "--sync", window, "2560", "1600"],
+                       env=self.stage.environment, check=True)
+
+        # Release the registry's first module generation while the second still
+        # owns it, then load a distinct DSO and rejoin the exact same QObject.
+        before = self.run_dance()["frames"]
+        self.stage.run_stage(restore=True)
+        self.assertEqual(scene_id(), shared)
+        self.stage.eventually(lambda: self.run_dance()["frames"] > before + 2, "dance stopped when the first owner left")
+        import shutil
+        stage_copy = self.stage.folder / "party-stage-next.so"
+        shutil.copyfile(fixture.BUILD / "agent_snippet_party_stage.so", stage_copy)
+        self.stage.module = self.client.request("snippet.load", {"path": str(stage_copy)})["moduleId"]
+        self.stage.run_stage(stateFile=str(self.stage.state_file), composerDraft=draft)
+        self.stage.eventually(lambda: self.stage.run_stage()["sceneDepth"]["owners"] == 2, "the new stage generation did not join")
+        self.assertEqual(scene_id(), shared)
+        self.assertEqual(self.stage.editor_draft(), draft)
+        self.run_dance(restore=True)
+        self.assertEqual(scene_id(), shared)
+        self.assertEqual(self.stage.run_stage()["sceneDepth"]["owners"], 1)
+        dance_copy = self.stage.folder / "party-dance-next.so"
+        shutil.copyfile(fixture.BUILD / "agent_snippet_party_dance.so", dance_copy)
+        self.module = self.client.request("snippet.load", {"path": str(dance_copy)})["moduleId"]
+        self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path)
+        self.stage.eventually(lambda: self.stage.run_stage()["sceneDepth"]["owners"] == 2, "the new dance generation did not join")
+        self.assertEqual(scene_id(), shared)
+        self.run_dance(restore=True); self.stage.run_stage(restore=True)
+        self.assertIsNone(scene_id(), "last-owner release retained the registry")
+
+        # Reverse acquisition: the dance DSO now creates the registry, the stage
+        # joins, and the creating dance owner can leave first.
+        self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path, act="conga")
+        reverse = scene_id(); self.assertIsNotNone(reverse)
+        self.stage.run_stage(stateFile=str(self.stage.state_file), composerDraft=draft)
+        self.stage.eventually(lambda: self.stage.run_stage()["sceneDepth"]["owners"] == 2, "reverse load order failed")
+        self.assertEqual(scene_id(), reverse)
+        self.run_dance(restore=True)
+        before = self.stage.run_stage()["sceneDepth"]["frames"]
+        self.stage.eventually(lambda: self.stage.run_stage()["sceneDepth"]["frames"] > before + 2,
+                              "the stage stopped when the creating dance owner left")
+        self.assertEqual(self.stage.editor_draft(), draft)
+        self.assertFalse(self.stage.server.playback_requests or self.stage.server.skip_requests or self.stage.server.requests
+                         or self.stage.server.message_attempts)
+        self.stage.run_stage(restore=True)
+        self.assertIsNone(scene_id())
+
+
+    def test_shared_scene_rejects_worker_release_and_allows_gui_retry(self):
+        self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path, act="kolo")
+        self.stage.run_stage(composerDraft={"text": "Sačuvaj nacrt pri odbijenom uklanjanju.", "cursor": 18, "anchor": 4})
+        draft = self.stage.editor_draft()
+        self.stage.eventually(lambda: self.stage.run_stage()["sceneDepth"]["owners"] == 2, "owners did not join")
+        registry = next(o["id"] for o in self.client.request("object.list", {}) if o.get("objectName") == "partySceneDepth")
+        source = self.stage.folder / "private_executor_target.cpp"
+        source.write_text(r"""#include "agent/agent_abi.h"
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QObject>
+#include <QPointer>
+#include <QThread>
+namespace {
+QPointer<QObject> target;
+QPointer<QThread> worker;
+void run(const RuntimeAgentHost* host) {
+    auto request=QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
+    const auto action=request.value("action").toString();
+    if(action=="create") {
+        auto* cube=static_cast<QObject*>(host->find_qobject(host->agent_context,"cubeView"));
+        worker=new QThread(cube); worker->setObjectName("privateReleaseThread");
+        target=new QObject(cube); target->setObjectName("privateReleaseTarget");
+    } else if(action=="move") {
+        target->setParent(nullptr);target->moveToThread(worker);worker->start();
+    } else if(action=="stop") {
+        if(target) QMetaObject::invokeMethod(target,[]{delete target.data();},Qt::BlockingQueuedConnection);
+        if(worker){worker->quit();worker->wait();delete worker.data();}
+    }
+    host->complete_json(host->invocation_context,"{\"ok\":true}");
+}
+const RuntimeAgentSnippet descriptor{RUNTIME_AGENT_ABI,sizeof(RuntimeAgentSnippet),"private release executor target",&run};
+}
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet_init(){return &descriptor;}
+""")
+        library = self.stage.folder / "private_executor_target.so"
+        compiled = subprocess.run([fixture.sys.executable, str(fixture.ROOT / "tools" / "compile_snippet.py"),
+            "--compile-db", str(fixture.BUILD / "compile_commands.json"), "--context", "snippets/party_stage.cpp",
+            "--source", str(source), "--output", str(library), "--compact"], capture_output=True, text=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        module = self.client.request("snippet.load", {"path": str(library)})["moduleId"]
+
+        def target(action):
+            operation = self.client.request("snippet.run", {"moduleId": module, "executor": "gui", "request": {"action": action}})
+            result = self.client.wait_for_operation(operation["operationId"], timeout=10)["data"]
+            self.assertEqual(result["outcome"], "completed", result)
+
+        target("create")
+        identifier = next(o["id"] for o in self.client.request("object.list", {}) if o.get("objectName") == "privateReleaseTarget")
+        target("move")
+        try:
+            for owner in (self.stage.module, self.module):
+                operation = self.client.request("snippet.release", {"moduleId": owner, "executor": "object", "target": {"id": identifier}})
+                result = self.client.wait_for_operation(operation["operationId"], timeout=10)["data"]
+                self.assertEqual(result["outcome"], "failed", result)
+                self.assertIn("GUI", json.dumps(result))
+                self.assertEqual(self.stage.run_stage()["sceneDepth"]["owners"], 2)
+                self.assertEqual(next(o["id"] for o in self.client.request("object.list", {})
+                                      if o.get("objectName") == "partySceneDepth"), registry)
+                self.assertEqual(self.stage.editor_draft(), draft)
+            for owner, remaining in ((self.module, 1), (self.stage.module, 0)):
+                operation = self.client.request("snippet.release", {"moduleId": owner, "executor": "gui"})
+                result = self.client.wait_for_operation(operation["operationId"], timeout=10)["data"]
+                self.assertEqual(result["outcome"], "completed", result)
+                if remaining:
+                    self.assertEqual(self.stage.run_stage()["sceneDepth"]["owners"], remaining)
+                    self.assertEqual(self.stage.editor_draft(), draft)
+                else:
+                    self.assertFalse(any(o.get("objectName") == "partySceneDepth" for o in self.client.request("object.list", {})))
+        finally:
+            target("stop")
+        self.assertFalse(self.stage.server.playback_requests or self.stage.server.skip_requests or self.stage.server.requests
+                         or self.stage.server.message_attempts)
+
+
     def test_song_visual_cue_tracks_occurrence_and_recovers_without_reset(self):
         self.stage.state["nowPlaying"].update(uid="current", uri="spotify:track:original", title="An original fixture tune")
         self.stage.write_state()

@@ -8,10 +8,9 @@
 //     would achieve nothing: advanceAnimation() overwrites all three from the
 //     step's output before the next paintGL() reads them. So the beat-driven
 //     punch and colour flash replace the step function.
-//   - Everything drawn around the cube is a direct connection to
-//     frameRendered(), which fires at the end of paintGL() while the context is
-//     current and the depth buffer still holds the cube. Rings expanding
-//     through the scene are therefore occluded by the cube for free.
+//   - The shared party scene prepares the geometry once after paintGL() has
+//     drawn the cube, then draws its glows in clipped view-depth intervals.
+//     Cube and actor depth therefore occlude rings and particles consistently.
 //
 // The audio itself is captured and analysed on a separate thread; see
 // audio_analysis.h for why that thread is never joined.
@@ -23,8 +22,10 @@
 #include "audio_analysis.h"
 #include "audio_acts.h"
 #include "cube_widget.h"
+#include "demo/party_scene.h"
 #include "scene_toggle.h"
 
+#include <QApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
@@ -35,7 +36,9 @@
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
+#include <QPointer>
 #include <QSignalBlocker>
+#include <QThread>
 #include <QVector3D>
 
 #include <algorithm>
@@ -44,6 +47,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -202,6 +206,7 @@ out vec4 fragmentColor;
 
 void main()
 {
+    if (partyOutsideDepthSlice()) discard;
     fragmentColor = vertexColor;
 }
 )glsl";
@@ -230,6 +235,7 @@ out vec4 fragmentColor;
 
 void main()
 {
+    if (partyOutsideDepthSlice()) discard;
     // Round, soft-edged sprite. Squaring the falloff keeps the core bright and
     // the edge from looking like a disc with a hard rim.
     float radius = length(gl_PointCoord - vec2(0.5)) * 2.0;
@@ -240,6 +246,11 @@ void main()
 
 struct VizState {
     QOpenGLContext* owner = nullptr;
+    QPointer<party_scene::Scene> scene;
+    QPointer<QObject> renderOwner;
+    QMatrix4x4 preparedProjection;
+    bool prepared = false;
+    bool preparedRing = false;
 
     QOpenGLShaderProgram glowProgram;
     QOpenGLBuffer glowBuffer{QOpenGLBuffer::VertexBuffer};
@@ -277,10 +288,11 @@ struct VizState {
     void* previousStep = nullptr;
 
     std::uint64_t framesDrawn = 0;
+    std::uint64_t backgroundDraws = 0;
+    std::uint64_t sliceDraws = 0;
 };
 
 VizState* viz = nullptr;
-QMetaObject::Connection drawConnection;
 QMetaObject::Connection hideCubeConnection;
 QAction* toggleAction = nullptr;
 RuntimeAgentHost hookHost{};
@@ -959,13 +971,19 @@ void advance(VizState& state,
     }
 }
 
-void drawFrame(CubeWidget* cube)
+// Scene invokes this exactly once for a rendered host frame. No slice callback
+// may sample the analyzer, advance envelopes/history, or publish beat events.
+void prepareFrame(CubeWidget* cube)
 {
-    QOpenGLContext* context = QOpenGLContext::currentContext();
-    if (viz == nullptr || context == nullptr || context != viz->owner) {
+    if (viz == nullptr) {
         return;
     }
     VizState& state = *viz;
+    state.prepared = false;
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (context == nullptr || context != state.owner) {
+        return;
+    }
     readVisualState();
 
     const auto now = std::chrono::steady_clock::now();
@@ -980,18 +998,13 @@ void drawFrame(CubeWidget* cube)
     advance(state, frame, delta, cube);
     state.history.sample(frame);
 
-    // Read the aspect back out of the projection instead of the widget size,
-    // so a resized window keeps the ring circular on screen without this having
-    // to watch for the resize.
-    const float horizontalScale = cube->m_projection(0, 0);
-    const float verticalScale = cube->m_projection(1, 1);
+    state.preparedProjection = cube->m_projection;
+    state.preparedRing = visualStyle == VisualStyle::Ring;
+    const float horizontalScale = state.preparedProjection(0, 0);
+    const float verticalScale = state.preparedProjection(1, 1);
     const float aspect = horizontalScale > 1.0e-5F ? verticalScale / horizontalScale : 1.0F;
 
     QOpenGLFunctions* gl = context->functions();
-
-    // World units per pixel, per unit of depth. Taking the viewport from GL,
-    // not from the widget's size, keeps this right under a device pixel ratio
-    // other than 1, where the two differ.
     std::array<GLint, 4> viewport{};
     gl->glGetIntegerv(GL_VIEWPORT, viewport.data());
     const float viewportHeight = viewport[3] > 0 ? static_cast<float>(viewport[3]) : 1.0F;
@@ -1000,9 +1013,9 @@ void drawFrame(CubeWidget* cube)
     state.triangles.clear();
     state.points.clear();
     if (visualStyle == VisualStyle::City) {
-        audio_acts::city(state.triangles,frame,state.clock,state.flash,aspect,viewportHeight);
+        audio_acts::city(state.triangles, frame, state.clock, state.flash, aspect, viewportHeight);
     } else if (visualStyle == VisualStyle::Waterfall) {
-        audio_acts::waterfall(state.triangles,frame,state.history,aspect,viewportHeight);
+        audio_acts::waterfall(state.triangles, frame, state.history, aspect, viewportHeight);
     } else {
         buildRoomLight(state.triangles, 0.22F + 0.45F * state.roomLight, aspect);
         buildSpectrumRing(state.triangles, frame, state.flash, aspect);
@@ -1011,41 +1024,62 @@ void drawFrame(CubeWidget* cube)
         buildParticles(state.points, state.triangles, state, frame, state.flash, pixelScale);
     }
 
-    // paintGL() leaves blending off, depth writes on and back-face culling on.
-    // All three are wrong for additive glow over a scene that is already drawn,
-    // and none of them are reset per frame by the widget, so they are put back
-    // exactly as they were before this returns.
-    GLboolean blendWas = GL_FALSE;
-    GLboolean depthMaskWas = GL_TRUE;
-    GLboolean cullWas = GL_FALSE;
-    GLboolean depthTestWas = GL_FALSE;
-    gl->glGetBooleanv(GL_BLEND, &blendWas);
-    gl->glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMaskWas);
-    gl->glGetBooleanv(GL_CULL_FACE, &cullWas);
-    gl->glGetBooleanv(GL_DEPTH_TEST, &depthTestWas);
-    if (visualStyle != VisualStyle::Ring) gl->glDisable(GL_DEPTH_TEST);
+    // Upload once. Replaying a clipped interval only binds these buffers.
+    if (!state.triangles.empty()) {
+        state.glowBuffer.bind();
+        state.glowBuffer.allocate(state.triangles.data(),
+            static_cast<int>(state.triangles.size() * sizeof(Vertex)));
+        state.glowBuffer.release();
+    }
+    if (!state.points.empty()) {
+        state.pointBuffer.bind();
+        state.pointBuffer.allocate(state.points.data(),
+            static_cast<int>(state.points.size() * sizeof(PointVertex)));
+        state.pointBuffer.release();
+    }
+    state.prepared = true;
+    ++state.framesDrawn;
+}
 
+void drawPreparedFrame(const party_scene::DepthSlice* slice)
+{
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (viz == nullptr || !viz->prepared || context == nullptr || context != viz->owner
+        || viz->preparedRing != (slice != nullptr)) {
+        return;
+    }
+    VizState& state = *viz;
+    QOpenGLFunctions* gl = context->functions();
+
+    // Scene saves/restores each callback's GL state, including program, VAO,
+    // buffers, blend factors/equations, depth state and PROGRAM_POINT_SIZE.
+    // Ring glows test against opaque cube/actor texels without writing depth;
+    // the linear acts remain a single background composition.
+    if (slice != nullptr) {
+        gl->glEnable(GL_DEPTH_TEST);
+        gl->glDepthFunc(GL_LESS);
+    } else {
+        gl->glDisable(GL_DEPTH_TEST);
+    }
     gl->glEnable(GL_BLEND);
-    // Additive. Overlapping glow accumulates toward white instead of the
-    // nearest layer hiding the ones behind it, which is what makes a dense
-    // passage look bright and not merely crowded.
+    gl->glBlendEquation(GL_FUNC_ADD);
     gl->glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    // Still depth-tested against the cube, but writing no depth of its own, so
-    // the cube occludes the far side of a ring while two rings never occlude
-    // each other.
     gl->glDepthMask(GL_FALSE);
     gl->glDisable(GL_CULL_FACE);
 
+    const auto bindSlice = [slice](QOpenGLShaderProgram& program) {
+        if (slice != nullptr) {
+            slice->apply(program);
+        } else {
+            party_scene::DepthSlice::disable(program);
+        }
+    };
     if (!state.triangles.empty()) {
         state.glowProgram.bind();
-        state.glowProgram.setUniformValue("projection", cube->m_projection);
+        state.glowProgram.setUniformValue("projection", state.preparedProjection);
+        bindSlice(state.glowProgram);
         state.glowArray.bind();
-        state.glowBuffer.bind();
-        state.glowBuffer.allocate(
-            state.triangles.data(),
-            static_cast<int>(state.triangles.size() * sizeof(Vertex)));
         gl->glDrawArrays(GL_TRIANGLES, 0, static_cast<int>(state.triangles.size()));
-        state.glowBuffer.release();
         state.glowArray.release();
         state.glowProgram.release();
     }
@@ -1053,29 +1087,18 @@ void drawFrame(CubeWidget* cube)
     if (!state.points.empty()) {
         gl->glEnable(GL_PROGRAM_POINT_SIZE);
         state.pointProgram.bind();
-        state.pointProgram.setUniformValue("projection", cube->m_projection);
+        state.pointProgram.setUniformValue("projection", state.preparedProjection);
+        bindSlice(state.pointProgram);
         state.pointArray.bind();
-        state.pointBuffer.bind();
-        state.pointBuffer.allocate(
-            state.points.data(),
-            static_cast<int>(state.points.size() * sizeof(PointVertex)));
         gl->glDrawArrays(GL_POINTS, 0, static_cast<int>(state.points.size()));
-        state.pointBuffer.release();
         state.pointArray.release();
         state.pointProgram.release();
-        gl->glDisable(GL_PROGRAM_POINT_SIZE);
     }
-
-    if (blendWas == GL_FALSE) {
-        gl->glDisable(GL_BLEND);
+    if (slice != nullptr) {
+        ++state.sliceDraws;
+    } else {
+        ++state.backgroundDraws;
     }
-    gl->glDepthMask(depthMaskWas);
-    if (depthTestWas == GL_TRUE) gl->glEnable(GL_DEPTH_TEST);
-    if (cullWas == GL_TRUE) {
-        gl->glEnable(GL_CULL_FACE);
-    }
-
-    ++state.framesDrawn;
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,13 +1108,15 @@ void drawFrame(CubeWidget* cube)
 bool buildPrograms(VizState& state, QString& error)
 {
     if (!state.glowProgram.addShaderFromSourceCode(QOpenGLShader::Vertex, glowVertexShader)
-        || !state.glowProgram.addShaderFromSourceCode(QOpenGLShader::Fragment, glowFragmentShader)
+        || !state.glowProgram.addShaderFromSourceCode(
+            QOpenGLShader::Fragment, party_scene::withDepthSlice(glowFragmentShader))
         || !state.glowProgram.link()) {
         error = state.glowProgram.log();
         return false;
     }
     if (!state.pointProgram.addShaderFromSourceCode(QOpenGLShader::Vertex, pointVertexShader)
-        || !state.pointProgram.addShaderFromSourceCode(QOpenGLShader::Fragment, pointFragmentShader)
+        || !state.pointProgram.addShaderFromSourceCode(
+            QOpenGLShader::Fragment, party_scene::withDepthSlice(pointFragmentShader))
         || !state.pointProgram.link()) {
         error = state.pointProgram.log();
         return false;
@@ -1174,6 +1199,13 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
 
     seedParticles(*state);
 
+    state->scene = party_scene::Scene::acquire(cube);
+    if (state->scene == nullptr) {
+        error = QStringLiteral("the shared party scene has an incompatible ABI");
+        delete state;
+        return false;
+    }
+
     analyzer = candidate;
     audio_analysis::Analyzer::spawn(analyzer);
     lastDeviceName = QString::fromStdString(analyzer->device());
@@ -1200,6 +1232,9 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
     if (boundResult != 0) {
         error = QStringLiteral("the host refused to bind the audio step function (%1)")
                     .arg(boundResult);
+        // No geometry owner was registered yet. Remove an empty registry we
+        // just acquired; an existing scene with other owners stays intact.
+        if (state->scene != nullptr) state->scene->removeOwner(nullptr);
         state->glowArray.destroy();
         state->glowBuffer.destroy();
         state->pointArray.destroy();
@@ -1212,10 +1247,19 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
     }
     state->binding = bound.id;
     state->previousStep = bound.previous;
-    drawConnection = QObject::connect(
-        cube, &CubeWidget::frameRendered, cube,
-        [cube](qulonglong, float) { drawFrame(cube); },
-        Qt::DirectConnection);
+    state->renderOwner = new QObject(cube);
+    state->renderOwner->setObjectName(QStringLiteral("audioPulseGeometry"));
+    party_scene::GeometryPasses passes;
+    passes.prepare = [cube] { prepareFrame(cube); };
+    passes.background = [] { drawPreparedFrame(nullptr); };
+    passes.translucentActive = [] {
+        return viz != nullptr && viz->prepared && viz->preparedRing
+            && (!viz->triangles.empty() || !viz->points.empty());
+    };
+    passes.translucent = [](const party_scene::DepthSlice& slice) {
+        drawPreparedFrame(&slice);
+    };
+    state->scene->addGeometryOwner(state->renderOwner, std::move(passes));
     // advanceAnimation clamps step output to at least 0.05. Run after its
     // timer slot, before the queued paint, to hide the base mesh completely.
     // This hook leaves other scene widgets and their drawing untouched.
@@ -1231,7 +1275,15 @@ bool install(CubeWidget* cube, const audio_analysis::Analyzer::Options& options,
 // Needs the widget's OpenGL context to be current.
 void remove(CubeWidget* cube)
 {
-    QObject::disconnect(drawConnection);
+    // Remove every draw callback before freeing any state it can reference.
+    if (viz != nullptr) {
+        if (viz->scene != nullptr && viz->renderOwner != nullptr) {
+            viz->scene->removeOwner(viz->renderOwner);
+        }
+        delete viz->renderOwner.data();
+        viz->renderOwner = nullptr;
+        viz->prepared = false;
+    }
     QObject::disconnect(hideCubeConnection);
 
     if (analyzer != nullptr) {
@@ -1332,6 +1384,10 @@ void release(const RuntimeAgentHost* host)
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
+    if (qApp == nullptr || QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "audio release must run on the GUI thread");
+        return;
+    }
     auto* cube = static_cast<CubeWidget*>(
         host->find_qobject(host->agent_context, "cubeView"));
     if (cube == nullptr) {
@@ -1371,6 +1427,10 @@ void run(const RuntimeAgentHost* host)
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
+    if (qApp == nullptr || QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "audio mutation must run on the GUI thread");
+        return;
+    }
 
     auto* cube = static_cast<CubeWidget*>(
         host->find_qobject(host->agent_context, "cubeView"));
@@ -1378,9 +1438,9 @@ void run(const RuntimeAgentHost* host)
         host->fail(host->invocation_context, "cubeView was not found");
         return;
     }
-    if (QOpenGLContext::currentContext() == nullptr) {
+    if (!scene_toggle::ownContextIsCurrent(cube)) {
         host->fail(host->invocation_context,
-                   "no OpenGL context is current; use executor=render");
+                   "the widget's OpenGL context is not current; use executor=render");
         return;
     }
 
@@ -1395,7 +1455,6 @@ void run(const RuntimeAgentHost* host)
 
     const QJsonObject request =
         QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
-    ensureToggleAction(cube);
 
     // Parameters persist across an off/on cycle, so switching the effect back on
     // from the menu reuses whatever it was last given.
@@ -1430,6 +1489,12 @@ void run(const RuntimeAgentHost* host)
 
     const auto complete = [host,cube](QJsonObject result) {
         result.insert(QStringLiteral("menuToggle"), toggleAction != nullptr);
+        result.insert(QStringLiteral("configuredDevice"),
+            QString::fromStdString(currentOptions.device.empty()
+                ? std::string("@DEFAULT_MONITOR@") : currentOptions.device));
+        result.insert(QStringLiteral("framesPrepared"),viz ? static_cast<qint64>(viz->framesDrawn) : 0);
+        result.insert(QStringLiteral("backgroundDraws"),viz ? static_cast<qint64>(viz->backgroundDraws) : 0);
+        result.insert(QStringLiteral("sliceDraws"),viz ? static_cast<qint64>(viz->sliceDraws) : 0);
         result.insert(QStringLiteral("style"),styleName());
         result.insert(QStringLiteral("stateFile"),visualStateFile);
         result.insert(QStringLiteral("styleFileError"),visualStateError);
@@ -1450,6 +1515,10 @@ void run(const RuntimeAgentHost* host)
         || request.value(QStringLiteral("remove")).toBool()
         || (request.value(QStringLiteral("toggle")).toBool() && viz != nullptr);
     if (takeOff) {
+        // Rebind an unchecked action even when this generation stays disabled.
+        // The later user enable then installs this generation without opening
+        // capture or binding the step during the disabled handover itself.
+        ensureToggleAction(cube);
         if (viz == nullptr) {
             complete(QJsonObject{
                 {QStringLiteral("removed"), false},
@@ -1464,6 +1533,7 @@ void run(const RuntimeAgentHost* host)
     }
 
     if (viz != nullptr) {
+        ensureToggleAction(cube);
         // Already running. Report what it is doing instead of installing a
         // second copy of a draw hook.
         const audio_analysis::Frame frame =
@@ -1486,9 +1556,12 @@ void run(const RuntimeAgentHost* host)
         return;
     }
 
+    // A failed installation leaves the old generation's unchecked menu
+    // handler intact, so its retained module can be restored directly.
+    ensureToggleAction(cube);
     complete(QJsonObject{
         {QStringLiteral("installed"), true},
-        {QStringLiteral("connectionValid"), static_cast<bool>(drawConnection)},
+        {QStringLiteral("connectionValid"), viz->scene != nullptr && viz->renderOwner != nullptr},
         {QStringLiteral("device"), lastDeviceName},
         {QStringLiteral("binding"), static_cast<qint64>(viz->binding)},
         {QStringLiteral("bands"), audio_analysis::bandCount},

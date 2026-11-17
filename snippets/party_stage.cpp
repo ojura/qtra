@@ -3,6 +3,7 @@
 // follow the LARICS Spomenar robots; their cargo tonight is a record.
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "demo/party_scene.h"
 
 #include <QAction>
 #include <QApplication>
@@ -60,6 +61,7 @@
 #include <QTextCursor>
 #include <QTextLayout>
 #include <QTimer>
+#include <QThread>
 #include <QToolTip>
 #include <QUrl>
 #include <QUrlQuery>
@@ -1725,10 +1727,13 @@ public:
         setStateFile(stateFile);
         showRequests(true);
         cursorScope_ = new DjCursorScope(window, this);
+        scene_ = party_scene::Scene::acquire(cube_);
+        if (scene_) scene_->addOwner(this, [this](party_scene::Frame& frame) { submitScene(frame); });
         show(); raise();
     }
     ~PartyStage() override
     {
+        if (scene_) scene_->removeOwner(this);
         delete cursorScope_;
         clearSourceLyrics();
         delete sourceLyricsText_.data();
@@ -1901,6 +1906,8 @@ public:
         }
         result.insert(QStringLiteral("karaoke"), singing);
         result.insert(QStringLiteral("sourceLyrics"), sourceLyricsStatus());
+        result.insert(QStringLiteral("sceneDepth"), scene_ ? scene_->status()
+            : QJsonObject{{QStringLiteral("error"), QStringLiteral("Shared scene compositor is unavailable")}});
         return result;
     }
     QString requestUrl() const
@@ -1995,26 +2002,6 @@ protected:
             bottom.setColorAt(0, QColor(6, 10, 22, 0)); bottom.setColorAt(1, QColor(6, 10, 22, 235));
             p.fillRect(QRectF(0, h * .62, w, h * .38), bottom);
 
-            if (mode == QStringLiteral("laser")) {
-                p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
-                for (int i = 0; i < 12; ++i) {
-                    const double a = t * .11 + i * pi / 6;
-                    const QPointF start(w * (i % 2 ? .92 : .08), h * .78);
-                    const QPointF end(w * .5 + std::sin(a) * w * .62, h * (.19 + .18 * std::cos(a * 1.3)));
-                    line(p, start, end, alpha(i % 2 ? cyan : orange, (.05 + pulse * .10) * reaction), 2 * u);
-                }
-                p.restore();
-            } else if (mode != QStringLiteral("quiet")) {
-                p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
-                for (int i = 0; i < 38; ++i) {
-                    const double a = i * 2.399963 + t * (.04 + (i % 4) * .009);
-                    const double r = .20 + .26 * ((i * 17) % 37) / 37.0;
-                    const QPointF v(w * .5 + std::cos(a) * w * r, h * .49 + std::sin(a) * h * r * .7);
-                    p.setPen(Qt::NoPen); p.setBrush(alpha(i % 3 ? cyan : orange, .18 + pulse * .22));
-                    p.drawEllipse(v, (1.0 + i % 3 + pulse) * u, (1.0 + i % 3 + pulse) * u);
-                }
-                p.restore();
-            }
 
             p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(orange);
             p.drawText(QRectF(margin, 22 * u, w * .55, 28 * u), Qt::AlignLeft | Qt::AlignVCenter,
@@ -2098,16 +2085,8 @@ protected:
             }
 
             const double mission = t - missionStart_;
-            if (mission >= 0 && mission < 17) drawDelivery(p, w, h, u, t, pulse, orange, mission);
-            if (mode == QStringLiteral("robots")) {
-                for (int i = 0; i < 3; ++i) {
-                    double robotScale = (i == 0 ? 1.05 : 1.15) * u * graphicsScale();
-                    double x = w * (.20 + i * .30) + std::sin(t * .5 + i) * 24 * u;
-                    double y = h * (.68 + (i == 0 ? -.07 : .03));
-                    y = std::min(y, graphicsBottom(w, h, u) - 42 * robotScale - 36);
-                    robot(p, i, QPointF(x, y), robotScale, t + i, t * 18, std::cos(t + i), pulse, false);
-                }
-            }
+            if (mission >= 0 && mission < 17) drawDelivery(p, w, h, u, t, pulse, orange, mission, true);
+
         }
         drawBook(p, w, h, u, orange);
         drawKaraoke(p, w, h, u, orange);
@@ -3059,8 +3038,67 @@ private:
         p.drawText(words, Qt::AlignCenter | Qt::TextWordWrap, cue_.text);
         p.restore();
     }
+    void submitScene(party_scene::Frame& frame)
+    {
+        if (!isVisible() || !cube_) return;
+        const double w = width(), h = height(), t = seconds();
+        if (w <= 0 || h <= 0) return;
+        const double u = std::clamp(std::min(w / 1280.0, h / 800.0), .65, 2.0);
+        const QColor orange = palette() == QStringLiteral("ice") ? QColor("#7bdffc") : QColor("#ff8a42");
+        const QColor cyan("#7de4ed");
+        const QString mode = sceneMode();
+        const double energy = unit(number(state_.value(QStringLiteral("scene")).toObject(), "energy", .55));
+        const double pulse = unit((cube_->m_tint.y() - .5) * 2.2), reaction = .20 + energy * .8;
+        // Ambient marks live on one far plane. Bodies are separate submissions,
+        // so foreground dancers and the existing 3-D depth can cross the fleet.
+        if (mode != QStringLiteral("quiet")) frame.add(QStringLiteral("fleet-ambience"), 35.F, [&](QPainter& p) {
+            if (mode == QStringLiteral("laser")) {
+                p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
+                for (int i = 0; i < 12; ++i) {
+                    const double a = t * .11 + i * pi / 6;
+                    const QPointF start(w * (i % 2 ? .92 : .08), h * .78);
+                    const QPointF end(w * .5 + std::sin(a) * w * .62, h * (.19 + .18 * std::cos(a * 1.3)));
+                    line(p, start, end, alpha(i % 2 ? cyan : orange, (.05 + pulse * .10) * reaction), 2 * u);
+                }
+                p.restore();
+            } else if (mode != QStringLiteral("quiet")) {
+                p.save(); p.setCompositionMode(QPainter::CompositionMode_Plus);
+                for (int i = 0; i < 38; ++i) {
+                    const double a = i * 2.399963 + t * (.04 + (i % 4) * .009);
+                    const double r = .20 + .26 * ((i * 17) % 37) / 37.0;
+                    const QPointF v(w * .5 + std::cos(a) * w * r, h * .49 + std::sin(a) * h * r * .7);
+                    p.setPen(Qt::NoPen); p.setBrush(alpha(i % 3 ? cyan : orange, .18 + pulse * .22));
+                    p.drawEllipse(v, (1.0 + i % 3 + pulse) * u, (1.0 + i % 3 + pulse) * u);
+                }
+                p.restore();
+            }
+
+        });
+        if (mode == QStringLiteral("robots")) {
+            static const std::array<const char*, 3> names{"EagleRed", "VIV", "Navines"};
+            for (int i = 0; i < 3; ++i) {
+                const double scale = (i == 0 ? 1.05 : 1.15) * u * graphicsScale();
+                const double x = w * (.20 + i * .30) + std::sin(t * .5 + i) * 24 * u;
+                const double y = std::min(h * (.68 + (i == 0 ? -.07 : .03)),
+                                          graphicsBottom(w, h, u) - 42 * scale - 36);
+                const float depth = party_scene::groundDepth((y + 23 * scale) / h);
+                frame.add(QStringLiteral("fleet-") + QString::fromLatin1(names[i]), depth, [&](QPainter& p) {
+                    robot(p, i, QPointF(x, y), scale, t + i, t * 18, std::cos(t + i), pulse, false);
+                });
+            }
+        }
+        const double mission = t - missionStart_;
+        if (mission >= 0 && mission < 17) {
+            // The delivery actor is airborne or driving on the same ground
+            // plane. Its message remains screen UI, independent of scene depth.
+            const float depth = party_scene::groundDepth(missionKind_ == 0 || missionKind_ == 3 ? .68 : .77);
+            frame.add(QStringLiteral("fleet-delivery"), depth, [&](QPainter& p) {
+                drawDelivery(p, w, h, u, t, pulse, orange, mission, false);
+            });
+        }
+    }
     void drawDelivery(QPainter& p, double w, double h, double u, double t,
-                      double pulse, QColor orange, double age)
+                      double pulse, QColor orange, double age, bool overlay)
     {
         const bool air = missionKind_ == 0 || missionKind_ == 3;
         const double approach = smooth(age / 5.5);
@@ -3074,8 +3112,8 @@ private:
         const double minY = top + 32 * robotScale;
         const double maxY = std::max(minY, bottom - (air ? 80 : 42) * robotScale - 36);
         const double y = std::clamp(h * (air ? .40 : .69) - (air ? std::sin(approach * pi) * 32 * u : 0), minY, maxY);
-        robot(p, missionKind_, QPointF(x, y), robotScale, t, x, 1, pulse, age < 7.5);
-        if (age >= 7.5 && age < 13) {
+        if (!overlay) robot(p, missionKind_, QPointF(x, y), robotScale, t, x, 1, pulse, age < 7.5);
+        if (!overlay && age >= 7.5 && age < 13) {
             const double fade = std::min(1.0, (13 - age) / 2);
             const double delivered = smooth((age - 7.5) / 1.3);
             const QPointF pickup(x + (missionKind_ == 2 ? 47 * robotScale : 0),
@@ -3085,7 +3123,7 @@ private:
             p.save(); p.setOpacity(fade);
             disc(p, position, 28 * u * graphicsScale(), orange, t * 36); p.restore();
         }
-        if (age > 4.5 && age < 11) {
+        if (overlay && age > 4.5 && age < 11) {
             const QRectF bubble(w * .5 - 205 * u, std::max(top, y - 42 * robotScale - 58 * u), 410 * u, 49 * u);
             panel(p, bubble, orange, .94);
             const QPointF anchor(std::clamp(x, bubble.left() + 12, bubble.right() - 12), bubble.bottom());
@@ -3121,6 +3159,7 @@ private:
         return card;
     }
     QPointer<CubeWidget> cube_;
+    QPointer<party_scene::Scene> scene_;
     QPointer<RequestDesk> desk_;
     QPointer<QWidget> returnFocus_;
     QPointer<QProcess> toggleProcess_;
@@ -3175,12 +3214,18 @@ QPointer<PartyStage> stage;
 void release(const RuntimeAgentHost* host)
 {
     if (!host || host->abi_version != RUNTIME_AGENT_ABI) return;
+    if (QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "Party stage release requires the GUI executor."); return;
+    }
     delete stage.data();
     host->complete_json(host->invocation_context, "{\"removed\":true}");
 }
 void run(const RuntimeAgentHost* host)
 {
     if (!host || host->abi_version != RUNTIME_AGENT_ABI) return;
+    if (QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "Party stage requires the GUI executor."); return;
+    }
     const QJsonObject request = QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
     if (request.value(QStringLiteral("restore")).toBool()) { release(host); return; }
     const bool composerRpc = request.value(QStringLiteral("getComposerDraft")).toBool() || request.contains(QStringLiteral("setSearchIntent"));

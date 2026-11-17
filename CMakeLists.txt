@@ -469,6 +469,7 @@ add_library(agent_snippet_party_dance MODULE snippets/party_dance.cpp)
 target_include_directories(agent_snippet_party_dance PRIVATE include src)
 target_link_libraries(agent_snippet_party_dance PRIVATE
     Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network Qt6::OpenGL Qt6::OpenGLWidgets)
+target_compile_options(agent_snippet_party_dance PRIVATE -fno-access-control)
 set_target_properties(agent_snippet_party_dance PROPERTIES
     PREFIX "" OUTPUT_NAME "agent_snippet_party_dance")
 stamp_with_host_build_id(agent_snippet_party_dance)

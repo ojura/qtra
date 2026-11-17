@@ -408,9 +408,10 @@ separate private Tab/F11 lifecycle fixture.
 
 ## Procedural dance act
 
-`snippets/party_dance.cpp` is an independent GUI module with its own transparent
-layer beneath the stage. It follows the free main pane's bounds, leaving the
-permanent guest panel, captions and robot fleet in place. The first act combines
+`snippets/party_dance.cpp` is an independent GUI module that submits its actors
+to the shared scene compositor. It follows the free main pane's bounds; the
+permanent guest panel and captions keep their screen-space layout. The fleet
+and dancers share scene depth. The first act combines
 a faceted disco ball, a perspective neon floor, slowly sweeping lights and up to
 24 larger confetti pieces. The second act uses flowing ribbons and orbiting records.
 The third adds six larger conga robots led by a smiling vinyl record in a party
@@ -423,7 +424,7 @@ The fifth is a circular **kolo**: eight large robots share hand positions around
 a closed ring, step together and rotate with depth ordering. The sixth is a blue
 tram with six dancing robot passengers, a moving city backdrop, turning wheels
 and the destination display **SLJEDEĆA: REFREN**. Both are procedural drawings in
-the same bounded layer; they require no image downloads or extra audio source.
+the same bounded scene; they require no image downloads or extra audio source.
 
 Actual `nowPlaying` occurrence, URI, title and artist select the song artwork.
 Robots hold large bottles for titles mentioning drinking, cocktail glasses for
@@ -468,8 +469,8 @@ keeping automatic mode, for example `{"act":"auto","startAct":"kolo"}`.
 Optional `formSeconds` accepts a whole number from 1 to 600 for deliberate cadence
 changes. Rotation continues with an unchanged or temporarily unreadable state
 file. Status exposes `availableActs`, `formation`, `formIntervalMs` and `nextActAt`.
-Releasing or hot-reloading this module affects only
-its layer, timers and event connection; the audio and request-panel modules stay
+Releasing or hot-reloading this module removes only
+its scene owner, timers and event connection; the audio and request-panel modules stay
 running. Use the GUI executor. The current choice survives a module reload in
 the host window's properties, together with the remaining form interval.
 
@@ -479,6 +480,89 @@ plus the new kolo/tram rendering, independent clock, manual hold and reload case
 These tests own their display, host, HTTP fixture and synthetic beat socket.
 `PARTY_DANCE_CAPTURE=/tmp/dance.png` writes private scene captures, including
 `dance.kolo.png` and `dance.tram.png`, for a visual check at the target size.
+
+## Shared scene depth
+
+`include/demo/party_scene.h` owns one `partySceneDepth` QObject beneath the
+existing CubeWidget. The separately loaded stage, dance, orbit, Möbius and audio
+modules discover that same object and register explicit owners. The registry lives in the host object
+tree; it is not a static per-library registry. Each owner unregisters before
+destroying its drawing state. The last owner disconnects the frame hook and
+releases GL resources with the correct context current. The host retains loaded
+libraries, including the code belonging to the generation that created the
+registry, while other owners continue to use it.
+
+The frame hook uses the host's current projection, framebuffer and depth buffer.
+Each fleet body and each dancer, prop holder or scenery contribution is its own
+billboard. Wheels, hands, carried props and tram passengers stay with their
+body's drawing. A shared ground-plane depth function relates projected foot
+positions to camera distance. Floors and shadows use that ground plane, while
+ambient marks occupy a far plane. Opaque pixels participate in depth testing
+and writes; transparent padding is discarded, and translucent edges and marks
+blend without writing depth. The host cube draws first. The shared scene then
+runs each geometry provider's preparation once, its optional background once,
+and all opaque sphere/rim work before the actors' opaque pixels.
+
+Transparent Möbius interiors and audio ring triangles/points use the same
+camera-distance intervals as the actors. For an interval from far F to near N,
+the half-open rule is N < distance <= F. At each viewport row the common ground
+depth splits that interval: far legacy material, the complete stable ground
+group, then near legacy material. Flat actor groups follow in far-to-near
+order, with no extra interval between peers at equal depth. Fragment distance
+comes from the actual projection, viewport origin/height and depth range.
+Ground meshes split at reciprocal-depth clamp boundaries so their rasterized
+depth matches that row calculation. This lets partially transparent actors
+cross the actual translucent rings as well as opaque cube/sphere/rim geometry.
+Providers only draw their prepared buffers during slices; analysis, history,
+animation clocks and beat events advance once per frame.
+
+Delivery speech bubbles, photographs, lyrics, captions and request controls
+remain screen UI above the scene.
+
+The compositor records at most 96 bounded drawings and rasterizes at most 30
+times per second. Before allocating images it measures the entire frame, then
+reduces one shared sampling scale when necessary to remain below 12 million
+raster pixels and 4096 pixels per texture side. Large viewports preserve all
+submitted actors rather than dropping the last ones. GL program/buffer/texture,
+sampler, blending, depth/range, point-size, rasterization and pixel-unpack state are restored for
+neighboring render callbacks. Stage status exposes `sceneDepth` with owner and
+frame counts, actor bounds/depth, raster pixels/scale/time, transparent draw
+counts and errors. Audio reports `framesPrepared`, `backgroundDraws` and
+`sliceDraws`. Entry points reject a wrong QObject thread before touching their
+owner; releases that need GL also require the cube's own current context.
+
+The focused private checks are:
+
+```sh
+python3 -m unittest discover -s tests -p test_party_stage.py -k shared_scene_crosses -v
+python3 -m unittest discover -s tests -p test_party_stage.py -k shared_scene_transparency -v
+python3 -m unittest discover -s tests -p test_party_dance.py -k shared_scene_budget -v
+python3 -m unittest discover -s tests -p test_party_dance.py -k shared_scene_rejects -v
+```
+
+They draw a controlled real GL plane in front of and behind the fleet, check
+transparent padding and neighboring GL state, retain the editor and lyric mode,
+exercise 4K streamers under the allocation ceiling, and release/reload distinct
+module generations in both acquisition orders. The transparency case uses the
+real Möbius/orbit providers, partial-alpha peers, tilted ground and reversed
+provider replacement order. Its audio child preloads a bounded synthetic Pulse
+reader that accepts only the fixture's device token, with an unreachable Pulse
+server and autospawn disabled; it opens no desktop monitor. The affinity case
+rejects off-thread release, keeps owners intact and then succeeds on GUI retry.
+`PARTY_DEPTH_CAPTURE=/tmp/depth.png` saves these fixtures' useful crossing views.
+All inputs, rendering and synthetic events stay in the fixture-owned display
+and host.
+
+For a live replacement, load unique resident library paths and snapshot the
+current editor/window state plus each enabled geometry action/configuration.
+Release old owners with their required GUI/render executor, install the new
+owners and rebind even disabled actions without enabling them. Audio requires
+its actual capture device/options/events/style/stateFile; its normal replacement
+rebuilds FFT/visual history while retaining that configuration. After a completed
+QAction handover, rollback loads the preserved prior binary at a fresh path so
+its new module statics can reconnect the old action. A retained module ID whose
+action pointer already exists is insufficient for that handover. Update only
+the replaced metadata keys after verifying the new owners and preserved state.
 
 ## Source context
 

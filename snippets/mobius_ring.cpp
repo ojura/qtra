@@ -1,10 +1,10 @@
 // A rotating Mobius strip encircling the scene: translucent surface, opaque
 // rim.
 //
-// Installed as a third frameRendered() hook, so it draws after the cube and the
-// orbiting sphere have written depth. That ordering is what makes the blend
-// correct: the opaque things are already in the depth buffer when the
-// translucent surface goes down.
+// The shared scene draws the opaque rim before all transparent material, then
+// clips the interior into depth intervals between actor planes. Independent
+// module registration/reload order cannot put the interior in front of a
+// nearer partially transparent actor.
 //
 // The strip has exactly one boundary curve, so the opaque rim is a single band
 // running over u in [0, 4pi), not two separate rims. The rim is real
@@ -20,8 +20,11 @@
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "demo/party_scene.h"
 #include "scene_toggle.h"
 
+#include <QApplication>
+#include <QThread>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalBlocker>
@@ -84,6 +87,7 @@ out vec4 fragmentColor;
 
 void main()
 {
+    if (partyOutsideDepthSlice()) discard;
     vec3 lightDirection = normalize(vec3(0.45, 0.8, 0.6));
     float diffuse = abs(dot(normalize(shadingNormal), lightDirection));
     fragmentColor = vec4(color.rgb * (0.30 + 0.70 * diffuse), color.a);
@@ -105,6 +109,8 @@ struct RingState {
     Band surface;
     Band edge;
     QOpenGLFunctions_3_3_Core* gl = nullptr;
+    QPointer<party_scene::Scene> scene;
+    QPointer<QObject> sceneOwner;
     float radius = defaultRadius;
     float width = defaultWidth;
     float tiltDegrees = defaultTiltDegrees;
@@ -114,7 +120,6 @@ struct RingState {
 };
 
 RingState* ring = nullptr;
-QMetaObject::Connection drawConnection;
 QAction* toggleAction = nullptr;
 
 // The six shape values, kept outside RingState so that switching the strip off
@@ -237,54 +242,36 @@ void uploadGeometry(RingState* state)
     uploadBand(state, state->edge, edgeVertices, edgeIndices);
 }
 
-void drawRing(const CubeWidget* cube)
+void drawRing(const CubeWidget* cube, const party_scene::DepthSlice* slice)
 {
     if (ring == nullptr || ring->gl == nullptr
-        || QOpenGLContext::currentContext() != ring->owner) {
-        return;
-    }
-    QOpenGLFunctions_3_3_Core* gl = ring->gl;
-
+        || QOpenGLContext::currentContext() != ring->owner) return;
+    auto* gl = ring->gl;
     QMatrix4x4 model;
     model.rotate(ring->tiltDegrees, QVector3D(1.0F, 0.0F, 0.0F));
-    model.rotate(cube->m_elapsedSeconds * ring->spinDegreesPerSecond,
-                 QVector3D(0.0F, 0.0F, 1.0F));
-
-    QMatrix4x4 view;
-    view.translate(0.0F, 0.0F, -cubeViewDistance);
-
+    model.rotate(cube->m_elapsedSeconds * ring->spinDegreesPerSecond, QVector3D(0.0F, 0.0F, 1.0F));
+    QMatrix4x4 view; view.translate(0.0F, 0.0F, -cubeViewDistance);
     ring->program.bind();
     ring->program.setUniformValue("mvp", cube->m_projection * view * model);
     ring->program.setUniformValue("normalMatrix", model.normalMatrix());
-
-    // The strip has no outside, so back-face culling would delete half of it.
-    gl->glDisable(GL_CULL_FACE);
-
-    // Rim first, opaque and writing depth, so it occludes the translucent
-    // interior behind it. If the interior went first with depth writes off, the
-    // far rim would pass the depth test and draw over the near interior.
-    ring->program.setUniformValue("color", QVector4D(edgeColor, 1.0F));
-    ring->edge.array.bind();
-    gl->glDrawElements(GL_TRIANGLES, ring->edge.indexCount, GL_UNSIGNED_INT, nullptr);
-    ring->edge.array.release();
-
-    // Translucent interior: depth-tested against everything already drawn, but
-    // not writing depth, so the strip's own two halves blend instead of
-    // occluding each other by draw order.
-    gl->glEnable(GL_BLEND);
-    // Leave the destination alpha alone. QOpenGLWidget composites its FBO, and
-    // a framebuffer alpha below 1 would make the whole widget translucent.
-    gl->glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
-    gl->glDepthMask(GL_FALSE);
-
-    ring->program.setUniformValue("color", QVector4D(surfaceColor, ring->alpha));
-    ring->surface.array.bind();
-    gl->glDrawElements(GL_TRIANGLES, ring->surface.indexCount, GL_UNSIGNED_INT, nullptr);
-    ring->surface.array.release();
-
-    gl->glDepthMask(GL_TRUE);
-    gl->glDisable(GL_BLEND);
-    gl->glEnable(GL_CULL_FACE);
+    gl->glEnable(GL_DEPTH_TEST); gl->glDepthFunc(GL_LEQUAL); gl->glDisable(GL_CULL_FACE);
+    if (!slice) {
+        party_scene::DepthSlice::disable(ring->program);
+        gl->glDisable(GL_BLEND); gl->glDepthMask(GL_TRUE);
+        ring->program.setUniformValue("color", QVector4D(edgeColor, 1.0F));
+        ring->edge.array.bind();
+        gl->glDrawElements(GL_TRIANGLES, ring->edge.indexCount, GL_UNSIGNED_INT, nullptr);
+        ring->edge.array.release();
+    } else {
+        slice->apply(ring->program);
+        gl->glEnable(GL_BLEND); gl->glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+        gl->glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        gl->glDepthMask(GL_FALSE);
+        ring->program.setUniformValue("color", QVector4D(surfaceColor, ring->alpha));
+        ring->surface.array.bind();
+        gl->glDrawElements(GL_TRIANGLES, ring->surface.indexCount, GL_UNSIGNED_INT, nullptr);
+        ring->surface.array.release();
+    }
     ring->program.release();
 }
 
@@ -309,7 +296,7 @@ bool installRing(CubeWidget* cube, QString& error)
     state->gl->initializeOpenGLFunctions();
 
     if (!state->program.addShaderFromSourceCode(QOpenGLShader::Vertex, ringVertexShader)
-        || !state->program.addShaderFromSourceCode(QOpenGLShader::Fragment, ringFragmentShader)
+        || !state->program.addShaderFromSourceCode(QOpenGLShader::Fragment, party_scene::withDepthSlice(ringFragmentShader))
         || !state->program.link()) {
         error = state->program.log();
         delete state;
@@ -331,11 +318,20 @@ bool installRing(CubeWidget* cube, QString& error)
     state->edge.indices.create();
     uploadGeometry(state);
 
+    auto* scene = party_scene::Scene::acquire(cube);
+    if (!scene) {
+        destroyBand(state->surface); destroyBand(state->edge); delete state;
+        error = QStringLiteral("Release the incompatible party scene owners first"); return false;
+    }
+    state->scene = scene;
     ring = state;
-    drawConnection = QObject::connect(
-        cube, &CubeWidget::frameRendered, cube,
-        [cube](qulonglong, float) { drawRing(cube); },
-        Qt::DirectConnection);
+    state->sceneOwner = new QObject(cube);
+    state->sceneOwner->setObjectName(QStringLiteral("partyMobiusSceneOwner"));
+    party_scene::GeometryPasses passes;
+    passes.opaque = [cube] { drawRing(cube, nullptr); };
+    passes.translucentActive = [] { return ring && ring->alpha > 0; };
+    passes.translucent = [cube](const party_scene::DepthSlice& slice) { drawRing(cube, &slice); };
+    scene->addGeometryOwner(state->sceneOwner, std::move(passes));
     cube->update();
     return true;
 }
@@ -343,7 +339,8 @@ bool installRing(CubeWidget* cube, QString& error)
 // Needs the widget's OpenGL context to be current.
 void removeRing(CubeWidget* cube)
 {
-    QObject::disconnect(drawConnection);
+    if (ring->scene) ring->scene->removeOwner(ring->sceneOwner);
+    delete ring->sceneOwner.data();
     destroyBand(ring->surface);
     destroyBand(ring->edge);
     delete ring;
@@ -449,6 +446,9 @@ void release(const RuntimeAgentHost* host)
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
+    if (!qApp || QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "Mobius renderer requires the GUI thread with its context current."); return;
+    }
     auto* cube = static_cast<CubeWidget*>(
         host->find_qobject(host->agent_context, "cubeView"));
     if (cube == nullptr) {
@@ -477,6 +477,9 @@ void run(const RuntimeAgentHost* host)
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
+    if (!qApp || QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "Mobius renderer requires the GUI thread with its context current."); return;
+    }
 
     auto* cube = static_cast<CubeWidget*>(
         host->find_qobject(host->agent_context, "cubeView"));
@@ -484,10 +487,9 @@ void run(const RuntimeAgentHost* host)
         host->fail(host->invocation_context, "cubeView was not found");
         return;
     }
-    QOpenGLContext* context = QOpenGLContext::currentContext();
-    if (context == nullptr) {
+    if (!scene_toggle::ownContextIsCurrent(cube)) {
         host->fail(host->invocation_context,
-                   "no OpenGL context is current; use executor=render");
+                   "the widget's OpenGL context is not current; use executor=render");
         return;
     }
 
@@ -542,7 +544,7 @@ void run(const RuntimeAgentHost* host)
 
     QJsonObject result = describe(ring);
     result.insert(QStringLiteral("installed"), true);
-    result.insert(QStringLiteral("connectionValid"), static_cast<bool>(drawConnection));
+    result.insert(QStringLiteral("connectionValid"), !ring->sceneOwner.isNull());
     complete(result);
 }
 

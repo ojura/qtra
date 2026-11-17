@@ -262,7 +262,7 @@ class Service(BaseHTTPRequestHandler):
 
 @unittest.skipUnless(can_draw(), "a private display is required")
 class PartyStage(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, audio_stub=False):
         for path in (BUILD / "qt_runtime_cube", BUILD / "agent_snippet_party_stage.so",
                      BUILD / "agent_snippet_orbit_sphere.so", BUILD / "agent_snippet_mobius_ring.so"):
             self.assertTrue(path.exists(), f"build the party stage first: {path}")
@@ -281,6 +281,55 @@ class PartyStage(unittest.TestCase):
         self.assertEqual(environment["QT_QPA_PLATFORM"], "xcb")
         self.assertNotIn("WAYLAND_DISPLAY", environment)
         environment["XDG_CONFIG_HOME"] = str(self.folder / "config")
+        if audio_stub:
+            # Only this owned qtra child sees the fake Pulse symbols. The stub
+            # rejects every device except its private token and never opens a
+            # server; an impossible server/config also blocks accidental bypass.
+            self.audio_device = "qtra-depth-fixture-" + self.folder.name
+            pulse = self.folder / "pulse_stub.c"
+            pulse.write_text(r"""#include <pulse/simple.h>
+#include <pulse/error.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+struct pa_simple { uint64_t frame; };
+pa_simple *pa_simple_new(const char *server,const char *name,pa_stream_direction_t direction,
+ const char *device,const char *stream,const pa_sample_spec *spec,const pa_channel_map *map,
+ const pa_buffer_attr *attr,int *error) {
+ const char *expected=getenv("QTRA_PRIVATE_AUDIO_DEVICE");
+ if(!expected || !device || strcmp(device,expected) || direction!=PA_STREAM_RECORD || !spec
+    || spec->format!=PA_SAMPLE_FLOAT32NE || spec->channels!=2 || spec->rate!=48000) {
+  if(error)*error=PA_ERR_INVALID; return NULL;
+ }
+ return calloc(1,sizeof(struct pa_simple));
+}
+int pa_simple_read(pa_simple *stream,void *data,size_t bytes,int *error) {
+ if(!stream || bytes==0 || bytes>65536 || bytes%(2*sizeof(float))) {
+  if(error)*error=PA_ERR_INVALID; return -1;
+ }
+ size_t frames=bytes/(2*sizeof(float)); float *samples=data;
+ for(size_t n=0;n<frames;++n) {
+  double t=(double)stream->frame++/48000.;
+  float value=.28f*sin(2.*3.141592653589793*120.*t)+.10f*sin(2.*3.141592653589793*2400.*t);
+  samples[2*n]=samples[2*n+1]=value;
+ }
+ struct timespec delay={0,(long)(frames*1000000000ULL/48000)};
+ nanosleep(&delay,NULL); return 0;
+}
+void pa_simple_free(pa_simple *stream) { free(stream); }
+""")
+            library = self.folder / "pulse_stub.so"
+            compiled = subprocess.run(["cc", "-shared", "-fPIC", "-O2", str(pulse), "-o", str(library), "-lm"],
+                                      capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            config = self.folder / "pulse-client.conf"
+            config.write_text("autospawn = no\n")
+            environment.update(LD_PRELOAD=str(library), QTRA_PRIVATE_AUDIO_DEVICE=self.audio_device,
+                               PULSE_SERVER="unix:" + str(self.folder / "no-pulse-server"),
+                               PULSE_CLIENTCONFIG=str(config))
+
         self.environment = environment
         self.log = (self.folder / "qtra.log").open("w+")
         self.addCleanup(self.log.close)
@@ -300,8 +349,10 @@ class PartyStage(unittest.TestCase):
         else:
             self.fail("qtra socket did not appear")
         self.addCleanup(self.client.close)
+        self.geometry_modules = {}
         for name in ("orbit_sphere", "mobius_ring"):
             module = self.client.request("snippet.load", {"path": str(BUILD / f"agent_snippet_{name}.so")})["moduleId"]
+            self.geometry_modules[name] = module
             operation = self.client.request("snippet.run", {"moduleId": module, "executor": "render", "request": {"restore": True}})
             finished = self.client.wait_for_operation(operation["operationId"], timeout=10)["data"]
             self.assertEqual(finished["outcome"], "completed", finished)
@@ -442,6 +493,200 @@ class PartyStage(unittest.TestCase):
                 x11.XFree(image)
         finally:
             x11.XCloseDisplay(display)
+
+    def test_shared_scene_crosses_real_gl_depth_and_preserves_screen_ui(self):
+        # This probe is a real opaque scene plane in the host camera/depth buffer.
+        # It is installed before the production compositor, on the owned display.
+        source = self.folder / "scene_depth_probe.cpp"
+        source.write_text(r"""#include "agent/agent_abi.h"
+#include "cube_widget.h"
+#include "demo/party_scene.h"
+#include <QJsonDocument>
+#include <QOpenGLShaderProgram>
+#include <QOpenGLVersionFunctionsFactory>
+#include <QPointer>
+#include <memory>
+namespace {
+QPointer<CubeWidget> cube;
+QMetaObject::Connection before, after;
+std::unique_ptr<QOpenGLShaderProgram> program;
+GLuint vao=0, buffer=0, sampler=0;
+float depth=9;
+bool stateRestored=true;
+int checks=0;
+float oldScale=1;
+bool oldRunning=true;
+void draw() {
+    auto* gl=QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(QOpenGLContext::currentContext());
+    if (!gl || !gl->initializeOpenGLFunctions()) return;
+    GLint oldProgram,oldVao,oldBuffer,oldDepth;
+    GLboolean oldMask,oldCull,oldBlend,oldTest;
+    gl->glGetIntegerv(GL_CURRENT_PROGRAM,&oldProgram); gl->glGetIntegerv(GL_VERTEX_ARRAY_BINDING,&oldVao);
+    gl->glGetIntegerv(GL_ARRAY_BUFFER_BINDING,&oldBuffer); gl->glGetIntegerv(GL_DEPTH_FUNC,&oldDepth);
+    gl->glGetBooleanv(GL_DEPTH_WRITEMASK,&oldMask);
+    oldCull=gl->glIsEnabled(GL_CULL_FACE); oldBlend=gl->glIsEnabled(GL_BLEND); oldTest=gl->glIsEnabled(GL_DEPTH_TEST);
+    if (!program) {
+        program=std::make_unique<QOpenGLShaderProgram>();
+        program->addShaderFromSourceCode(QOpenGLShader::Vertex,
+            "#version 330 core\nlayout(location=0) in vec3 p; uniform mat4 projection; void main(){gl_Position=projection*vec4(p,1);}");
+        program->addShaderFromSourceCode(QOpenGLShader::Fragment,
+            "#version 330 core\nout vec4 color; void main(){color=vec4(.1,.8,.3,1);}");
+        program->link(); gl->glGenVertexArrays(1,&vao); gl->glGenBuffers(1,&buffer); gl->glGenSamplers(1,&sampler);
+    }
+    float vertices[18]; int offset=0;
+    for (auto point : {QPointF(.08,.60),QPointF(.08,.84),QPointF(.92,.84),
+                       QPointF(.08,.60),QPointF(.92,.84),QPointF(.92,.60)}) {
+        vertices[offset++]=(2*point.x()-1)*depth/cube->m_projection(0,0);
+        vertices[offset++]=(1-2*point.y())*depth/cube->m_projection(1,1);
+        vertices[offset++]=-depth;
+    }
+    program->bind(); program->setUniformValue("projection",cube->m_projection);
+    gl->glBindVertexArray(vao); gl->glBindBuffer(GL_ARRAY_BUFFER,buffer);
+    gl->glBufferData(GL_ARRAY_BUFFER,sizeof(vertices),vertices,GL_STREAM_DRAW);
+    gl->glEnableVertexAttribArray(0); gl->glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,3*sizeof(float),nullptr);
+    gl->glEnable(GL_DEPTH_TEST); gl->glDepthMask(GL_TRUE); gl->glDepthFunc(GL_LEQUAL);
+    gl->glDisable(GL_CULL_FACE); gl->glDisable(GL_BLEND); gl->glDrawArrays(GL_TRIANGLES,0,6);
+    gl->glUseProgram(oldProgram); gl->glBindVertexArray(oldVao); gl->glBindBuffer(GL_ARRAY_BUFFER,oldBuffer);
+    gl->glDepthFunc(oldDepth); gl->glDepthMask(oldMask);
+    oldCull?gl->glEnable(GL_CULL_FACE):gl->glDisable(GL_CULL_FACE);
+    oldBlend?gl->glEnable(GL_BLEND):gl->glDisable(GL_BLEND);
+    oldTest?gl->glEnable(GL_DEPTH_TEST):gl->glDisable(GL_DEPTH_TEST);
+    // Distinct valid states catch a compositor leaking/resetting its neighbors.
+    if (after) {
+        gl->glBindSampler(0,sampler); gl->glActiveTexture(GL_TEXTURE3);
+        gl->glPixelStorei(GL_UNPACK_ALIGNMENT,8); gl->glPixelStorei(GL_UNPACK_ROW_LENGTH,17);
+        gl->glPixelStorei(GL_UNPACK_SKIP_PIXELS,2); gl->glPixelStorei(GL_UNPACK_SKIP_ROWS,3);
+    }
+}
+void check() {
+    auto* gl=QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(QOpenGLContext::currentContext());
+    GLint active,alignment,row,pixels,rows,bound;
+    gl->glGetIntegerv(GL_ACTIVE_TEXTURE,&active); gl->glGetIntegerv(GL_UNPACK_ALIGNMENT,&alignment);
+    gl->glGetIntegerv(GL_UNPACK_ROW_LENGTH,&row); gl->glGetIntegerv(GL_UNPACK_SKIP_PIXELS,&pixels);
+    gl->glGetIntegerv(GL_UNPACK_SKIP_ROWS,&rows); gl->glGetIntegeri_v(GL_SAMPLER_BINDING,0,&bound);
+    stateRestored=stateRestored && active==GL_TEXTURE3 && alignment==8 && row==17 && pixels==2 && rows==3 && GLuint(bound)==sampler;
+    ++checks;
+    gl->glBindSampler(0,0); gl->glActiveTexture(GL_TEXTURE0); gl->glPixelStorei(GL_UNPACK_ALIGNMENT,4);
+    gl->glPixelStorei(GL_UNPACK_ROW_LENGTH,0); gl->glPixelStorei(GL_UNPACK_SKIP_PIXELS,0); gl->glPixelStorei(GL_UNPACK_SKIP_ROWS,0);
+}
+void release(const RuntimeAgentHost* host) {
+    QObject::disconnect(before); QObject::disconnect(after);
+    if (cube && program) {
+        cube->makeCurrent();
+        auto* gl=QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(QOpenGLContext::currentContext());
+        gl->glDeleteBuffers(1,&buffer); gl->glDeleteVertexArrays(1,&vao); gl->glDeleteSamplers(1,&sampler);
+        program.reset(); cube->doneCurrent();
+    }
+    if(cube){cube->m_scale=oldScale;cube->setRunning(oldRunning);}
+    cube.clear(); host->complete_json(host->invocation_context,"{\"removed\":true}");
+}
+void run(const RuntimeAgentHost* host) {
+    const auto request=QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
+    if(request.value("restore").toBool()){release(host);return;}
+    if(!cube){
+        cube=static_cast<CubeWidget*>(host->find_qobject(host->agent_context,"cubeView"));
+        // Keep the unrelated private cube away from VIV's sampling region.
+        // The controlled opaque plane supplies the real front/back crossing.
+        oldScale=cube->m_scale;oldRunning=cube->isRunning();cube->setRunning(false);cube->m_scale=.25F;
+        before=QObject::connect(cube,&CubeWidget::frameRendered,cube,[](qulonglong,float){draw();},Qt::DirectConnection);
+    }
+    if(request.contains("depth")) depth=request.value("depth").toDouble();
+    if(request.value("watch").toBool() && !after)
+        after=QObject::connect(cube,&CubeWidget::frameRendered,cube,[](qulonglong,float){check();},Qt::DirectConnection);
+    QJsonObject result;
+    if(request.value("sample").toBool()) {
+        const auto image=cube->grabFramebuffer();
+        result.insert("imageSize",QJsonArray{image.width(),image.height()});
+        result.insert("programLinked",program && program->isLinked());
+        result.insert("programLog",program ? program->log() : QString());
+        auto* object=cube->findChild<QObject*>("partySceneDepth",Qt::FindDirectChildrenOnly);
+        if(object) {
+            auto* scene=static_cast<party_scene::Scene*>(object);
+            const auto metadata=scene->status(); result.insert("scene",metadata);
+            for(const auto actor:metadata.value("actors").toArray()) {
+                const auto value=actor.toObject();
+                if(value.value("name").toString()!="fleet-VIV") continue;
+                const auto bounds=value.value("bounds").toArray();
+                QRect rect(bounds[0].toInt(),bounds[1].toInt(),bounds[2].toInt(),bounds[3].toInt());
+                rect=rect.intersected(image.rect());
+                int rose=0,green=0,transparent=0;
+                QMap<QRgb,int> colors;
+                for(int y=rect.top();y<=rect.bottom();++y)for(int x=rect.left();x<=rect.right();++x) {
+                    const auto color=image.pixelColor(x,y);
+                    ++colors[color.rgb()];
+                    if(std::abs(color.red()-241)<15 && std::abs(color.green()-124)<15 && std::abs(color.blue()-117)<15)++rose;
+                    if(std::abs(color.red()-26)<12 && std::abs(color.green()-204)<12 && std::abs(color.blue()-77)<12)++green;
+                    if(color.alpha()<250)++transparent;
+                }
+                result.insert("rosePixels",rose); result.insert("greenPixels",green);
+                result.insert("roiPixels",rect.width()*rect.height()); result.insert("transparentPixels",transparent);
+                QJsonArray common;
+                for(int i=0;i<6 && !colors.isEmpty();++i) {
+                    auto found=std::max_element(colors.begin(),colors.end());
+                    const auto color=QColor::fromRgb(found.key());
+                    common.append(QJsonArray{color.red(),color.green(),color.blue(),found.value()}); colors.erase(found);
+                }
+                result.insert("commonColors",common);
+            }
+        }
+    }
+    result.insert("stateRestored",stateRestored);result.insert("stateChecks",checks);
+    host->complete_json(host->invocation_context,QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+}
+const RuntimeAgentSnippet descriptor{RUNTIME_AGENT_ABI,sizeof(RuntimeAgentSnippet),"private scene depth fixture",&run,&release};
+}
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet_init(){return &descriptor;}
+""")
+        library = self.folder / "scene_depth_probe.so"
+        compiled = subprocess.run([sys.executable, str(ROOT / "tools" / "compile_snippet.py"),
+            "--compile-db", str(BUILD / "compile_commands.json"), "--context", "snippets/party_stage.cpp",
+            "--source", str(source), "--output", str(library), "--compact"], capture_output=True, text=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        module = self.client.request("snippet.load", {"path": str(library)})["moduleId"]
+
+        def probe(**request):
+            operation = self.client.request("snippet.run", {"moduleId": module, "executor": "gui", "request": request})
+            result = self.client.wait_for_operation(operation["operationId"], timeout=10)["data"]
+            self.assertEqual(result["outcome"], "completed", result)
+            return result["result"]
+
+        probe()
+        self.state["nowPlaying"] = None  # No mission crosses the fixed test region.
+        self.state["scene"]["graphicsScale"] = 1.5
+        self.write_state(); self.run_stage(stateFile=str(self.state_file))
+        window = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                         env=self.environment, text=True).splitlines()[-1]
+        subprocess.run(["xdotool", "windowsize", "--sync", window, "2560", "1600"], env=self.environment, check=True)
+        self.run_stage(composerDraft={"text": "Sačuvaj ovaj nacrt dok roboti prolaze.", "cursor": 18, "anchor": 5})
+        draft, bounds = self.editor_draft(), self.magic_bounds()
+        probe(watch=True)
+        self.eventually(lambda: any(a["name"] == "fleet-VIV" for a in self.run_stage()["sceneDepth"]["actors"]),
+                        "the fleet never entered the shared scene")
+        far = probe(depth=9, sample=True)
+        capture = os.environ.get("PARTY_DEPTH_CAPTURE")
+        if capture:
+            self.run_stage(capture=str(Path(capture).with_suffix(".far.png")))
+        self.assertEqual(far["scene"]["error"], "")
+        self.assertGreater(far["rosePixels"], 150, far)
+        self.assertGreater(far["greenPixels"], far["roiPixels"] * .25, "transparent actor padding hid the farther scene")
+        near = probe(depth=3, sample=True)
+        self.assertLess(near["rosePixels"], 5, "the nearer real GL plane failed to occlude VIV")
+        self.assertGreater(near["greenPixels"], far["greenPixels"])
+        if capture:
+            self.run_stage(capture=str(Path(capture).with_suffix(".near.png")))
+        crossed = probe(depth=9, sample=True)
+        self.assertGreater(crossed["rosePixels"], 150, "VIV failed to reappear in front of the farther plane")
+        self.assertTrue(crossed["stateRestored"], "the compositor leaked sampler/pixel-store/active-texture state")
+        self.assertGreater(crossed["stateChecks"], 1)
+        self.assertEqual(self.editor_draft(), draft)
+        self.assertEqual(self.magic_bounds(), bounds)
+        self.assertFalse(self.run_stage()["karaoke"]["mode"])
+        self.assertFalse(self.server.playback_requests or self.server.skip_requests or self.server.requests or self.server.message_attempts)
+        self.run_stage(restore=True)
+        self.assertFalse(any(o.get("objectName") == "partySceneDepth" for o in self.client.request("object.list", {})),
+                         "the final owner left a compositor behind")
+        probe(restore=True)
+
 
     def test_cursor_scope_covers_tooltips_dynamic_roles_and_release(self):
         # All pointer input stays on the fixture-owned Xvfb/PID, including a real
@@ -2042,6 +2287,255 @@ extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet
         self.write_state()
         self.eventually(lambda: not self.run_stage()["karaoke"]["active"], "stopped karaoke remained active")
         self.assertTrue(self.run_stage()["panelVisible"], "karaoke changed the guest panel")
+
+
+
+
+@unittest.skipUnless(can_draw(), "a private display is required")
+class SceneTransparency(unittest.TestCase):
+    def test_shared_scene_transparency_ground_and_provider_order(self):
+        stage = PartyStage()
+        self.addCleanup(stage.doCleanups)
+        stage.setUp(audio_stub=True)
+        client = stage.client
+        self.assertEqual(stage.environment["PULSE_SERVER"], "unix:" + str(stage.folder / "no-pulse-server"))
+        self.assertEqual(stage.environment["DISPLAY"], stage.display.number)
+        self.assertEqual(client.request("hello", {})["pid"], stage.process.pid)
+        source, library = stage.folder / "transparent_probe.cpp", stage.folder / "transparent_probe.so"
+        source.write_text(r"""#include "agent/agent_abi.h"
+#include "cube_widget.h"
+#include "demo/party_scene.h"
+#include <QJsonDocument>
+#include <QMap>
+#include <QPointer>
+namespace {
+QPointer<CubeWidget> cube;
+QPointer<party_scene::Scene> scene;
+QPointer<QObject> actorOwner, stateOwner;
+QMetaObject::Connection before, after;
+QString mode="none";
+QMap<QString,QImage> shots;
+float oldScale=1, oldSeconds=0;
+bool oldRunning=true, stateRestored=true;
+quint64 prepared=0, checked=0;
+GLint viewport[4]; GLdouble range[2];
+GLuint texture=0;
+void seed() {
+ auto* gl=QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(QOpenGLContext::currentContext());
+ gl->initializeOpenGLFunctions();
+ gl->glGetIntegerv(GL_VIEWPORT,viewport); gl->glGetDoublev(GL_DEPTH_RANGE,range);
+ gl->glViewport(viewport[0]+17,viewport[1]+19,viewport[2]-34,viewport[3]-38);
+ gl->glDepthRange(.17,.87); gl->glDisable(GL_PROGRAM_POINT_SIZE);
+ if(!texture)gl->glGenTextures(1,&texture);
+ gl->glActiveTexture(GL_TEXTURE0);gl->glBindTexture(GL_TEXTURE_2D,texture);
+ gl->glActiveTexture(GL_TEXTURE2);gl->glBindTexture(GL_TEXTURE_2D,0);
+ gl->glActiveTexture(GL_TEXTURE3);
+}
+void check() {
+ auto* gl=QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(QOpenGLContext::currentContext());
+ GLint active,bound0,bound2,vp[4];GLdouble currentRange[2];
+ gl->glGetIntegerv(GL_ACTIVE_TEXTURE,&active);gl->glGetIntegerv(GL_VIEWPORT,vp);
+ gl->glGetDoublev(GL_DEPTH_RANGE,currentRange);
+ gl->glActiveTexture(GL_TEXTURE0);gl->glGetIntegerv(GL_TEXTURE_BINDING_2D,&bound0);
+ gl->glActiveTexture(GL_TEXTURE2);gl->glGetIntegerv(GL_TEXTURE_BINDING_2D,&bound2);
+ stateRestored=stateRestored && active==GL_TEXTURE3 && GLuint(bound0)==texture && bound2==0
+  && !gl->glIsEnabled(GL_PROGRAM_POINT_SIZE) && std::abs(currentRange[0]-.17)<1e-6
+  && std::abs(currentRange[1]-.87)<1e-6 && vp[0]==viewport[0]+17 && vp[1]==viewport[1]+19;
+ ++checked;gl->glActiveTexture(GL_TEXTURE0);gl->glBindTexture(GL_TEXTURE_2D,0);
+ gl->glDepthRange(range[0],range[1]);gl->glViewport(viewport[0],viewport[1],viewport[2],viewport[3]);
+}
+void paint(party_scene::Frame& frame) {
+ if(mode=="none")return;
+ const QSizeF size=cube->size();const float depth=mode=="near"?2.F:18.F;
+ const auto submit=[&](const QString& name,const QRectF& rect,const QColor& color) {
+  const auto draw=[&](QPainter& p){p.fillRect(rect,color);};
+  if(mode=="ground")frame.ground(name,draw);else frame.add(name,depth,draw);
+ };
+ submit("private.partial-alpha",QRectF(.1*size.width(),.1*size.height(),.8*size.width(),.8*size.height()),QColor(250,70,30,128));
+ submit("private.equal-depth-peer",QRectF(.5*size.width(),.1*size.height(),.4*size.width(),.8*size.height()),QColor(40,80,190,64));
+ // Two off-sample flat actors split the ground across more than one interval.
+ // Their pixels do not overlap the measured ring or its partial-alpha actors.
+ for(float d:{4.5F,6.F}) frame.add("private.interval-boundary",d,[](QPainter& p){p.fillRect(QRect(2,2,6,6),QColor(255,255,255,128));});
+}
+int distance(const QColor& a,const QColor& b) {
+ return std::max({std::abs(a.red()-b.red()),std::abs(a.green()-b.green()),std::abs(a.blue()-b.blue())});
+}
+QJsonObject metrics() {
+ QJsonObject out;
+ if(!shots.contains("ground")||!shots.contains("base"))return out;
+ const auto& base=shots["base"];const auto& ring=shots["ring"];
+ const auto& front=shots["front"];const auto& far=shots["far"];const auto& ground=shots["ground"];
+ int samples=0,correct=0,orbital=0,orbitalCorrect=0,top=0,topFar=0,bottom=0,bottomNear=0,changed=0;
+ for(int y=int(base.height()*.12);y<base.height()*.88;y+=2)for(int x=int(base.width()*.12);x<base.width()*.88;x+=2) {
+  const QColor b=base.pixelColor(x,y),r=ring.pixelColor(x,y),f=front.pixelColor(x,y),e=far.pixelColor(x,y),g=ground.pixelColor(x,y);
+  const double a=128./255.,a2=x>=base.width()*.5?64./255.:0;
+  const auto channel=[&](int raw,int first,int second){return int(std::lround((first*a+raw*(1-a))*(1-a2)+second*a2));};
+  const QColor expected(channel(r.red(),250,40),channel(r.green(),70,80),channel(r.blue(),30,190));
+  if(r.blue()-b.blue()>14 && r.red()-b.red()>5){++samples;if(distance(f,expected)<=4)++correct;}
+  if(b.red()>40 && b.red()>b.blue()+30){++orbital;if(distance(f,expected)<=4)++orbitalCorrect;}
+  if(distance(f,e)<10)continue;
+  ++changed;
+  if(y<base.height()*.29){++top;if(distance(g,e)<=4)++topFar;}
+  if(y>base.height()*.68){++bottom;if(distance(g,f)<=4)++bottomNear;}
+ }
+ out.insert("ringSamples",samples);out.insert("frontCorrect",correct);
+ out.insert("orbitSamples",orbital);out.insert("orbitFrontCorrect",orbitalCorrect);
+ out.insert("topSamples",top);out.insert("topFarCorrect",topFar);
+ out.insert("bottomSamples",bottom);out.insert("bottomNearCorrect",bottomNear);out.insert("changedPixels",changed);
+ if(shots.contains("repeat")){
+  int changedOrder=0;
+  const auto& repeated=shots["repeat"];
+  for(int y=0;y<base.height();y+=2)for(int x=0;x<base.width();x+=2)
+   if(distance(ground.pixelColor(x,y),repeated.pixelColor(x,y))>1)++changedOrder;
+  out.insert("orderChangedPixels",changedOrder);
+ }
+ return out;
+}
+void release(const RuntimeAgentHost* host) {
+ QObject::disconnect(before);QObject::disconnect(after);
+ if(scene){scene->removeOwner(actorOwner,false);scene->removeOwner(stateOwner);}
+ delete actorOwner.data();delete stateOwner.data();actorOwner.clear();stateOwner.clear();
+ if(cube){
+  cube->makeCurrent();
+  auto* gl=QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(QOpenGLContext::currentContext());
+  if(texture)gl->glDeleteTextures(1,&texture);texture=0;cube->doneCurrent();
+  cube->m_scale=oldScale;cube->m_elapsedSeconds=oldSeconds;cube->setRunning(oldRunning);
+ }
+ shots.clear();cube.clear();scene.clear();host->complete_json(host->invocation_context,"{\"removed\":true}");
+}
+void run(const RuntimeAgentHost* host) {
+ const auto q=QJsonDocument::fromJson(QByteArray(host->request_json(host->invocation_context))).object();
+ if(q.value("restore").toBool()){release(host);return;}
+ if(!cube) {
+  cube=static_cast<CubeWidget*>(host->find_qobject(host->agent_context,"cubeView"));
+  oldScale=cube->m_scale;oldSeconds=cube->m_elapsedSeconds;oldRunning=cube->isRunning();
+  cube->setRunning(false);cube->m_scale=0;cube->m_elapsedSeconds=0;
+  before=QObject::connect(cube,&CubeWidget::frameRendered,cube,[](qulonglong,float){seed();},Qt::DirectConnection);
+  scene=party_scene::Scene::acquire(cube);actorOwner=new QObject(cube);stateOwner=new QObject(cube);
+  scene->addOwner(actorOwner,paint);
+  party_scene::GeometryPasses passes;passes.prepare=[] {
+   ++prepared;
+   auto* gl=QOpenGLVersionFunctionsFactory::get<QOpenGLFunctions_3_3_Core>(QOpenGLContext::currentContext());
+   gl->glActiveTexture(GL_TEXTURE2);
+  };
+  scene->addGeometryOwner(stateOwner,std::move(passes));
+  after=QObject::connect(cube,&CubeWidget::frameRendered,cube,[](qulonglong,float){check();},Qt::DirectConnection);
+ }
+ if(q.contains("mode")){mode=q.value("mode").toString();scene->addOwner(actorOwner,paint);}
+ if(q.contains("sample")){
+  const auto key=q.value("sample").toString();shots[key]=cube->grabFramebuffer();
+  if(q.contains("capture"))shots[key].save(q.value("capture").toString());
+ }
+ QJsonObject result=metrics();result.insert("scene",scene->status());result.insert("stateRestored",stateRestored);
+ result.insert("windowId",qint64(cube->window()->winId()));result.insert("paneSize",QJsonArray{cube->width(),cube->height()});
+ result.insert("prepared",qint64(prepared));result.insert("checked",qint64(checked));
+ host->complete_json(host->invocation_context,QJsonDocument(result).toJson(QJsonDocument::Compact).constData());
+}
+const RuntimeAgentSnippet descriptor{RUNTIME_AGENT_ABI,sizeof(RuntimeAgentSnippet),"private transparent depth fixture",&run,&release};
+}
+extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet_init(){return &descriptor;}
+""")
+        compiled = subprocess.run([sys.executable, str(ROOT / "tools" / "compile_snippet.py"),
+            "--compile-db", str(BUILD / "compile_commands.json"), "--context", "snippets/party_stage.cpp",
+            "--source", str(source), "--output", str(library), "--compact"], capture_output=True, text=True)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        probe_module = client.request("snippet.load", {"path": str(library)})["moduleId"]
+
+        def invoke(module, executor="render", **request):
+            started = client.request("snippet.run", {"moduleId": module, "executor": executor, "request": request})
+            result = client.wait_for_operation(started["operationId"], timeout=10)["data"]
+            self.assertEqual(result["outcome"], "completed", result)
+            return result["result"]
+
+        def probe(**request):
+            return invoke(probe_module, "gui", **request)
+
+        window = str(probe(mode="none")["windowId"])
+        subprocess.run(["xdotool", "windowsize", "--sync", window, "2560", "1600"],
+                       env=stage.environment, check=True)
+        stage.eventually(lambda: probe()["paneSize"][0] >= 2500, "the exact private main window did not resize")
+        orbit, mobius = stage.geometry_modules["orbit_sphere"], stage.geometry_modules["mobius_ring"]
+        parameters = {"radius": 1.5, "width": .28, "tilt": 35, "spin": 0, "edgeInset": .02}
+        invoke(mobius, **parameters, alpha=0)
+        invoke(orbit)
+        probe(sample="base")
+        invoke(mobius, alpha=.6)
+        probe(sample="ring")
+        capture = os.environ.get("PARTY_DEPTH_CAPTURE")
+        front = {"capture": str(Path(capture).with_suffix(".transparent-front.png"))} if capture else {}
+        ground = {"capture": str(Path(capture).with_suffix(".transparent-ground.png"))} if capture else {}
+        probe(mode="near", sample="front", **front)
+        probe(mode="far", sample="far")
+        measured = probe(mode="ground", sample="ground", **ground)
+        self.assertEqual(measured["scene"]["error"], "")
+        self.assertGreater(measured["ringSamples"], 300, measured)
+        self.assertGreater(measured["frontCorrect"], measured["ringSamples"] * .97, measured)
+        self.assertGreater(measured["orbitSamples"], 100, measured)
+        self.assertGreater(measured["orbitFrontCorrect"], measured["orbitSamples"] * .97, measured)
+        self.assertGreater(measured["changedPixels"], 500, measured)
+        self.assertGreater(measured["topSamples"], 100, measured)
+        self.assertGreater(measured["bottomSamples"], 100, measured)
+        self.assertGreater(measured["topFarCorrect"], measured["topSamples"] * .97, measured)
+        self.assertGreater(measured["bottomNearCorrect"], measured["bottomSamples"] * .97, measured)
+        self.assertTrue(measured["stateRestored"], measured)
+
+        # Replace the actual legacy providers with distinct loaded generations,
+        # in the opposite registration order, while the actor registry survives.
+        import shutil
+        invoke(mobius, restore=True)
+        invoke(orbit, restore=True)
+        replacements = {}
+        for name in ("orbit_sphere", "mobius_ring"):
+            copied = stage.folder / f"{name}-next.so"
+            shutil.copyfile(BUILD / f"agent_snippet_{name}.so", copied)
+            replacements[name] = client.request("snippet.load", {"path": str(copied)})["moduleId"]
+        orbit, mobius = replacements["orbit_sphere"], replacements["mobius_ring"]
+        invoke(orbit)
+        invoke(mobius, **parameters, alpha=.6)
+        repeated = probe(sample="repeat")
+        self.assertEqual(repeated["orderChangedPixels"], 0, repeated)
+
+        stage.state["nowPlaying"] = None
+        stage.state["scene"]["mode"] = "quiet"
+        stage.write_state()
+        stage.run_stage(stateFile=str(stage.state_file),
+                        composerDraft={"text": "Isti nacrt, zajednička dubina.", "cursor": 15, "anchor": 4})
+        draft, bounds = stage.editor_draft(), stage.magic_bounds()
+        audio = client.request("snippet.load", {"path": str(BUILD / "agent_snippet_audio_pulse.so")})["moduleId"]
+        invoke(audio, device=stage.audio_device, style="city", stateFile="", events=False)
+        stage.eventually(lambda: invoke(audio)["captureHops"] >= 5 and invoke(audio)["framesPrepared"] >= 3,
+                         "the private synthetic capture did not prepare frames")
+        city = invoke(audio)
+        self.assertTrue(city["capturing"])
+        self.assertEqual(city["configuredDevice"], stage.audio_device)
+        self.assertEqual(city["backgroundDraws"], city["framesPrepared"])
+        self.assertEqual(city["sliceDraws"], 0)
+        invoke(audio, style="ring")
+        before = invoke(audio)
+        time.sleep(.25)
+        after = invoke(audio)
+        after_probe = probe()
+        prepared = after["framesPrepared"] - before["framesPrepared"]
+        self.assertGreater(prepared, 2)
+        # These counters share one native status read. Separate socket calls
+        # can span arbitrary real paints while the host is busy.
+        self.assertEqual(after_probe["prepared"], after_probe["scene"]["frames"])
+        self.assertGreaterEqual(after["sliceDraws"] - before["sliceDraws"], prepared * 3)
+        self.assertGreater(after["vertices"], 0)
+        self.assertTrue(after_probe["stateRestored"], after_probe)
+        self.assertEqual(stage.editor_draft(), draft)
+        self.assertEqual(stage.magic_bounds(), bounds)
+        self.assertFalse(stage.run_stage()["karaoke"]["mode"])
+        self.assertFalse(stage.server.playback_requests or stage.server.skip_requests
+                         or stage.server.requests or stage.server.message_attempts)
+        invoke(audio, restore=True)
+        # Stage release restores the geometry actions it observed on entry.
+        # Let that restoration finish before removing the fixture's providers.
+        stage.run_stage(restore=True)
+        invoke(mobius, restore=True)
+        invoke(orbit, restore=True)
+        probe(restore=True)
+        self.assertFalse(any(o.get("objectName") == "partySceneDepth" for o in client.request("object.list", {})))
 
 
 if __name__ == "__main__":

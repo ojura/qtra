@@ -1,9 +1,8 @@
 // Draws a shaded sphere orbiting the cube, installed into the live process.
 //
-// paintGL() emits frameRendered() after the cube is drawn and after polygon
-// mode is restored, while the context is still current and the depth buffer
-// still holds the cube. A direct connection to that signal is therefore a
-// per-frame draw hook that gets correct occlusion for free.
+// The shared party scene draws the sphere in its opaque phase after the host
+// cube and before translucent actors. Preparation reads the host's elapsed
+// time once per frame, and the opaque callback uses those prepared matrices.
 //
 // Loading the snippet also adds a checkable "Orbiting sphere" entry to the Cube
 // menu, so the sphere can be switched from the GUI as well as over the socket.
@@ -11,18 +10,22 @@
 
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "demo/party_scene.h"
 #include "scene_toggle.h"
 
+#include <QApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalBlocker>
 #include <QMatrix4x4>
-#include <QMetaObject>
+#include <QObject>
 #include <QOpenGLBuffer>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
+#include <QPointer>
+#include <QThread>
 #include <QVector3D>
 
 #include <cmath>
@@ -70,9 +73,12 @@ void main()
 )glsl";
 
 struct OrbitState {
-    // The context the GL objects below belong to. They exist in no other, so a
-    // frame drawn by a different context must be left alone.
+    // Rendering and resource destruction use the context that created them.
     QOpenGLContext* owner = nullptr;
+    QObject geometryOwner;
+    QPointer<party_scene::Scene> scene;
+    QMatrix4x4 mvp;
+    QMatrix3x3 normalMatrix;
     QOpenGLShaderProgram program;
     QOpenGLBuffer vertexBuffer{QOpenGLBuffer::VertexBuffer};
     QOpenGLBuffer indexBuffer{QOpenGLBuffer::IndexBuffer};
@@ -81,7 +87,6 @@ struct OrbitState {
 };
 
 OrbitState* orbit = nullptr;
-QMetaObject::Connection drawConnection;
 QAction* toggleAction = nullptr;
 int lastVertexCount = 0;
 
@@ -118,10 +123,10 @@ void buildSphere(std::vector<float>& vertices, std::vector<unsigned short>& indi
     }
 }
 
-void drawOrbitingSphere(const CubeWidget* cube)
+void prepareOrbitingSphere(const CubeWidget* cube, OrbitState& state)
 {
     QOpenGLContext* context = QOpenGLContext::currentContext();
-    if (orbit == nullptr || context == nullptr || context != orbit->owner) {
+    if (context == nullptr || context != state.owner) {
         return;
     }
 
@@ -134,15 +139,32 @@ void drawOrbitingSphere(const CubeWidget* cube)
     QMatrix4x4 view;
     view.translate(0.0F, 0.0F, -cubeViewDistance);
 
-    orbit->program.bind();
-    orbit->program.setUniformValue("mvp", cube->m_projection * view * model);
-    orbit->program.setUniformValue("normalMatrix", model.normalMatrix());
-    orbit->program.setUniformValue("baseColor", QVector3D(1.0F, 0.74F, 0.26F));
-    orbit->vertexArray.bind();
-    context->functions()->glDrawElements(
-        GL_TRIANGLES, orbit->indexCount, GL_UNSIGNED_SHORT, nullptr);
-    orbit->vertexArray.release();
-    orbit->program.release();
+    state.mvp = cube->m_projection * view * model;
+    state.normalMatrix = model.normalMatrix();
+}
+
+void drawOrbitingSphere(OrbitState& state)
+{
+    QOpenGLContext* context = QOpenGLContext::currentContext();
+    if (context == nullptr || context != state.owner) {
+        return;
+    }
+
+    auto* gl = context->functions();
+    gl->glEnable(GL_DEPTH_TEST);
+    gl->glDepthFunc(GL_LEQUAL);
+    gl->glDepthMask(GL_TRUE);
+    gl->glDisable(GL_BLEND);
+    gl->glDisable(GL_SCISSOR_TEST);
+    gl->glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    state.program.bind();
+    state.program.setUniformValue("mvp", state.mvp);
+    state.program.setUniformValue("normalMatrix", state.normalMatrix);
+    state.program.setUniformValue("baseColor", QVector3D(1.0F, 0.74F, 0.26F));
+    state.vertexArray.bind();
+    gl->glDrawElements(GL_TRIANGLES, state.indexCount, GL_UNSIGNED_SHORT, nullptr);
+    state.vertexArray.release();
+    state.program.release();
 }
 
 // Needs the widget's OpenGL context to be current.
@@ -189,11 +211,18 @@ bool installSphere(CubeWidget* cube, QString& error)
     state->vertexArray.release();
     state->vertexBuffer.release();
 
+    state->scene = party_scene::Scene::acquire(cube);
+    if (!state->scene) {
+        error = QStringLiteral("Release the incompatible party scene owners first");
+        delete state;
+        return false;
+    }
+    state->geometryOwner.setObjectName(QStringLiteral("partyOrbitGeometry"));
+    party_scene::GeometryPasses passes;
+    passes.prepare = [cube, state] { prepareOrbitingSphere(cube, *state); };
+    passes.opaque = [state] { drawOrbitingSphere(*state); };
+    state->scene->addGeometryOwner(&state->geometryOwner, std::move(passes));
     orbit = state;
-    drawConnection = QObject::connect(
-        cube, &CubeWidget::frameRendered, cube,
-        [cube](qulonglong, float) { drawOrbitingSphere(cube); },
-        Qt::DirectConnection);
     cube->update();
     return true;
 }
@@ -201,7 +230,7 @@ bool installSphere(CubeWidget* cube, QString& error)
 // Needs the widget's OpenGL context to be current.
 void removeSphere(CubeWidget* cube)
 {
-    QObject::disconnect(drawConnection);
+    if (orbit->scene) orbit->scene->removeOwner(&orbit->geometryOwner);
     orbit->vertexArray.destroy();
     orbit->vertexBuffer.destroy();
     orbit->indexBuffer.destroy();
@@ -261,18 +290,15 @@ void ensureToggleAction(CubeWidget* cube)
     syncToggleAction();
 }
 
-// Undo whatever run() installed. Declared in the descriptor so a caller can ask
-// whether this module can be released and get an answer, instead of sending a
-// payload and hoping something acted on it.
-//
-// Tearing the GL objects down needs this widget's context current, which holds
-// only inside its paint callbacks. Deferring to the next frame would report
-// completion before the scene is actually back, and a handover sequenced on
-// that completion would hand the next generation state this one still owns. So
-// this refuses; it does not defer.
+// Release runs synchronously with the cube's own OpenGL context current, so
+// completion follows owner deregistration and GL resource destruction.
 void release(const RuntimeAgentHost* host)
 {
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
+        return;
+    }
+    if (!qApp || QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "Use the GUI render executor to release the orbiting sphere");
         return;
     }
     auto* cube = static_cast<CubeWidget*>(
@@ -303,6 +329,10 @@ void run(const RuntimeAgentHost* host)
     if (host == nullptr || host->abi_version != RUNTIME_AGENT_ABI) {
         return;
     }
+    if (!qApp || QThread::currentThread() != qApp->thread()) {
+        host->fail(host->invocation_context, "Use the GUI render executor for the orbiting sphere");
+        return;
+    }
 
     auto* cube = static_cast<CubeWidget*>(
         host->find_qobject(host->agent_context, "cubeView"));
@@ -310,9 +340,9 @@ void run(const RuntimeAgentHost* host)
         host->fail(host->invocation_context, "cubeView was not found");
         return;
     }
-    if (QOpenGLContext::currentContext() == nullptr) {
+    if (!scene_toggle::ownContextIsCurrent(cube)) {
         host->fail(host->invocation_context,
-                   "no OpenGL context is current; use executor=render");
+                   "the widget's OpenGL context is not current; use executor=render");
         return;
     }
 
@@ -360,7 +390,7 @@ void run(const RuntimeAgentHost* host)
 
     complete(QJsonObject{
         {QStringLiteral("installed"), true},
-        {QStringLiteral("connectionValid"), static_cast<bool>(drawConnection)},
+        {QStringLiteral("connectionValid"), !orbit->scene.isNull()},
         {QStringLiteral("vertices"), lastVertexCount},
         {QStringLiteral("indices"), orbit->indexCount},
         {QStringLiteral("orbitRadius"), orbitRadius},
