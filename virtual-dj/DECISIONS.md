@@ -4,17 +4,17 @@
 
 The overnight consolidation finished after chat 170's pause and chats 245/246's request for reusable tools and quiet rehearsal. The reviewed release through eb347e6d4878de2ab41890d12cae06f35ed28fd3 is deployed and pushed. Its checkpoint preserved q142 / Djurdjevdan paused at 65719 ms on juraj-legion. The host subsequently resumed through the native controls, and the morning session is now actively curated. Speech remains disabled; request 278 reenabled occasional book photographs.
 
-The service now runs as PID 2180455. The existing qtra host, PID 399021, retains stage 18 and dance 16; the scoped Tab/F11 helper is PID 1472276. Native shortcut commit 8c692a11edfc3999091ebbdbea42d39ad352d13a and guarded-navigation commit 28a3565f616e9be11031e13ee4498ff82633a3a9 are deployed and pushed. The replacement preserved the latest draft, cursor/selection, query, selected song, alternate draft, last-sent ID, editor mode, name, focus and fullscreen state. Read-only observation confirmed the same standalone device and q164 playing through the service update. Stage 18 reports all five matching shortcut controls enabled with autorepeat disabled. Private fixtures remain the engineering test path.
+The service currently runs as PID 2180455. The existing qtra host, PID 399021, uses stage 19 and dance 20; the scoped Tab/F11 helper is PID 1472276. Native shortcuts 8c692a1 and guarded navigation 28a3565 were followed by Ctrl+L mode a275840, actual catalogue readiness fe53793, endpoint-clock validity 74a6f89, rotating kolo/tram visuals 3b752ef, Croatian guest pages 8d573c3 and targeted queue addition 43ca39b. All are deployed and pushed. Native replacements preserved the latest draft, cursor/selection, query, selected song, alternate draft, last-sent ID, editor mode, name, focus and fullscreen. Dance 20 naturally changed kolo to tram at its independent 60-second boundary with the same song, connected audio and no state/audio errors. Actual lyric acquisition is the remaining Ctrl+L integration; its source and service passed focused private checks and one integrated review.
 
-The overnight outcome reconciliation recorded 60 message IDs in 25 groups: 39 completed, one waiting, seven blocked and 13 cancelled. All 25 originally migrated records retained acceptedAt:null. The seven morning engineering requests and later 296/297 shortcut requests are completed with evidence, as are 301's ska continuation and 302's specifically renewed voice dedication. The shortcut-release reconciliation recorded 50 completed, two waiting, seven blocked and 13 cancelled records, with no active processing marker. Subsequent request 307 is active for the Ctrl+L lyrics mode, and 309 is completed with the observed visual change. Anthem request 290 awaits its title or lyric; request 222 remains open with actual reply measurements below. Historical sender and resume-origin questions remain unresolved.
+The overnight outcome reconciliation recorded 60 message IDs in 25 groups: 39 completed, one waiting, seven blocked and 13 cancelled. All 25 originally migrated records retained acceptedAt:null. The seven morning engineering requests and later 296/297 shortcut requests are completed with evidence, as are 301's ska continuation and 302's specifically renewed voice dedication. The shortcut-release reconciliation recorded 50 completed, two waiting, seven blocked and 13 cancelled records, with no active processing marker. Subsequent request 307 remains active for actual-source Ctrl+L lyrics, while 309, 313, 316 and 317 are completed with observed scene, rotation and Croatian-interface outcomes. Antonio's 322/324 direction led to an explicit Mance selection; 328 also confirmed MAMA ŠČ!. Their queue recovery follows the repaired targeted addition path. Anthem request 290 awaits its title or lyric; request 222 remains open with actual reply measurements below. Historical sender and resume-origin questions remain unresolved.
 
 The [operator entry](README.md), [playbook](PLAYBOOK.md), [lessons](LESSONS.md), [rehearsal report](REHEARSAL.md) and [music directions](seeds/music-directions.json) form the reusable material. Tonight's artists, visuals and schedule are examples that a future audience can replace. Attributed descriptive search, independent exact search, recall, the native layout corrections, artwork, upcoming tracks, explicit play/pause and durable work states are deployed.
 
 ## Context and coverage
 
-Sources are the initial main ChatGPT messages supplied by the root worker; the two original private user_message entries recovered from CoS session 2026-11-16-74b96236; and the local party database `~/.local/state/larics-dj/party.sqlite3`, opened read-only. The canonical `chat` table was compared with user-role `chat` events. The inventory includes 164 archived user-role messages through chat 309, including the deleted Interface QA row retained as event 4, duplicates, withdrawn text and disputed authorship. Chat IDs and event IDs are different namespaces. Request IDs are included when present in the canonical row.
+Sources are the initial main ChatGPT messages supplied by the root worker; the two original private user_message entries recovered from CoS session 2026-11-16-74b96236; and the local party database `~/.local/state/larics-dj/party.sqlite3`, opened read-only. The canonical `chat` table was compared with user-role `chat` events. The inventory includes 170 archived user-role messages through chat 328, including the deleted Interface QA row retained as event 4, duplicates, withdrawn text and disputed authorship. Chat IDs and event IDs are different namespaces. Request IDs are included when present in the canonical row.
 
-The private recovery reached sequence 2548 with caught_up=true. Root confirmed this is also the root CoS session, so no separate private session remains unexamined. Read-only canonical chat rows and retained chat events were reconciled through chat 291. Canonical message-info records add the subsequent native requests 296/297, recalled Madness request 299, requests 301/302, and the lyrics/visual requests 307/309; the morning inventory now adds twenty canonical guest messages, including recalled 271. The validation compares every archived user text with its canonical row, while retaining the event-only Interface QA record separately. New instructions should be appended here and their affected decisions updated, without creating a separate archive pile.
+The private recovery reached sequence 2548 with caught_up=true. Root confirmed this is also the root CoS session, so no separate private session remains unexamined. Read-only canonical chat rows and retained chat events were reconciled through chat 291. Canonical message-info records add the subsequent native requests 296/297, recalled Madness request 299, requests 301/302, the lyrics/visual requests 307/309, the scene/language requests 313/316/317 and music directions 322/324/328; the morning inventory now adds twenty-six canonical guest messages, including recalled 271. The validation compares every archived user text with its canonical row, while retaining the event-only Interface QA record separately. New instructions should be appended here and their affected decisions updated, without creating a separate archive pile.
 
 “Delivered” below means a live implementation was observed. “Pending” means implementation, integrated checks or deployment remain. A technical test can pass while an audience performance has failed; karaoke and dedications are recorded that way.
 
@@ -40,7 +40,7 @@ The post-party handoff stopped legacy watcher PID 405871 and drained its final o
 
 ### Native interface
 
-The deployed stage 18 keeps the 600 px panel and 29 px text, a bottom multiline Magic box, larger floating song suggestions and an optional dedication after selection. Exact catalogue search remains immediate; descriptive search returns selectable candidates with their match basis and sources. Enter sends and Shift+Enter adds a line. Escape or the small × recalls the latest own unaccepted message while preserving another draft. A read receipt alone does not accept work.
+The deployed stage 19 keeps the 600 px panel and 29 px text, a bottom multiline Magic box, larger floating song suggestions and an optional dedication after selection. Exact catalogue search remains immediate; descriptive search returns selectable candidates with their match basis and sources. Enter sends and Shift+Enter adds a line. Escape or the small × recalls the latest own unaccepted message while preserving another draft. A read receipt alone does not accept work.
 
 The native changes include scrollbar contrast, a pointer enlarged only inside DJ controls, a smaller footer, Spotify artwork, a longer upcoming-song preview and an actual-state play/pause indicator. The current-track progress clock holds on pause, buffering or stale observations. Scrolling returns smoothly after approximately two minutes without interaction or a user/DJ reply, superseding the earlier 20-second rule. Tab and F11 work through the scoped helper. Private tests passed, and deployment preserved draft, focus and fullscreen. See [native stage](../docs/party-stage.md) and [interface outcomes](#post-party-interface-work).
 
@@ -48,7 +48,7 @@ The native changes include scrollbar contrast, a pointer enlarged only inside DJ
 
 The book and old viewer/soliloquy work supplied reusable visual ideas. Photo sizing progressed through several explicit corrections, finally 75% of the free main pane with the visualizer around it. Chat 153 stopped all photos for that act. Morning request 278 later reenabled occasional curated photographs with calm visuals; the current audience direction governs the runtime switch.
 
-Visual changes were initially too slow. City/waterfall replaced the repeated Möbius/sphere, and the cadence changed from 45 minutes to 10 minutes after 151. Disco, streamers, conga and stadium acts are retained as a seed. Chats 159/160/165/166 required large objects tied to each actual song, readable from a distance on a 15-inch laptop; module 14 deployed that behaviour and an actual song-theme change was observed. See [party stage](../docs/party-stage.md), [audio acts](../docs/audio-acts.md), [dance source](../snippets/party_dance.cpp) and the [book guide](../tools/party_dj/BOOK.md).
+Visual changes were initially too slow. City/waterfall replaced the repeated Möbius/sphere, and the cadence changed from 45 minutes to 10 minutes after 151. Disco, streamers, conga and stadium acts are retained as a seed. Requests 313/317 added a real linked kolo and a blue tram with dancing passengers in dance 20. All six forms now rotate every 60 seconds independently of the song-triggered props; manual form selection remains available. Chats 159/160/165/166 required large objects tied to each actual song, readable from a distance on a 15-inch laptop; module 14 deployed that behaviour and an actual song-theme change was observed. See [party stage](../docs/party-stage.md), [audio acts](../docs/audio-acts.md), [dance source](../snippets/party_dance.cpp) and the [book guide](../tools/party_dj/BOOK.md).
 
 ### Karaoke and spoken dedications
 
@@ -109,6 +109,20 @@ Review closed the concrete old-service callback, stale result, same-expiry lease
 
 Requests 296/297 are completed. Five matching clickable controls now sit beside Svira and above Daj pjesmu, with a single guestShortcuts specification supplying labels and bindings. Ctrl+N and Ctrl+B share the play/pause command guard, suppress autorepeat and use the authenticated occurrence/device-checked skip route. Spotify's native previous behavior is preserved: near the start it returns to the previous song; later it restarts the current song when seeking is allowed. Confirmation requires fresh actual Harmony clocks and device/occurrence evidence, with a demonstrated rewind for a same-occurrence restart. Four targeted native cases, 58 bridge fixtures, 26 client cases and 15 focused backend cases plus all 18 guard checks passed. Root and peer reviews closed the concrete tooltip, restart-evidence and common-clock findings. Native 8c692a1 and service/transport 28a3565 are deployed and pushed; app 306 acknowledged the release once.
 
+### Noon visual, language and queue repairs
+
+Request 307's local mode is deployed in a275840 / stage 19. Ctrl+L opens and closes Stihovi through the shared shortcut specification, preserves the user's choice across module replacement and leaves the latest editor state intact. Three isolated native cases passed in 18.027 seconds; root inspected the private captures. App 321 accurately reported the working toggle and the unfinished acquisition. The new provider/service uses the exact actual URI, occurrence UID and device, with an authenticated read-only endpoint, bounded existing-connection polling and original source line starts. Fourteen Python cases, 18 unchanged silence guards and 17 JavaScript scenarios passed; the single integrated review closed without a blocking finding. Native consumption and deployed current-song reading remain to finish.
+
+Requests 313/317 are completed by 3b752ef / dance 20. The kolo joins eight large robots at shared hand coordinates in a closed ring; the new blue tram carries six dancing passengers. The common six-form list and independent 60-second timer persist across module replacement. Three private cases passed in 29.225 seconds, including rendering, timer independence, malformed input, reload deadlines, wraparound and manual hold; root inspected the actual kolo/tram captures and the focused peer review closed. Deployment preserved the same host, editor, focus and fullscreen. A natural kolo/closed-ring to tram/tram-passengers transition advanced nextActAt by exactly 60000 ms while song revision 49 stayed unchanged. The drawing counter advanced from 3101 to 3482, audio stayed connected and state/audio errors were empty. App 329 acknowledged the release. Work 313/317 was completed at 1794916012146, and all eight private root preview images were removed.
+
+Request 316 is completed by 8d573c3. The web interface now uses Croatian labels, guidance, statuses, accessibility names and errors, with hr-HR times. Fourteen private cases and the focused loading-error correction passed. Actual 1440-pixel desktop and 390-pixel mobile captures fit without overflow; served / and /app.js returned 200 and exactly matched committed bytes. No service restart was needed. App 327 acknowledged the release and work 316 was completed at 1794916012228. The private browser/profile/server and preview images were cleaned.
+
+Catalogue fe53793 / bridge v12 binds actual all-songs query results and rendered item identity, fixing the empty top-holder readiness gate. It passed 61 bridge fixtures. The Smogovci description b8ba65c0-49b6-4dc1-9122-a56a13add2e7, submitted as “ona na početku smogovaca”, resolved into six selectable recordings at 1794914443458, including Elmer Bernstein, Main Title and Calvera, URI spotify:track:4zI1nj0SNYmZzeEa4WQznF, duration 236402 ms. The match records the HRT source used by the DJ. App 320 asked whether this also identified the requested LARICS anthem; no answer or selection was observed at this checkpoint. Resolution took 1160.429 seconds from description creation; the earlier identification reply took 86.911 seconds. These are separate from chat acknowledgement times.
+
+Clock repair 74a6f89 / bridge v13 passed 64 fixtures and marks a playing occurrence with an exhausted endpoint anchor as clock-invalid. Explicitly paused or buffering endpoint observations retain their real held clock. It preserves numeric fields and actual playing flags; no test transport command was sent.
+
+Three real additions exposed a separate wrapper defect: saved Gangsters request dj-ska-301-gangsters-1, Skatalites request dj-ska-301-skatalites-1 and Antonio's Mance request b880d416-3af6-4848-b4e5-1006a04ce8e4 became uncertain after dispatch and a synthetic-local-state error. Spotify's public queue wrapper dropped the manager promise and omitted the device target. The absence was checked in fresh actual current, complete queue and available history; the original operation records were preserved. A second service request for Gangsters was URI-deduplicated to the first uncertain row and sent no new command. Bridge v14 / 43ca39b calls the awaitable manager with the native device, checks actual occurrence and explicit queue immediately before dispatch, and confirms a new UID on the same device after acknowledgement. Its 69 focused fixtures passed in 2.097 seconds. The existing controller loaded v14 and observed Živeti slobodno... on juraj-legion at 76951 ms with a valid playing clock and empty explicit queue. No release transport test was sent. Book owns deliberate recovery of the exact guest-selected Mance first, followed by the now-confirmed MAMA ŠČ! request, with new operation identity only after an absent-item assessment and normal saved-request reconciliation. The one assessed Mance operation, assessed-mance-b880d416-v14-20261117, returned dispatched uncertainty at 1794916130087 because the manager returned false. It was not retried; actual queue/current observation is required to determine whether an occurrence landed.
+
 #### Actual reply latency
 
 Request 222 remains open. The original measured baseline was 108.829 seconds. Subsequent guest creation to first acknowledgement times are preserved together:
@@ -133,16 +147,24 @@ Request 222 remains open. The original measured baseline was 108.829 seconds. Su
 | 302 | 304 | 41.865 |
 | 307 | 308 | 24.935 |
 | 309 | 311 | 73.359 |
+| 313 | 314 | 39.034 |
+| 316 | 318 | 42.022 |
+| 317 | 319 | 32.878 |
+| 322 | 323 | 51.403 |
+| 324 | 325 | 63.028 |
+| 328 | 330 | 59.621 |
 
-The 272 measurement uses the active repost; the withdrawn 271 is not substituted for it. For instrumented deliveries, tool receipt to reply was 11.121 seconds for 276, 5.065 for 278, 265.872 for 285 and 5.635 for 287. The 285 interval included observed command/chat delivery delays and an MCP timeout; the stable reply request ID eventually produced message 286 once. The listener was also delayed by ancillary engineering bookkeeping, which root has now taken over. The later 290/291 samples include the listener's context-restoration delay; 291 took 19.502 seconds from actual tool receipt to reply. Requests 296/297 received one acknowledgement in 298, 16.337 seconds after the listener's actual tool receipt. For 301 and 302, actual receipt-to-reply times were 4.710 and 30.453 seconds respectively. Requests 307 and 309 took 11.893 and 25.289 seconds from actual receipt to their first replies. The full samples remain the evidence while subsequent real input is observed.
+The 272 measurement uses the active repost; the withdrawn 271 is not substituted for it. For instrumented deliveries, tool receipt to reply was 11.121 seconds for 276, 5.065 for 278, 265.872 for 285 and 5.635 for 287. The 285 interval included observed command/chat delivery delays and an MCP timeout; the stable reply request ID eventually produced message 286 once. The listener was also delayed by ancillary engineering bookkeeping, which root has now taken over. The later 290/291 samples include the listener's context-restoration delay; 291 took 19.502 seconds from actual tool receipt to reply. Requests 296/297 received one acknowledgement in 298, 16.337 seconds after the listener's actual tool receipt. For 301 and 302, actual receipt-to-reply times were 4.710 and 30.453 seconds respectively. Requests 307 and 309 took 11.893 and 25.289 seconds from actual receipt to their first replies. For 313, 316 and 317, actual receipt-to-reply was 32.747, 7.127 and 7.668 seconds; for 322, 324 and 328 it was 23.675, 25.614 and 4.877 seconds. The canonical 328 creation/reply timestamps give 59.621 seconds, correcting an initial reported 61.621. The full samples remain the evidence while subsequent real input is observed.
 
 The Madness description following recalled chat 299 was resolved with two selectable exact recordings. The first description took 187.530 seconds from creation to resolution and 107.568 seconds from actual listener receipt. The guest had meanwhile resubmitted the description; that current request was resolved in 75.284 seconds from creation and 15.443 seconds from receipt. These are descriptive-search resolution times, separate from acknowledgement timing. The listener retained the same watcher and began draining all already-retained event pages before acting; it continues to measure actual response delay.
 
 After this release, Desktop Executor command, retained-output and read calls suffered intermittent MCP timeouts, followed by an explicit tunnel_client_not_connected failure. A direct wait=0 event read and later retained-stream recovery caught up without missed guest text; the same watcher and stable reply IDs were preserved. Failed completion writes were read back before reconciliation. Native collaboration remained available throughout.
 
-The native player later remained at Pressure Drop's end with a pause icon and a corked stream, while the controller first repeated q165 and then rejected synthetic local state. It subsequently reobserved q166. Audit event 905 recorded a guarded next through source native / operator qtra-native; event 906 reported dispatched uncertainty. No DJ agent issued that command. Later observations confirmed A gdje si ti advancing, the native title aligned, and the original stream uncorked on the same Bluetooth sink. Suada followed naturally at event 912. The proposed DJ recovery command was cancelled. The clock-validity problem at an old track-end anchor and the catalogue's false loading response remain distinct engineering follow-ups.
+A later outage after the 12:50 checkpoint caused explicit MCP -32603 timeouts on file edits, reads, private chat, status/presence and the retained listener, followed by tunnel_client_not_connected / HTTP 404. The cloud CUA interface was removed, and the local shell/edit fallback reported no usable execution environment. Native collaboration remained available and supplied standby. Book preserved event cursor 990 and byte offset 1091385 on the same session 63126; no uncertain addition was replayed. A 13:00:10 host-side retained read was recorded as successful but its result missed the tunnel response deadline. Root then recovered private continuity and a fresh laptop file read; the timed-out decision-document patch was confirmed absent before retry. Actual queue reconciliation and lyrics deployment resumed from their held state.
 
-Request 307 adds a local Ctrl+L lyrics mode that must use the exact current occurrence and existing clock deadline. Stage owns its shared shortcut and renderer changes; backend acquisition is being inspected. Request 309 immediately changed the scene to a brighter city and lasers. Event 919 and a read-only dance16 status confirmed the streamers act, automatic rotation, connected audio and 688728 rendered frames. App 312 reported that observed change. The listener continues to vary form as well as colour.
+The native player later remained at Pressure Drop's end with a pause icon and a corked stream, while the controller first repeated q165 and then rejected synthetic local state. It subsequently reobserved q166. Audit event 905 recorded a guarded next through source native / operator qtra-native; event 906 reported dispatched uncertainty. No DJ agent issued that command. Later observations confirmed A gdje si ti advancing, the native title aligned, and the original stream uncorked on the same Bluetooth sink. Suada followed naturally at event 912. The proposed DJ recovery command was cancelled. The distinct clock-validity and false catalogue-loading defects were subsequently fixed in 74a6f89 and fe53793.
+
+Request 307's local Ctrl+L mode is deployed; actual-source acquisition and native integration are progressing as recorded above. Request 309 immediately changed the scene to a brighter city and lasers. Event 919 and a read-only dance16 status confirmed the streamers act, automatic rotation, connected audio and 688728 rendered frames. App 312 reported that observed change. The listener continues to vary form as well as colour.
 
 ### Withdrawn and disputed input
 
@@ -1592,7 +1614,7 @@ Origin: Gost; 17/11/2026, 11:57:31 Europe/Zagreb; source native; requestId `0827
 
 > ctrl+L za LYRICS mod (karaoke)
 
-Outcome: In progress: Ctrl+L and its matching header control are being added as a local lyrics/karaoke mode. The native renderer will use only a sheet bound to the current Spotify occurrence, with explicit unavailable/waiting states and preserved editor, focus and playback. Current-song lyric acquisition is being inspected separately.
+Outcome: In progress: Ctrl+L and its matching header control are deployed in stage 19 and preserve the user's editor, focus and playback. Actual-source lyric acquisition has passed its focused checks and integrated review; native target/generation-bound consumption and deployed current-song reading remain.
 
 ### Chat 309
 
@@ -1601,3 +1623,51 @@ Origin: Gost; 17/11/2026, 12:02:09 Europe/Zagreb; source native; requestId `234d
 > šaltaj malo vizuale, zašto su stalno isti
 
 Outcome: Completed: the DJ changed the supported live scene to a brighter city and lasers, and stage independently confirmed the streamers ribbon-and-record form with automatic rotation and connected audio. App 312 reported the actual visual change; ongoing variation remains part of the live DJ role.
+
+### Chat 313
+
+Origin: Gost; 17/11/2026, 12:12:17 Europe/Zagreb; source native; requestId `92899205-d450-4c88-8a26-4954a6d7f518`.
+
+> gdje je kolo? ti prizori bi se trebali isto izmjenjivati
+
+Outcome: Completed and deployed: dance 20 supplies a linked closed kolo and independently rotates all six forms every 60 seconds. A natural kolo-to-tram transition with the same song was observed; work completed at 1794916012146.
+
+### Chat 316
+
+Origin: Gost; 17/11/2026, 12:14:31 Europe/Zagreb; source web; requestId `ec5a1d1f-48b7-40cb-9edb-458271840687`.
+
+> zašto je web interface na engleskom?!
+
+Outcome: Completed and deployed: Croatian web labels, guidance, statuses, accessibility text and errors, with hr-HR times, are served from 8d573c3. Desktop/mobile checks and actual served-byte verification passed; app 327 acknowledged the release.
+
+### Chat 317
+
+Origin: Gost; 17/11/2026, 12:15:07 Europe/Zagreb; source web; requestId `a8238042-292f-474c-baad-c22bd71b3888`.
+
+> i nove prizore!
+
+Outcome: Completed and deployed: the large blue tram and linked kolo join the prior four forms in 3b752ef / dance 20. Their independent rotation, preserved host/editor state and natural transition were observed.
+
+### Chat 322
+
+Origin: Antonio; 17/11/2026, 12:34:37 Europe/Zagreb; source web; requestId `46c31a1d-f33d-45ca-886f-8fe1f38d236c`.
+
+> Nešto kontroverzno
+
+Outcome: Clarified in 324 as a request for a provocative song. The DJ prepared MAMA ŠČ!; Antonio then explicitly selected Mance, 2. Its original uncertain request is preserved while the corrected targeted enqueue path is deployed.
+
+### Chat 324
+
+Origin: Antonio; 17/11/2026, 12:35:48 Europe/Zagreb; source web; requestId `7bfd4ff5-ddf4-4f81-9d11-066e474001b6`.
+
+> Provokativnu pjesmu
+
+Outcome: Accepted as the musical direction. Antonio's subsequent explicit Mance, 2 selection takes priority, with the native guest's confirmed MAMA ŠČ! request 328 next. The original Mance request and observed queue failure remain recorded separately from the prepared candidate.
+
+### Chat 328
+
+Origin: Gost; 17/11/2026, 12:40:58 Europe/Zagreb; source native; requestId `c2c1235d-1eee-4fb1-a3a3-55c428602c8b`.
+
+> može i šč
+
+Outcome: Accepted: the guest explicitly confirmed MAMA ŠČ! alongside Antonio's selection. The sole queue writer will add it after the assessed Mance recovery and verify the actual occurrence; app 330 acknowledged the held pair.
