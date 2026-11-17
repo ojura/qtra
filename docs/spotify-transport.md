@@ -63,9 +63,12 @@ remain unchanged while later reads correctly report the same held position.
 `nowPlaying` also includes separate pause/buffering flags and the calculated
 `progressMs` consumed by the stage.
 
-The party service normally refreshes its public state every 2.5 seconds. Its
-cached `/api/state` value is separate from the fresh `status` included in a
-confirmed transport response. Check the latter for immediate handoff decisions.
+The party service normally refreshes its public state every 2.5 seconds. A
+verified transport response applies its fresh `status` through the same request
+reconciliation and publishes `/api/state` and `state.json` before returning.
+Polls started before that command cannot replace the newer observation. A `next`
+acknowledgement without embedded status triggers one fresh read and retains the
+command acknowledgement as its response.
 
 ## Verification and deployment
 

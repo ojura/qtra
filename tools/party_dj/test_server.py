@@ -29,6 +29,16 @@ def track(uri):
             'artist': 'Test artist', 'durationMs': 180000, 'source': 'queue'}
 
 
+def observation(stamp, *, uri=TRACK_B, uid='current-occurrence', paused=False, buffering=False):
+    return {'nowPlaying': {**track(uri), 'uid': uid, 'playing': not paused and not buffering,
+                           'paused': paused, 'buffering': buffering, 'progressMs': 12000,
+                           'observedAt': stamp},
+            'queue': [], 'explicitQueueComplete': True, 'observedAt': stamp,
+            'playbackState': {'source': 'harmony', 'paused': paused, 'buffering': buffering,
+                              'positionMs': 12000, 'sourceTimestamp': stamp,
+                              'device': {'id': 'fixture-device', 'name': 'Test player'}}}
+
+
 class FakeSpotify:
     mode = 'fixture'
 
@@ -39,6 +49,8 @@ class FakeSpotify:
         self.enqueue_calls = []
         self.enqueue_error = None
         self.metadata_barrier = None
+        self.control_calls = []
+        self.control_result = None
 
     def track(self, uri):
         if self.metadata_barrier is not None:
@@ -48,6 +60,11 @@ class FakeSpotify:
     def status(self):
         return copy.deepcopy({'nowPlaying': self.current, 'queue': self.queue,
                               'explicitQueueComplete': self.explicit_queue_complete})
+
+    def control(self, action):
+        self.control_calls.append(action)
+        return copy.deepcopy(self.control_result if self.control_result is not None
+                             else {'ok': True, 'action': action})
 
     def enqueue(self, uri, request_id):
         self.enqueue_calls.append((uri, request_id))
@@ -84,6 +101,123 @@ class PartyTests(unittest.TestCase):
         self.party._dispatch()
         self.party._refresh()
         self.assertEqual(self.row()['status'], 'queued')
+
+    def test_transport_publishes_verified_pause_and_resume_before_returning(self):
+        for action, paused in [('pause', True), ('resume', False)]:
+            with self.subTest(action=action):
+                old = observation(self.stamp, paused=not paused)
+                self.client.current = old['nowPlaying']
+                self.party._refresh()
+                with self.party.lock:
+                    self.party._publish()
+                fresh = observation(self.stamp + 1000, paused=paused)
+                self.client.control_result = {'ok': True, 'action': action, 'status': fresh}
+                calls_before = len(self.client.control_calls)
+                with patch.object(self.client, 'status', wraps=self.client.status) as status:
+                    result = self.party.admin(action, {})
+                status.assert_not_called()
+                self.assertEqual(self.client.control_calls[calls_before:], [action])
+                self.assertEqual(result, self.client.control_result)
+                self.assertEqual(self.party.playback, fresh)
+                self.assertEqual(self.party.snapshot()['nowPlaying'], fresh['nowPlaying'])
+                published = json.loads((self.party.data / 'state.json').read_text())
+                self.assertEqual(published['nowPlaying'], fresh['nowPlaying'])
+                self.assertTrue(published['spotify']['connected'])
+
+    def test_verified_transport_reconciles_relinked_uid_and_request_metadata(self):
+        self.party.request({'requestId': 'request-a', 'uri': TRACK_A,
+                            'requestedBy': 'Test guest', 'dedication': 'For the dancers'})
+        self.party._refresh()
+        self.party._dispatch()
+        self.party._refresh()
+        uid = self.client.queue[0]['uid']
+        fresh = observation(self.stamp + 1000, uri=TRACK_RELINKED, uid=uid, paused=True)
+        fresh['queue'] = [{**track(TRACK_A), 'uid': 'another-occurrence'}]
+        self.client.control_result = {'ok': True, 'action': 'pause', 'status': fresh}
+        self.party.admin('pause', {})
+        self.assertEqual(self.row()['status'], 'playing')
+        state = self.party.snapshot()
+        current = state['nowPlaying']
+        self.assertEqual(current['uri'], TRACK_RELINKED)
+        self.assertEqual(current['uid'], uid)
+        self.assertEqual(current['requestedUri'], TRACK_A)
+        self.assertEqual(current['requestId'], 'request-a')
+        self.assertEqual(current['requestedBy'], 'Test guest')
+        self.assertEqual(current['dedication'], 'For the dancers')
+        self.assertEqual(state['queue'][0]['uid'], 'another-occurrence')
+        self.assertNotEqual(state['queue'][0]['id'], 'request-a')
+        self.assertEqual(json.loads((self.party.data / 'state.json').read_text())['nowPlaying'], current)
+        self.assertEqual(self.client.control_calls, ['pause'])
+        self.assertEqual(len(self.client.enqueue_calls), 1)
+
+    def test_next_observes_buffering_without_claiming_a_confirmed_skip(self):
+        old = observation(self.stamp)
+        self.client.current = old['nowPlaying']
+        self.party._refresh()
+        fresh = observation(self.stamp + 1000, buffering=True)
+        with patch.object(self.client, 'status', return_value=fresh) as status:
+            result = self.party.admin('next', {})
+        status.assert_called_once_with()
+        self.assertEqual(result, {'ok': True, 'action': 'next'})
+        self.assertEqual(self.client.control_calls, ['next'])
+        self.assertEqual(fresh['nowPlaying']['uid'], old['nowPlaying']['uid'])
+        self.assertEqual(self.party.snapshot()['nowPlaying'], fresh['nowPlaying'])
+        self.assertEqual(self.party.playback['playbackState'], fresh['playbackState'])
+        published = json.loads((self.party.data / 'state.json').read_text())
+        self.assertEqual(published['nowPlaying'], fresh['nowPlaying'])
+
+    def test_failed_post_transport_observation_does_not_repeat_transport(self):
+        self.party._refresh()
+        with patch.object(self.client, 'status', side_effect=SpotifyError('Observation lost')) as status:
+            result = self.party.admin('next', {})
+        status.assert_called_once_with()
+        self.assertEqual(result, {'ok': True, 'action': 'next'})
+        self.assertEqual(self.client.control_calls, ['next'])
+        published = json.loads((self.party.data / 'state.json').read_text())
+        self.assertFalse(published['spotify']['connected'])
+        self.assertEqual(published['spotify']['error'], 'Observation lost')
+        self.assertIsNone(published['nowPlaying'])
+        self.assertEqual(published['queue'], [])
+
+    def test_late_poll_result_or_error_cannot_replace_verified_transport_state(self):
+        for error in (None, SpotifyError('Old poll failed')):
+            with self.subTest(error=error):
+                old = observation(self.stamp)
+                self.client.current = old['nowPlaying']
+                self.party._refresh()
+                fresh = observation(self.stamp + 1000, paused=True)
+                self.client.control_result = {'ok': True, 'action': 'pause', 'status': fresh}
+                observed = threading.Event()
+                release = threading.Event()
+
+                def delayed_status():
+                    observed.set()
+                    if not release.wait(timeout=5):
+                        raise AssertionError('The test did not release the old observation.')
+                    if error is not None:
+                        raise error
+                    return old
+
+                with patch.object(self.client, 'status', side_effect=delayed_status) as status:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        pending = pool.submit(self.party._refresh)
+                        try:
+                            self.assertTrue(observed.wait(timeout=5))
+                            with self.party.lock:
+                                release.set()
+                                self.party.admin('pause', {})
+                        finally:
+                            release.set()
+                        pending.result(timeout=5)
+                status.assert_called_once_with()
+                self.assertEqual(self.party.snapshot()['nowPlaying'], fresh['nowPlaying'])
+                self.assertTrue(self.party.spotify['connected'])
+                self.assertIsNone(self.party.spotify['error'])
+                with self.party.lock:
+                    self.party._publish()
+                published = json.loads((self.party.data / 'state.json').read_text())
+                self.assertEqual(published['nowPlaying'], fresh['nowPlaying'])
+                self.assertTrue(published['spotify']['connected'])
 
     def test_request_id_reuse_during_metadata_fetch_rejects_a_different_uri(self):
         self.client.metadata_barrier = threading.Barrier(2)

@@ -89,6 +89,7 @@ class Party:
         self.search_cache = {}
         self.track_cache = {}
         self.playback = {'nowPlaying': None, 'queue': []}
+        self._control_generation = 0
         self.spotify = {'connected': False, 'error': 'Connecting to Spotify.'}
         self.revision = 0
         self.last_seen = 0
@@ -533,7 +534,16 @@ class Party:
                 if self.audio and action in ('next', 'pause'):
                     self.audio.interrupt()
                 # The client serializes playback operations with queue writes.
+                # Older polls must not overwrite this command's observation,
+                # including when dispatch fails with an uncertain outcome.
+                self._control_generation += 1
                 result = self.client.control(action)
+                observed = result.get('status')
+                if observed is not None:
+                    self._apply_observation(observed)
+                else:
+                    # A fresh observation after next is not skip verification.
+                    self._refresh()
                 self._event('playback', {'action': action})
             else:
                 raise ValueError('Unknown DJ action.')
@@ -552,81 +562,91 @@ class Party:
                         'lastId': rows[-1]['id'] if rows else after, 'state': self.snapshot()}
                 self.changed.wait(deadline - time.monotonic())
 
+    def _apply_observation(self, status):
+        """Reconcile one Spotify observation while the caller holds self.lock."""
+        connected_before = self.spotify['connected']
+        self.playback = status
+        self.spotify = {'connected': True, 'error': None, 'mode': self.client.mode}
+        current = status.get('nowPlaying') or {}
+        uri = current.get('uri', '')
+        queue = status.get('queue', [])
+        by_uri = {t.get('uri'): t for t in queue}
+        by_uid = {t['uid']: t for t in queue if t.get('uid')}
+        current_key = current.get('uid') or uri
+        if uri and current_key != self.last_track:
+            self.last_track = current_key
+            self._event('track', current)
+        for pending in self.db.execute("SELECT * FROM requests WHERE status IN ('queued','uncertain','playing','removed')").fetchall():
+            rid = pending['id']
+            track = json.loads(pending['track'])
+            uid = track.get('uid')
+            restoring = pending['status'] == 'removed'
+            # A temporary Connect queue omission can outlast the removal
+            # grace. Positive evidence of the exact same occurrence
+            # restores its request without dispatching another copy.
+            if restoring and not (uid and (uid in by_uid or (uri and uid == current.get('uid')))):
+                continue
+            # Spotify may relink a catalogue URI when a track starts.
+            # Its queue UID identifies the same requested occurrence.
+            observed = by_uid.get(uid) if uid else by_uri.get(pending['uri'])
+            if observed is None and uid:
+                same_uri = by_uri.get(pending['uri'])
+                if same_uri and not same_uri.get('uid'):
+                    observed = same_uri
+            if not uid and observed and observed.get('uid'):
+                uid = track['uid'] = observed['uid']
+                self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), rid))
+            if uid and current.get('uid'):
+                is_current = bool(uri) and uid == current['uid']
+            else:
+                # An exact occurrence still in the queue outranks a
+                # URI-only current-track observation of the same song.
+                is_current = (bool(uri) and pending['uri'] == uri and not restoring
+                              and not (uid and uid in by_uid))
+            if is_current:
+                if not uid and current.get('uid'):
+                    track['uid'] = current['uid']
+                    self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), rid))
+                if pending['status'] != 'playing':
+                    self.db.execute("UPDATE requests SET status='playing',error=NULL,updated_at=? WHERE id=?", (now_ms(), rid))
+                self.missing_requests.pop(rid, None)
+            elif pending['status'] == 'playing' and uri:
+                self.db.execute("UPDATE requests SET status='played',updated_at=? WHERE id=?", (now_ms(), rid))
+            elif observed:
+                if pending['status'] in ('uncertain', 'removed'):
+                    self.db.execute("UPDATE requests SET status='queued',error=NULL,updated_at=? WHERE id=?", (now_ms(), rid))
+                self.missing_requests.pop(rid, None)
+            elif pending['status'] == 'queued' and status.get('explicitQueueComplete'):
+                first, count = self.missing_requests.get(rid, (now_ms(), 0))
+                self.missing_requests[rid] = (first, count + 1)
+                if count >= 1 and now_ms() - max(first, pending['updated_at']) >= 10000:
+                    self.db.execute("UPDATE requests SET status='removed',updated_at=? WHERE id=?", (now_ms(), rid))
+                    self.missing_requests.pop(rid, None)
+                    self._event('removed', {'id': rid, 'uri': pending['uri']})
+            if restoring:
+                self._event('queue_restored', {'id': rid, 'uri': pending['uri'], 'uid': uid,
+                                              'status': 'playing' if is_current else 'queued'})
+        self.db.commit()
+        if self.audio:
+            requests = [self._request_dict(r) for r in self.db.execute(
+                "SELECT * FROM requests WHERE status IN ('pending','queued','uncertain','playing') ORDER BY created_at").fetchall()]
+            self.audio.observe(self.snapshot().get('nowPlaying'), requests)
+        if not connected_before:
+            self._event('spotify', {'connected': True, 'mode': self.client.mode})
+
     def _refresh(self):
+        with self.lock:
+            generation = self._control_generation
         try:
             status = self.client.status()
             with self.lock:
-                connected_before = self.spotify['connected']
-                self.playback = status
-                self.spotify = {'connected': True, 'error': None, 'mode': self.client.mode}
-                current = status.get('nowPlaying') or {}
-                uri = current.get('uri', '')
-                queue = status.get('queue', [])
-                by_uri = {t.get('uri'): t for t in queue}
-                by_uid = {t['uid']: t for t in queue if t.get('uid')}
-                current_key = current.get('uid') or uri
-                if uri and current_key != self.last_track:
-                    self.last_track = current_key
-                    self._event('track', current)
-                for pending in self.db.execute("SELECT * FROM requests WHERE status IN ('queued','uncertain','playing','removed')").fetchall():
-                    rid = pending['id']
-                    track = json.loads(pending['track'])
-                    uid = track.get('uid')
-                    restoring = pending['status'] == 'removed'
-                    # A temporary Connect queue omission can outlast the removal
-                    # grace. Positive evidence of the exact same occurrence
-                    # restores its request without dispatching another copy.
-                    if restoring and not (uid and (uid in by_uid or (uri and uid == current.get('uid')))):
-                        continue
-                    # Spotify may relink a catalogue URI when a track starts.
-                    # Its queue UID identifies the same requested occurrence.
-                    observed = by_uid.get(uid) if uid else by_uri.get(pending['uri'])
-                    if observed is None and uid:
-                        same_uri = by_uri.get(pending['uri'])
-                        if same_uri and not same_uri.get('uid'):
-                            observed = same_uri
-                    if not uid and observed and observed.get('uid'):
-                        uid = track['uid'] = observed['uid']
-                        self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), rid))
-                    if uid and current.get('uid'):
-                        is_current = bool(uri) and uid == current['uid']
-                    else:
-                        # An exact occurrence still in the queue outranks a
-                        # URI-only current-track observation of the same song.
-                        is_current = (bool(uri) and pending['uri'] == uri and not restoring
-                                      and not (uid and uid in by_uid))
-                    if is_current:
-                        if not uid and current.get('uid'):
-                            track['uid'] = current['uid']
-                            self.db.execute('UPDATE requests SET track=? WHERE id=?', (json.dumps(track, ensure_ascii=False), rid))
-                        if pending['status'] != 'playing':
-                            self.db.execute("UPDATE requests SET status='playing',error=NULL,updated_at=? WHERE id=?", (now_ms(), rid))
-                        self.missing_requests.pop(rid, None)
-                    elif pending['status'] == 'playing' and uri:
-                        self.db.execute("UPDATE requests SET status='played',updated_at=? WHERE id=?", (now_ms(), rid))
-                    elif observed:
-                        if pending['status'] in ('uncertain', 'removed'):
-                            self.db.execute("UPDATE requests SET status='queued',error=NULL,updated_at=? WHERE id=?", (now_ms(), rid))
-                        self.missing_requests.pop(rid, None)
-                    elif pending['status'] == 'queued' and status.get('explicitQueueComplete'):
-                        first, count = self.missing_requests.get(rid, (now_ms(), 0))
-                        self.missing_requests[rid] = (first, count + 1)
-                        if count >= 1 and now_ms() - max(first, pending['updated_at']) >= 10000:
-                            self.db.execute("UPDATE requests SET status='removed',updated_at=? WHERE id=?", (now_ms(), rid))
-                            self.missing_requests.pop(rid, None)
-                            self._event('removed', {'id': rid, 'uri': pending['uri']})
-                    if restoring:
-                        self._event('queue_restored', {'id': rid, 'uri': pending['uri'], 'uid': uid,
-                                                      'status': 'playing' if is_current else 'queued'})
-                self.db.commit()
-                if self.audio:
-                    requests = [self._request_dict(r) for r in self.db.execute(
-                        "SELECT * FROM requests WHERE status IN ('pending','queued','uncertain','playing') ORDER BY created_at").fetchall()]
-                    self.audio.observe(self.snapshot().get('nowPlaying'), requests)
-                if not connected_before:
-                    self._event('spotify', {'connected': True, 'mode': self.client.mode})
+                if generation != self._control_generation:
+                    return
+                self._apply_observation(status)
         except Exception as error:
             with self.lock:
+                if generation != self._control_generation:
+                    return
                 message = str(error)[:300]
                 changed = self.spotify['connected'] or self.spotify.get('error') != message
                 self.spotify = {'connected': False, 'error': message}
