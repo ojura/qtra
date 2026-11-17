@@ -21,7 +21,8 @@ import urllib.request
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
-SUITES = {"karaoke": "test_karaoke", "speech": "test_speech"}
+SUITES = {"karaoke": "test_karaoke", "speech": "test_speech",
+          "voice-render": "test_voice_render", "render-cli": "test_render_voice"}
 
 
 class RehearsalViolation(RuntimeError):

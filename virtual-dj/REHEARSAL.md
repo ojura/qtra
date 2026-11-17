@@ -6,15 +6,16 @@ Run the repeatable logic checks from the repository root:
 python3 -B virtual-dj/rehearsal.py
 python3 -B virtual-dj/rehearsal.py --suite karaoke --json
 python3 -B virtual-dj/rehearsal.py --suite speech --verbose
+python3 -B virtual-dj/rehearsal.py --suite voice-render --json
 ```
 
-The default runs the explicit karaoke and speech suites. `--json` emits one structured result; `--verbose` includes individual test output. `--timeout SECONDS` bounds the selected suites, defaults to 60 seconds, and accepts values greater than zero up to 600. Exit 0 means all selected tests and guard checks passed, with no skipped or empty suite, unexpected side-effect attempt, leaked worker or cleanup failure. Exit 1 reports a rehearsal failure; invalid CLI arguments use argparse's exit 2.
+The default runs the karaoke, speech, voice-render and render-cli suites. `--json` emits one structured result; `--verbose` includes individual test output. `--timeout SECONDS` bounds the selected suites, defaults to 60 seconds, and accepts values greater than zero up to 600. Exit 0 means every selected suite ran and passed, every guard check passed, and cleanup completed. Skipped or empty suites, unexpected side-effect attempts and leaked workers fail the run. Exit 1 reports a rehearsal failure; invalid CLI arguments use argparse's exit 2.
 
 Use this as a standalone Python process. Its audit hook stays installed through cleanup and process exit. A caller should launch the script as a child rather than import and run it inside a production server.
 
 ## What the command exercises
 
-The runner selects only the `test_karaoke` and `test_speech` suites, importing them after installing its guard. Karaoke cues and dedication phrases are original fixtures. Speech uses fake prepared clips, fake playback processes and fake Pulse streams. Temporary history and database files live below one private temporary directory and are removed after the run. The command needs no running party server, Spotify session, provider login, microphone or audio device.
+The runner imports its four named suites after installing the guard. Karaoke cues and dedication phrases are original fixtures. Speech uses fake prepared clips, fake playback processes and fake Pulse streams. Renderer tests use fake executors and private PCM fixtures; CLI tests cover cleanup, explicit export, failure reporting and the narrow process permission. Temporary history, database and WAV files live below one private temporary directory and are removed after the run. These tests run independently of the party server, Spotify, provider logins, microphones and audio devices.
 
 | Area | Cases and required result |
 | --- | --- |
@@ -38,7 +39,53 @@ The JSON report includes `status`, per-suite test counts/failures/skips, `guardC
 
 A timeout prevents another selected suite from starting. The runner prints through the original output streams, keeps the guard active, and exits nonzero if a worker remains. When cleanup runs while a worker is still alive, `privateOutputs` is `cleanup_unresolved` and `privateDirectory` identifies the path that needs inspection after the process has exited. A normal successful run reports `cleaned`.
 
-The scope is scheduling, identity, clock behavior, mixer commands and failure handling. Native stage rendering has its own [renderer checks](../docs/party-stage.md). Actual voice synthesis, captured waveform measurements, pronunciation and later intelligibility on the intended speaker require their own explicit observations. Record each result at that level rather than converting a successful process exit into an audience outcome.
+The scope is scheduling, identity, clock behavior, mixer commands, file-render command validation and failure handling. Native stage rendering has its own [renderer checks](../docs/party-stage.md). The file command below measures actual synthesized waveforms. Pronunciation and intelligibility on the intended speaker remain separate observations.
+
+## File-only speech measurements
+
+Run actual Croatian synthesis and an offline synthetic-bed mix:
+
+```sh
+python3 -B virtual-dj/render_voice.py --json
+```
+
+The original default phrase is “Antonio, ovaj refren je za tebe. Pozdrav cijeloj ekipi.” To supply different original text, pass it through stdin:
+
+```sh
+printf '%s\n' 'Antonio, pozdrav cijeloj ekipi.' | python3 -B virtual-dj/render_voice.py --text-stdin --json
+```
+
+The command uses the existing `CroatianVoice` preparation algorithm. It normalizes the phrase, shortens whole words when required by the duration limit, synthesizes with Croatian espeak-ng, and converts the result with the existing ffmpeg filters. The report retains the supplied text and the actual last synthesized text.
+
+The parent audit hook permits only the resolved espeak-ng and ffmpeg executables with the reviewed argument lists, private WAV paths, fixed working directory and minimal environment. Each permission belongs to one launching thread and one process. espeak-ng receives text on stdin and writes a WAV with `-w`; ffmpeg receives closed stdin, uses the file protocol and emits mono 48 kHz PCM16 WAV. Every other process, network connection, media-device open and nonprivate write is rejected. The logic command above keeps its blanket process denial.
+
+Waveform measurements include duration, sample format, RMS and peak dBFS, nonzero samples, PCM endpoint counts and mixed-sample limiting. The original synthetic bed contains 220, 330 and 440 Hz tones. Raised-cosine gain changes duck it by 10 dB over 0.48 seconds and restore it over 0.88 seconds. The report measures gain over matching source-frame windows, the final restored gain, the largest envelope step and the voice-to-ducked-bed RMS ratio. It does not open Spotify or an audio player.
+
+Both WAVs are removed after measurement. An explicit export writes `voice.wav` and `mix.wav` into a new directory:
+
+```sh
+python3 -B virtual-dj/render_voice.py --export /tmp/virtual-dj-voice-preview --json
+```
+
+The export parent must exist, and the requested directory must not exist. An export failure removes the owned partial files. The JSON result contains the exported paths only when export succeeds; ordinary runs return measurements and `privateOutputs: cleaned`. Errors include the failing stage and process status when available. Unexpected denied operations fail the result even when lower-level code catches their exception. Run this command as its own Python process because its audit hook remains installed through exit.
+
+File measurement leaves `pronunciationVerification` and `audibleVerification` as `unperformed`. Listening observations can be added only after an explicitly authorized playback check.
+
+### Measured default phrase
+
+The default phrase rendered without shortening on 2026-11-17, using the local espeak-ng binary and `/usr/bin/ffmpeg`. Both commands exited successfully. The file command passed all 18 guard checks, recorded zero unexpected side-effect attempts, and removed its private WAVs. The combined logic command passed 80 tests: 19 karaoke, 31 speech, 16 renderer and 14 CLI tests.
+
+| Measurement | Prepared voice | Voice with synthetic bed |
+| --- | ---: | ---: |
+| Duration | 3.752333 s | 6.612333 s |
+| Samples | 180112 | 317392 |
+| Sample format | 48 kHz, mono, PCM16 | 48 kHz, mono, PCM16 |
+| RMS | -20.3672 dBFS | -21.4239 dBFS |
+| Peak | -3.0000 dBFS | -2.4649 dBFS |
+| PCM endpoint samples | 0 | 0 |
+| Nonzero samples | 138507 | 317282 |
+
+The measured bed gain was -9.99984 dB during speech and 0 dB before ducking and after restoration. The 0.48-second duck and 0.88-second restore ended at gain 1.0, with a maximum per-sample envelope step of 0.00004662. The voice-to-ducked-bed RMS ratio was 12.3782 dB. The mix required zero sample limiting. These measurements establish the file levels and timing; pronunciation and speaker intelligibility remain unperformed listening observations.
 
 ## Prepare a dedication
 

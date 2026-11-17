@@ -41,8 +41,9 @@ class PreparedSpeech:
 
 
 class CroatianVoice:
-    def __init__(self, directory):
+    def __init__(self, directory, *, run=None):
         self.directory = Path(directory)
+        self.run = subprocess.run if run is None else run
         local = Path(__file__).resolve().parents[2] / 'build/party-audio-deps/usr/bin/espeak-ng'
         self.command = shutil.which('espeak-ng') or (str(local) if local.is_file() else None)
         self.ffmpeg = shutil.which('ffmpeg')
@@ -60,7 +61,7 @@ class CroatianVoice:
         try:
             # Measure the actual voice duration, then shorten whole words if needed.
             while True:
-                subprocess.run([self.command, '-v', 'hr', '-s', '180', '-p', '43',
+                self.run([self.command, '-v', 'hr', '-s', '180', '-p', '43',
                                 '-a', '110', '-w', str(raw), '--stdin'],
                                input=text, text=True, capture_output=True, timeout=15, check=True)
                 with wave.open(str(raw)) as audio:
@@ -74,7 +75,7 @@ class CroatianVoice:
                 text = ' '.join(words[:keep]).rstrip(' ,;:') + '.'
             filters = ('highpass=f=80,lowpass=f=8500,loudnorm=I=-19:TP=-3:LRA=6,'
                        f'afade=t=in:st=0:d=0.03,afade=t=out:st={max(0, duration-.08):.3f}:d=0.08')
-            subprocess.run([self.ffmpeg, '-nostdin', '-loglevel', 'error', '-y', '-i', str(raw),
+            self.run([self.ffmpeg, '-nostdin', '-loglevel', 'error', '-y', '-i', str(raw),
                             '-af', filters, '-ar', '48000', '-ac', '1', str(ready)],
                            capture_output=True, timeout=15, check=True)
             with wave.open(str(ready)) as audio:
