@@ -2,13 +2,13 @@
 
 ## Current state
 
-The party ended with chat 170's explicit pause. Chats 245/246 then asked us to continue sorting, saving, generalizing and thoroughly rehearsing karaoke while the user sleeps. The actual native player has since been confirmed paused. Spotify remains the primary player, and routine party curation has ended.
+The party ended with chat 170's explicit pause. Chats 245/246 asked for continued sorting, generalization and thorough quiet rehearsal. The reviewed release is now deployed and pushed: implementation release 551a52b and acceptance-history correction aa73de1d2bf885366610fba2c44acd9ad6822eab. Read-only verification found the same q142 / Djurdjevdan occurrence paused at 65719 ms on juraj-legion. Speech and book photographs remain disabled.
 
-The current investigation permits guarded pure tests and owned private fixtures. Live player control, audio output, native input and deployment remain on hold. Offline file rendering uses explicitly reviewed output-only commands and private files. The cause of the unexpected resume and disputed messages remains unresolved; the pause confirmation does not identify that cause.
+The service runs as PID 1509818. The existing qtra host, PID 399021, retains stage 15 and dance 16; the scoped Tab/F11 helper is PID 1472276. The native replacement preserved the composer, name, focus and fullscreen state. No playback command was needed for deployment. Preserve the host's pause during further work; quiet fixtures and file-only synthesis remain the operating path for rehearsal.
 
-This is a maintained account of the requests and their outcomes. The [operator entry](README.md) gives the reusable commands, the [playbook](PLAYBOOK.md) explains how to operate the DJ, [lessons](LESSONS.md) define failure cases and acceptance checks, and the [music directions](seeds/music-directions.json) provide editable starting material. Tonight's artists, visuals and schedule are examples. A future audience can replace them.
+The approved outcome reconciliation recorded 60 message IDs in 25 groups: 39 completed, one waiting, seven blocked and 13 cancelled. All 25 originally migrated records retained acceptedAt:null after their outcomes were recorded. No active processing IDs remain. Request 222 waits for a measured response improvement; the historical sender and resume-origin questions remain unresolved.
 
-Current implementation work includes attributed descriptive search, immediate exact search, message recall, a larger search area, scoped pointer enlargement, scrollbar contrast, a quieter scroll-return policy, a smaller footer, artwork and upcoming tracks, explicit play/pause control, durable task progress, silent performance rehearsal, and the consolidated operator tools. Items are marked pending until their integrated behaviour has been verified and deployed. Disputed input is retained as evidence rather than silently converted into a preference.
+The [operator entry](README.md), [playbook](PLAYBOOK.md), [lessons](LESSONS.md), [rehearsal report](REHEARSAL.md) and [music directions](seeds/music-directions.json) form the reusable material. Tonight's artists, visuals and schedule are examples that a future audience can replace. Attributed descriptive search, independent exact search, recall, the native layout corrections, artwork, upcoming tracks, explicit play/pause and durable work states are deployed.
 
 ## Context and coverage
 
@@ -34,13 +34,15 @@ The ordinary task is queue manipulation. Seek, skip and pause are exceptional ac
 
 ### Listener and queue events
 
-One dedicated listener waits on the existing events API, with a saved cursor and stable response IDs. A message can be seen without its requested work being complete; active processing has a separate indication. Ordered queue changes wake this same listener. Tool timeouts are recovered from the original process and retained output, without duplicating watchers or uncertain actions. Chats 29/44/93/147 are implemented foundations, while the post-party workflow is being consolidated. See [party desk](../tools/party_dj/README.md) and [listener recovery](LESSONS.md#connection-and-listener-recovery).
+One dedicated listener owns guest events and replies. It waits on the existing events API, preserves a durable cursor and uses stable response IDs. Ordered queue changes, descriptive searches and work updates use the same stream. Read receipts, acceptance and recorded outcomes remain separate.
+
+The post-party handoff stopped legacy watcher PID 405871 and drained its final output through event 612 before starting the maintained dj.py watcher, PID 1529845 / CoS session 63126. Its cursor is stored at ~/.local/state/larics-dj/guest-listener-cursor.json. The first successful replacement batch confirmed a fresh connection, the unchanged paused q142 and the reconciled work counts. There was no overlap between watchers. See [operator entry](README.md#stay-present-and-respond-quickly) and [listener recovery](LESSONS.md#connection-and-listener-recovery).
 
 ### Native interface
 
-The live native interface uses a permanent 600 px panel with 29 px text, a bottom multiline Magic box, song suggestions, optional dedication after selection, Enter to send and Shift+Enter for a newline. Escape does not hide the panel. Chat and search geometry, draft preservation, own-send scrolling, seen checks and processing dots were tested and deployed. Tab switches between qtra and standalone Spotify, with a visible hint. F11's behaviour in Spotify is a later unresolved report.
+The deployed stage 15 keeps the 600 px panel and 29 px text, a bottom multiline Magic box, larger floating song suggestions and an optional dedication after selection. Exact catalogue search remains immediate; descriptive search returns selectable candidates with their match basis and sources. Enter sends and Shift+Enter adds a line. Escape or the small × recalls the latest own unaccepted message while preserving another draft. A read receipt alone does not accept work.
 
-Several requests intentionally supersede earlier ones. The search popup floats over the transcript; the latest work enlarges it. The 20-second return to the bottom is superseded by approximately two minutes without user or agent replies. Escape is being given a limited recall action. See [native stage](../docs/party-stage.md) and the pending work below.
+The native changes include scrollbar contrast, a pointer enlarged only inside DJ controls, a smaller footer, Spotify artwork, a longer upcoming-song preview and an actual-state play/pause indicator. The current-track progress clock holds on pause, buffering or stale observations. Scrolling returns smoothly after approximately two minutes without interaction or a user/DJ reply, superseding the earlier 20-second rule. Tab and F11 work through the scoped helper. Private tests passed, and deployment preserved draft, focus and fullscreen. See [native stage](../docs/party-stage.md) and [interface outcomes](#post-party-interface-work).
 
 ### Visuals and photographs
 
@@ -52,15 +54,15 @@ Visual changes were initially too slow. City/waterfall replaced the repeated Mö
 
 The audience received no successful karaoke/dedication performance. The exact Ružinavi Brod track started before usable synchronized lyrics were ready. Later Rasputin/provider attempts had inaudible speech, briefly competing music, wrong foreground content, lost synchronization, interruption after a human resume, and the wrong participant order. Antonio was first. Announcing readiness or reporting a player process exit did not make the turn usable.
 
-Chat 141 cancelled further live attempts. Speech remains disabled. Chats 170/246 authorize thorough silent testing. The maintained rehearsal report records 80 guarded tests using fake playback and private fixtures, covering identity, clocks, scheduling, cancellation, mixer commands, rendering and cleanup. The separate file-only command synthesized the original Croatian default phrase in 3.752333 seconds and measured its offline mix, with zero PCM endpoint samples, no limiting and a measured bed gain of -9.99984 dB during speech. Its private WAVs were removed. The integrated backend then passed 98 guarded cases after correcting the karaoke clock-source and caller-origin name collision. Native rendering uses separate private fixtures. Deployment remains pending. Pronunciation and intelligibility on the intended speaker remain human observations to perform at an authorized listening check. Microphone routing stays direct to the Bluetooth speaker. See the [rehearsal report](REHEARSAL.md#measured-default-phrase), [performance procedure](PLAYBOOK.md#exceptional-playback-changes-and-performances) and [acceptance cases](LESSONS.md#silent-performance-rehearsal).
+Chat 141 cancelled further live attempts. Speech remains disabled. Chats 170/246 authorize thorough silent testing. The maintained rehearsal report records 80 guarded tests using fake playback and private fixtures, covering identity, clocks, scheduling, cancellation, mixer commands, rendering and cleanup. The separate file-only command synthesized the original Croatian default phrase in 3.752333 seconds and measured its offline mix, with zero PCM endpoint samples, no limiting and a measured bed gain of -9.99984 dB during speech. Its private WAVs were removed. The integrated backend then passed 98 guarded cases after correcting the karaoke clock-source and caller-origin name collision. Native rendering uses separate private fixtures. The integration is deployed; the source and clock corrections passed their focused checks. Pronunciation and intelligibility on the intended speaker remain human observations to perform at an authorized listening check. Microphone routing stays direct to the Bluetooth speaker. See the [rehearsal report](REHEARSAL.md#measured-default-phrase), [performance procedure](PLAYBOOK.md#exceptional-playback-changes-and-performances) and [acceptance cases](LESSONS.md#silent-performance-rehearsal).
 
 ### Post-party consolidation
 
-Chats 170/171 require a reusable `virtual-dj/` directory, a nonexclusive collection of tools, documentation, plugins/material and practiced procedures, with audience signals first. Chats 187/188 require this complete inventory in `DECISIONS.md`. Chat 196 asks for useful documentation of the combined root, Steffy and Antonio work. Chat 189 explicitly requires two subagent review/fix rounds. The current consolidation is in progress; final integrated review will update this section with the recorded commits and checks.
+Chats 170/171 requested a reusable virtual-dj directory, a nonexclusive collection of tools, documents, plugins/material and practiced procedures, with audience signals first. That material is integrated in the main qtra repository. Chats 187/188 are fulfilled by this complete maintained inventory; chat 196 is covered by the entry, playbook, implementation references and rehearsal documentation. The scoped documents were recorded in 51ed419 and 691a1fb, the desk in 754674b, and the README clarification in 5d7ec8c. The implementation release and final backend correction are pushed.
 
-Chat 231 adds the explicit repository rule: fold the work into one main repository; a teammate may use a centrally tracked worktree, which must be integrated and cleaned up. This task currently uses the shared master checkout with private Git indexes. Chats 245/246 renew the consolidation and quiet karaoke-testing task while the user sleeps.
+Chat 231's repository rule is retained: integrate work in one main repository; use a centrally tracked teammate worktree only when needed and clean it after integration. This task used shared master with private Git indexes, which were removed after their scoped commits. Chats 245/246 renewed the consolidation and quiet rehearsal task while the user slept.
 
-No fixed artist canon, genre boundary or visual schedule is imposed on future sessions. The seed distinguishes observations from guesses, keeps subjective energy labels explicit and links to the implementation instead of duplicating changing low-level details.
+The seed imposes no permanent artist canon, genre boundary or visual schedule. It distinguishes observations from guesses, labels subjective energy judgments and links to changing implementation details. Both requested review/fix waves and their outcomes are recorded below.
 
 ### Review and fix rounds
 
@@ -68,36 +70,40 @@ The first independent documentation review found five issues: a cached-state com
 
 The first operator-source review identified add-front promotion overriding an intervening manual edit, URI-only repeat checks, persistent watch exiting after transient read failures, and missing full fresh queue metadata. The second integrated review confirmed history matching across recording URIs, complete queue output, same-cursor read retries and the new command/source contracts. It reproduced one remaining promotion race with fake calls: initial [A,B], followed by a manually positioned [A,new-request,B], was promoted to [new-request,A,B]. It also found that recall rejected a read receipt before acceptance despite the documented distinction, and that the primary entry lacked an executable reply step.
 
-Those three findings are resolved. Commit 754674b includes the append-position guard, its observed-change latch and the explicit stable-ID reply procedure. The focused fake-client regression passed both direct manual placement and an observed placement that later reverted. Backend and native recall now allow read-only receipts, while accepted work, durable records and active legacy ownership prevent recall. The backend's 98 guarded cases and the native owner's nine private cases passed; the native suite took 195.180 seconds and covered receipt/acceptance, migrated work and draft preservation. Operator review round 2 is closed. This playbook amendment uses durable outcomes, per-candidate semantic attribution and the guarded front/apply procedure. A separate native current-track progress-clock correction and deployment remain pending.
+Those three findings are resolved. Commit 754674b includes the append-position guard, its observed-change latch and the explicit stable-ID reply procedure. The focused fake-client regression passed both direct manual placement and an observed placement that later reverted. Backend and native recall now allow read-only receipts, while accepted work, durable records and active legacy ownership prevent recall. The backend's 98 guarded cases and the native owner's nine private cases passed; the native suite took 195.180 seconds and covered receipt/acceptance, migrated work and draft preservation. Operator review round 2 is closed. This playbook amendment uses durable outcomes, per-candidate semantic attribution and the guarded front/apply procedure. The separate current-track progress-clock case also passed before deployment. The final acceptance-history correction aa73de1 passed seven focused guarded cases and all 18 guard checks, with peer and root source review.
 
 ### Post-party interface work
 
-| Requests | Current decision and outcome |
+| Requests | Delivered outcome |
 | --- | --- |
-|175,186,249,250|Larger search results plus a separate asynchronous descriptive search. Exact artist/title catalogue queries remain immediate. The Bebek example resolves to Sinoć sam pola kafane popio, Željko Bebek, Niko više ne sanja, URI `spotify:track:2QQYG5M39oAaxz3hbzfCB8`,233880 ms. Offered for selection, never enqueued. Explain whether a candidate matches the title, a literal lyric clue or semantic meaning, with a short rationale/confidence and verified source where used. Native/backend implementation pending integration.|
-|176-178,195|Recall the latest unprocessed message with Escape or a small clickable ×. Restore its exact draft. Processing and recall must resolve their race consistently. Pending.|
-|179,200|The initial global cursor enlargement was corrected: GNOME's size is restored to 24. Larger cursor treatment belongs inside DJ mode and is pending.|
-|182|Keep the thin scrollbar; improve thumb/track contrast. Pending.|
-|185|Smooth return to the bottom after about two minutes without a user or agent reply, while respecting interaction. Supersedes107. Pending.|
-|202,229|F11 should also work from Spotify;229 confirms the intended question after ambiguous217. The native owner is implementing the correction.|
+| 175, 186, 249, 250, 257 | Larger result space; immediate exact search; separate descriptive search with selectable results and the same song/dedication flow. Each candidate can retain track.match with title, literal_lyrics or semantic basis, rationale, confidence and source links. The Bebek example was identified and offered without enqueueing. |
+| 176, 195 | Escape and a clickable × recall the latest own unaccepted message and restore its text while preserving another draft. Read-only receipts remain recallable; accepted or durably owned work does not. Private race and draft tests passed. |
+| 179, 200 | The earlier global cursor change was corrected: GNOME is restored to 24, and enlargement is scoped to DJ controls. |
+| 182 | The thin scrollbar remains, with stronger thumb/track contrast. |
+| 185 | Smooth return to the bottom after approximately two minutes without interaction or a user/DJ reply, superseding 107's earlier interval. |
+| 202, 229 | F11 works through the scoped Spotify/qtra helper. Chat 229 clarified the intended feature after the unexplained wording in 217. |
+| 230, 233–235, 240–243, 254 | Reduced excess lower margin and compact status treatment, preserving composer geometry. The broader proposed redesign was not adopted; spoken audio stays disabled. |
+| 258 | The centered-dot separator was removed from the request acknowledgement. |
+| 260 | Spotify artwork is shown in Na repertoaru. |
+| 261 | A clickable global play/pause indicator follows actual state, uses explicit intent and guards the current occurrence/device; the progress clock holds when required. |
+| 263 | The upcoming-song preview is longer. |
+| 264–266 | Durable work states replace the mixed-purpose legacy marker. Completion requires an outcome and evidence; active lease expiry becomes unconfirmed. |
 
-Chats 230/232-235/240 clarified that the actual layout complaint is a generous lower margin under Send and excess blank status space. The agent's broader “detached button” interpretation was rejected. Chats 241/243 permit transient status bubbles or a better compact treatment, with stable layout. This does not authorize spoken audio. Implementation is pending.
+Stage 15 / dance 16 and the reviewed backend were verified after deployment without a live transport trial. The original 25 migrated records kept unknown historical acceptance times under aa73de1 even when their outcomes were recorded. The reconciliation verified 39 completed, one waiting, seven blocked and 13 cancelled IDs, with no active processing marker.
 
-Chats 255/264-266 expose a structural defect in the legacy progress indicator. A manually renewed processing-ID lease mixes active work, waiting for review/deployment and unresolved work. The user explicitly rejects merely replacing old dots with checks. Root owns durable task states and recorded outcome evidence; the old dots remain untouched until that contract is deployed. The listener has stopped blanket renewal and will reconcile each task's actual state after the deployment cue and read-only verification. The 25 persisted legacy IDs have been mapped to their real outcomes. Lease expiry supplies no completion evidence. Latency request 222 remains waiting for a measured response improvement; historical sender and resume-origin questions remain blocked where evidence cannot identify the cause. Explicit withdrawals and cancelled live performances retain their stated cancellation reasons.
+Request 222 remains waiting for an actual improved response-time observation. The recorded 108.829-second delay is the baseline, and the dedicated listener has returned to guest attention. Historical authorship and resume-origin questions remain blocked where evidence cannot resolve them. Withdrawals and cancelled performances use their stated reasons, rather than successful-delivery claims.
 
-Chats 257/258 request the same selected-song/dedication presentation for semantic results and removal of the centered-dot separator from the request acknowledgement. Chats 260/263 request Spotify artwork and a longer upcoming-song preview. Chat 261 requests a visible clickable play/pause indicator that follows the actual player state. Native/API work is pending; private fixtures must exercise explicit intent, fresh observations and error states before deployment.
-
-The exact descriptive-search protocol and candidate-confidence workflow are in [PLAYBOOK](PLAYBOOK.md#exact-and-descriptive-search). The implementations must preserve the existing composer, immediate catalogue search and intentional guest selection.
+The exact descriptive-search protocol is in [PLAYBOOK](PLAYBOOK.md#exact-and-descriptive-search); [the operator entry](README.md#distinguish-receipt-work-and-outcome) documents work records. The [rehearsal report](REHEARSAL.md) records the completed quiet checks and separates them from an audible performance.
 
 ### Withdrawn and disputed input
 
-Chats 192/193 were explicitly withdrawn by 194. They remain in the inventory with that outcome. Chats 199 and 212 raise an authorship/source question about unexpected text. Narrow searches found the199 phrase only in its own user message, with no earlier DJ reply/caption or maintained-source match. The live native composer was empty; the native owner checked isolated test displays and found no live input route. The source is still unresolved. The legacy live schema inspected during the incident stored id, request_id, role, name, text, created_at and read_at; it had no guest_id, IP or input-source field. Attribution additions now exist in source, with deployment still pending. Native QUuid and web crypto.randomUUID both generate UUID request IDs, so that format cannot distinguish the sender. The display name changes from Laptop to Gost at 209.
+Chats 192/193 were explicitly withdrawn by 194. They remain in the inventory with that outcome. Chats 199 and 212 raise an authorship/source question about unexpected text. Narrow searches found the199 phrase only in its own user message, with no earlier DJ reply/caption or maintained-source match. The live native composer was empty; the native owner checked isolated test displays and found no live input route. The source is still unresolved. The legacy live schema inspected during the incident stored id, request_id, role, name, text, created_at and read_at; it had no guest_id, IP or input-source field. New attribution and explicit test labels are deployed; they do not identify the sender of those legacy records. Native QUuid and web crypto.randomUUID both generate UUID request IDs, so that format cannot distinguish the sender. The display name changes from Laptop to Gost at 209.
 
-The source of the odd text and the meaning of each request are separate questions. The ambiguous wording in201/203/204 remains unresolved. Chat 229 resolves217's intended meaning: F11 should work in Spotify as well as qtra, and that implementation is pending. Preserve the unexplained original wording alongside that clarification. The proposed three-consecutive-items interpretation from201 has not been accepted as a rule.
+The source of the odd text and the meaning of each request are separate questions. The ambiguous wording in201/203/204 remains unresolved. Chat 229 resolves 217's intended meaning: F11 should work in Spotify as well as qtra; that feature is deployed. Preserve the unexplained original wording alongside that clarification. The proposed three-consecutive-items interpretation from201 has not been accepted as a rule.
 
 ### Unexpected post-party playback
 
-Chat 209 reports that Bajaga started after the end-of-party pause. The guest-listener/documentation worker issued no post-party transport, enqueue or scene commands; its calls were reads, replies and processing markers. The service briefly reconnected, then returned to a synthetic-local disconnection. That observation does not yet identify who resumed the actual player. Root owns diagnosis. Preserve the user's intended pause and record the concrete result here when established.
+Chat 209 reports that Bajaga started after the end-of-party pause. The guest-listener/documentation worker issued no post-party transport, enqueue or scene commands; its calls were reads, replies and processing markers. The service briefly reconnected, then returned to a synthetic-local disconnection. That observation does not yet identify who resumed the actual player. The cause remains blocked/unknown. The intended pause has been restored and preserved; the available evidence has not identified the caller.
 
 During the incident inspection, before the later user-declared selection test, the read-only database contained no playback, queued, request or move command event after the end-of-party instruction. The last queued request, q141/Muzika na struju, was created at 05:45:07.244 before shutdown. No pending/sending request remained. Its presence cannot itself explain resumption. The relevant observations were:
 
@@ -111,7 +117,7 @@ During the incident inspection, before the later user-declared selection test, t
 |06:38:02.840|The transport worker read the actual native juraj-legion device: playing, paused=false, loading=false,122243/314626 ms.|
 |06:38:33.072|Event 513 marked the old q141 request removed after the reconnected queue omitted it. This is bookkeeping, not a playback command.|
 
-The live bridge was still v8; post-party bridge changes were not deployed. The caller is not yet identified. Reply 223 gave the observed player state and asked whether to restore the shutdown pause. The native pause was subsequently confirmed and the investigation continues under the operating boundary above. No transport command was issued by the listener.
+The live bridge was still v8; post-party bridge changes were not deployed. The caller is not yet identified. Reply 223 gave the observed player state and asked whether to restore the shutdown pause. The native pause was subsequently confirmed. The reviewed software release has since been deployed while preserving pause; the historical cause remains unknown. No transport command was issued by the listener.
 
 
 
@@ -249,7 +255,7 @@ Origin: Laptop; 17/11/2026, 02:02:38 Europe/Zagreb; event 115; requestId `591159
 
 > što s ovim posveta? jel ide TTS interlude? stavi da bude seamless
 
-Outcome: Speech code and Croatian invitation clips were built, but the audience judged the dedication attempts unsuccessful. Live announcements were cancelled by 141;170 authorizes silent rehearsal. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 23
 
@@ -313,7 +319,7 @@ Origin: Laptop; 17/11/2026, 02:37:43 Europe/Zagreb; event 161; requestId `72e397
 
 > složi karaoke (ono da nota ide slog po slog) za pjesmu koju ćeš dobiti za čas. zasad kreni pisati karaoke modul
 
-Outcome: A syllable-note renderer and exact Ružinavi Brod recording were prepared, with Antonio's dedication, but usable synchronized lyrics were missing when the track started. The live outcome failed and was cancelled. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 41
 
@@ -349,7 +355,7 @@ Origin: Laptop; 17/11/2026, 02:41:05 Europe/Zagreb; event 169; requestId `e0b4ee
 
 > ruzinavi brod, daleka obala je izbor za karaoke
 
-Outcome: A syllable-note renderer and exact Ružinavi Brod recording were prepared, with Antonio's dedication, but usable synchronized lyrics were missing when the track started. The live outcome failed and was cancelled. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 48
 
@@ -365,7 +371,7 @@ Origin: Laptop; 17/11/2026, 02:41:56 Europe/Zagreb; event 173; requestId `3f0b42
 
 > posveta ruzinavog broda je za antonija. reci mu da zgrabi mikrofon kad kreće.
 
-Outcome: A syllable-note renderer and exact Ružinavi Brod recording were prepared, with Antonio's dedication, but usable synchronized lyrics were missing when the track started. The live outcome failed and was cancelled. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 54
 
@@ -511,7 +517,7 @@ Origin: Laptop; 17/11/2026, 03:07:01 Europe/Zagreb; event 234; requestId `357532
 
 > pripremi rasputina s prigodnim vizualima. posveta: arijan
 
-Outcome: Rasputin was requested as an actual karaoke turn for Arijan. Provider attempts suffered synchronization, audio and visibility failures;141 cancelled further attempts. Future providers are exceptional under172. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 91
 
@@ -527,7 +533,7 @@ Origin: Laptop; 17/11/2026, 03:09:17 Europe/Zagreb; event 237; requestId `b9c88c
 
 > drugim riječima: rasputin je isto karaoke zahtjev. ALI ZAPRAVO!
 
-Outcome: Rasputin was requested as an actual karaoke turn for Arijan. Provider attempts suffered synchronization, audio and visibility failures;141 cancelled further attempts. Future providers are exceptional under172. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 93
 
@@ -535,7 +541,7 @@ Origin: Laptop; 17/11/2026, 03:10:17 Europe/Zagreb; event 238; requestId `4354c1
 
 > daj neki vizualni feedback onom koji je napisao poruku da razmišljaš o njegovoj poruci
 
-Outcome: Processing IDs and native visual dots were implemented. Processing reflects concrete active work and is cleared after deployment or cancellation. See [decision](#listener-and-queue-events).
+Outcome: Initial processing dots were deployed during the party. The later structural requests 264–266 are now delivered as durable work states with real outcome/evidence and preserved historical acceptance uncertainty. See [decision](#listener-and-queue-events).
 
 ### Chat 96
 
@@ -577,7 +583,7 @@ Origin: Laptop; 17/11/2026, 03:17:28 Europe/Zagreb; event 250; requestId `a2e74c
 >
 > (i nekim hrvatskim koji nije sranje)
 
-Outcome: Speech code and Croatian invitation clips were built, but the audience judged the dedication attempts unsuccessful. Live announcements were cancelled by 141;170 authorizes silent rehearsal. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 105
 
@@ -649,7 +655,7 @@ Origin: Laptop; 17/11/2026, 03:36:37 Europe/Zagreb; event 277; requestId `3c8c66
 
 > ovo se desinkroniziralo, daj opet
 
-Outcome: The failed performance was out of sync, showed the wrong application and mishandled performer order. Antonio was first. Repeated announcements did not produce a successful turn;141 cancelled the attempt. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 120
 
@@ -657,7 +663,7 @@ Origin: Laptop; 17/11/2026, 03:36:41 Europe/Zagreb; event 278; requestId `510bd1
 
 > brzo odma sada odma
 
-Outcome: The failed performance was out of sync, showed the wrong application and mishandled performer order. Antonio was first. Repeated announcements did not produce a successful turn;141 cancelled the attempt. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 121
 
@@ -681,7 +687,7 @@ Origin: Laptop; 17/11/2026, 03:37:15 Europe/Zagreb; event 281; requestId `a38cc8
 
 > pa prozovi arijana ponovno
 
-Outcome: The failed performance was out of sync, showed the wrong application and mishandled performer order. Antonio was first. Repeated announcements did not produce a successful turn;141 cancelled the attempt. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Cancelled by 141 after unsuccessful live karaoke/dedication delivery. The later 170/246 quiet engineering request was handled separately; it does not convert the failed audience performance into a success. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 124
 
@@ -761,7 +767,7 @@ Origin: Laptop; 17/11/2026, 04:02:30 Europe/Zagreb; event 310; requestId `f796db
 
 > s ovim botchanim izvršenjima si failao, tako da ih nemoj ponovno pokušavati. održavaj atmosferu queanjem
 
-Outcome: Cancelled the failed karaoke/announcement attempts and returned the task to atmosphere through queue curation. Automatic speech was disabled and the cancelled live performances were not resumed. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Completed: further attempts at those cancelled live turns stopped, speech remained disabled, and the task returned to the requested queue curation. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 145
 
@@ -871,7 +877,7 @@ Origin: Laptop; 17/11/2026, 05:54:41 Europe/Zagreb; event 448; requestId `232cf0
 >
 > sve to si išao reasonati iz nule i zato je dugo trajalo. sad kad je masu toga uspostavljeno, to treba sistematično složiti i omogućiti da se ide brže, više, jače idući put
 
-Outcome: Ended the party with an explicit pause and authorized continued silent engineering: reusable tools, synchronized state, nonexclusive seed, audience-first prose, fast curation and failure rehearsal. Consolidation remains in progress. See [decision](#post-party-consolidation).
+Outcome: Completed: the reusable operator tools, audience-led procedures, nonexclusive seed and implementation references are integrated and pushed in the main repository. See [decision](#post-party-consolidation).
 
 ### Chat 171
 
@@ -879,7 +885,7 @@ Origin: Laptop; 17/11/2026, 05:57:54 Europe/Zagreb; event 449; requestId `766b8c
 
 > uspostavi unutar qtrae virtualni dj direktorij koji će biti NEEKSKLUZIVNI (seed) zbir dokumentacije, pluginova, razrađenog materijala, uhodanih bitnih postupaka (mijenjanje play queua, iznimno ako baš treba preskakanje/zaustavljanje); proza treba istaknuti važnost praćenja signala publike
 
-Outcome: Ended the party with an explicit pause and authorized continued silent engineering: reusable tools, synchronized state, nonexclusive seed, audience-first prose, fast curation and failure rehearsal. Consolidation remains in progress. See [decision](#post-party-consolidation).
+Outcome: Completed: the reusable operator tools, audience-led procedures, nonexclusive seed and implementation references are integrated and pushed in the main repository. See [decision](#post-party-consolidation).
 
 ### Chat 172
 
@@ -895,7 +901,7 @@ Origin: Laptop; 17/11/2026, 06:01:01 Europe/Zagreb; event 455; requestId `2a2c7d
 
 > ux nit: pjesme search space je mrvicu malen. podrži i semantički opis za pretragu osim egzaktnog (npr ona bebekova iz kafane gdje nije sklopio oka zbog ljubavi, itd)
 
-Outcome: Larger search space and asynchronous descriptive search are being implemented, while exact catalogue search remains immediate. The Bebek example was identified and offered without enqueueing. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: larger results, independent immediate exact search, descriptive candidates with track.match evidence, and the same explicit selection/dedication flow. The Bebek example was offered without enqueueing. See [decision](#post-party-interface-work).
 
 ### Chat 176
 
@@ -903,7 +909,7 @@ Origin: Laptop; 17/11/2026, 06:02:28 Europe/Zagreb; event 456; requestId `5ae837
 
 > zadnju poruku koja još nije poslana u obradu bi se trebalo moći poništiti  s esc i vratiti nazad u ovaj composer na doradu
 
-Outcome: Escape and a clickable × should recall the latest unprocessed message into the composer. Recall and processing ownership must have a consistent winner. Implementation and integrated verification are pending. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: Escape and × recall the latest own unaccepted message while preserving drafts. Read-only receipts remain eligible; accepted or durably owned work is protected. Private race/draft checks passed. See [decision](#post-party-interface-work).
 
 ### Chat 177
 
@@ -911,7 +917,7 @@ Origin: Laptop; 17/11/2026, 06:02:40 Europe/Zagreb; event 457; requestId `02095b
 
 > zadnju poruku koja još nije poslana u obradu bi se trebalo moći poništiti  s esc i vratiti nazad u ovaj composer na doradu
 
-Outcome: 177 duplicates176;178 explicitly withdraws the duplicate. The duplicate is retained here as the motivating recall example, without a second implementation task. See [decision](#post-party-interface-work).
+Outcome: Cancelled: 178 explicitly withdrew this duplicate of 176; the original request remained authoritative. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 178
 
@@ -919,7 +925,7 @@ Origin: Laptop; 17/11/2026, 06:02:54 Europe/Zagreb; event 458; requestId `920836
 
 > zanemari duplikat (evo npr sad bih ga poništio)
 
-Outcome: 177 duplicates176;178 explicitly withdraws the duplicate. The duplicate is retained here as the motivating recall example, without a second implementation task. See [decision](#post-party-interface-work).
+Outcome: Completed: the specified duplicate and accidental messages were ignored as requested, with their exact withdrawal reasons retained. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 179
 
@@ -927,7 +933,7 @@ Origin: Laptop; 17/11/2026, 06:03:34 Europe/Zagreb; event 459; requestId `a1c9e9
 
 > ikona miša je dosta sitna, dok je ovaj UI dosta high dpi-ast. probaj reći desktop environmentu da bismo trebali imati veći miš
 
-Outcome: Global pointer size 24→48 was initially applied.200 narrowed the scope; the global setting was restored to 24 and an in-DJ cursor treatment is pending. See [decision](#post-party-interface-work).
+Outcome: The initial global cursor enlargement was corrected by 200: GNOME is restored to 24 and the scoped DJ cursor treatment is now deployed. See [decision](#post-party-interface-work).
 
 ### Chat 182
 
@@ -935,7 +941,7 @@ Origin: Laptop; 17/11/2026, 06:04:14 Europe/Zagreb; event 462; requestId `e1f4b1
 
 > sitan scrollbar je ok; jedini problem je nedostatak kontrasta između dark slidera i dark pozadine trake
 
-Outcome: Keep the thin scrollbar, increase thumb/track contrast. Native implementation is pending verification/deployment. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: stronger scrollbar thumb/track contrast, retaining the thin scrollbar. See [decision](#post-party-interface-work).
 
 ### Chat 185
 
@@ -943,7 +949,7 @@ Origin: Laptop; 17/11/2026, 06:05:17 Europe/Zagreb; event 465; requestId `331113
 
 > probaj s ovim skrolanjem na dno ne mora biti naporan korisniku (automatski skrolaj na dno tek nakon npr 2 minute bez odgovora korisnika ili agenta)
 
-Outcome: Supersedes107: return smoothly to the bottom only after about two minutes without user or agent replies, also respecting interaction. Native implementation is pending verification/deployment. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: smooth return after approximately two minutes without interaction or a user/DJ reply, superseding the earlier 20-second behaviour. See [decision](#post-party-interface-work).
 
 ### Chat 186
 
@@ -951,7 +957,7 @@ Origin: Laptop; 17/11/2026, 06:06:25 Europe/Zagreb; event 466; requestId `8cf4c1
 
 > egzaktna pretraga, s druge strane, ne bi trebala imati reasoning delay.
 
-Outcome: Larger search space and asynchronous descriptive search are being implemented, while exact catalogue search remains immediate. The Bebek example was identified and offered without enqueueing. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: larger results, independent immediate exact search, descriptive candidates with track.match evidence, and the same explicit selection/dedication flow. The Bebek example was offered without enqueueing. See [decision](#post-party-interface-work).
 
 ### Chat 187
 
@@ -959,7 +965,7 @@ Origin: Laptop; 17/11/2026, 06:07:10 Europe/Zagreb; event 467; requestId `f07683
 
 > napravi inventar svih korisničkih upita od početka ovog razgovora i arhiviraj u DESIGN.md ili nešto prikladno
 
-Outcome: Requested a complete maintained inventory, explicitly named DECISIONS.md, and useful documentation of the combined implementation. This document and the playbook are the owned deliverables; integration review is pending. See [decision](#post-party-consolidation).
+Outcome: Completed: the maintained inventory includes all 144 archived guest texts through 266, the initial main asks and both private asks, with corrections and outcomes. Exact-text and link checks passed. See [decision](#post-party-consolidation).
 
 ### Chat 188
 
@@ -967,7 +973,7 @@ Origin: Laptop; 17/11/2026, 06:07:24 Europe/Zagreb; event 468; requestId `4ec290
 
 > zapravo, bolje u DECISIONS.md.
 
-Outcome: Requested a complete maintained inventory, explicitly named DECISIONS.md, and useful documentation of the combined implementation. This document and the playbook are the owned deliverables; integration review is pending. See [decision](#post-party-consolidation).
+Outcome: Completed: the maintained inventory includes all 144 archived guest texts through 266, the initial main asks and both private asks, with corrections and outcomes. Exact-text and link checks passed. See [decision](#post-party-consolidation).
 
 ### Chat 189
 
@@ -975,7 +981,7 @@ Origin: Laptop; 17/11/2026, 06:07:53 Europe/Zagreb; event 469; requestId `521e55
 
 > pokreni roj subagenata da reviewaju. kad su gotovi, implementiraj, pa ponovi još runda toga
 
-Outcome: Explicitly requested two review/fix rounds. Reviewers are assigned across the work; both rounds and implemented findings must be recorded before closing this request. See [decision](#post-party-consolidation).
+Outcome: Completed: both requested review/fix waves are recorded. The focused queue, backend, native and final acceptance-history checks passed before release. See [decision](#review-and-fix-rounds).
 
 ### Chat 192
 
@@ -983,7 +989,7 @@ Origin: Laptop; 17/11/2026, 06:09:11 Europe/Zagreb; event 472; requestId `8fa28f
 
 > zdenkov link je  y
 
-Outcome: 192 and 193 were explicitly withdrawn by 194. They do not create a Zdenko-link task. See [decision](#withdrawn-and-disputed-input).
+Outcome: Cancelled: 194 explicitly withdrew both 192 and 193. They did not create a separate task. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 193
 
@@ -991,7 +997,7 @@ Origin: Laptop; 17/11/2026, 06:09:14 Europe/Zagreb; event 473; requestId `7bacba
 
 > y
 
-Outcome: 192 and 193 were explicitly withdrawn by 194. They do not create a Zdenko-link task. See [decision](#withdrawn-and-disputed-input).
+Outcome: Cancelled: 194 explicitly withdrew both 192 and 193. They did not create a separate task. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 194
 
@@ -999,7 +1005,7 @@ Origin: Laptop; 17/11/2026, 06:09:20 Europe/Zagreb; event 475; requestId `3128a2
 
 > ups, zanemari dvije zadnje
 
-Outcome: 192 and 193 were explicitly withdrawn by 194. They do not create a Zdenko-link task. See [decision](#withdrawn-and-disputed-input).
+Outcome: Completed: the specified duplicate and accidental messages were ignored as requested, with their exact withdrawal reasons retained. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 195
 
@@ -1007,7 +1013,7 @@ Origin: Laptop; 17/11/2026, 06:09:50 Europe/Zagreb; event 476; requestId `3a55a5
 
 > možda dodaj i maleni x dok su pending, tako da se mogu i upaljačem
 
-Outcome: Escape and a clickable × should recall the latest unprocessed message into the composer. Recall and processing ownership must have a consistent winner. Implementation and integrated verification are pending. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: Escape and × recall the latest own unaccepted message while preserving drafts. Read-only receipts remain eligible; accepted or durably owned work is protected. Private race/draft checks passed. See [decision](#post-party-interface-work).
 
 ### Chat 196
 
@@ -1015,7 +1021,7 @@ Origin: Laptop; 17/11/2026, 06:10:47 Europe/Zagreb; event 477; requestId `aba9d7
 
 > nakon što pomergeaš sve što se dogodilo i na rootu i na steffy i s antoniom, napišti onu smislenu dokumentaciju koja bi trebala biti dosta od pomoći
 
-Outcome: Requested a complete maintained inventory, explicitly named DECISIONS.md, and useful documentation of the combined implementation. This document and the playbook are the owned deliverables; integration review is pending. See [decision](#post-party-consolidation).
+Outcome: Completed: the reusable operator tools, audience-led procedures, nonexclusive seed and implementation references are integrated and pushed in the main repository. See [decision](#post-party-consolidation).
 
 ### Chat 199
 
@@ -1025,7 +1031,7 @@ Origin: Laptop; 17/11/2026, 06:16:34 Europe/Zagreb; event 480; requestId `b67514
 >
 > hmm, što je ovo?
 
-Outcome: The unusual quoted string appears only in this user message, not earlier chat/caption events or the searched maintained sources. Native composer was empty. Its origin remains unidentified. See [decision](#withdrawn-and-disputed-input).
+Outcome: Blocked: the historical sender remains unidentified because the old records lack source/peer/guest attribution. Deployed attribution and test labels address future input without resolving the older authorship question. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 200
 
@@ -1035,7 +1041,7 @@ Origin: Laptop; 17/11/2026, 06:17:32 Europe/Zagreb; event 481; requestId `b64d59
 >
 > trebao bi biti samo unutar ovog dj moda
 
-Outcome: Corrects179: enlarged pointer should apply only inside DJ mode. Global size 24 has been restored; scoped larger cursor implementation is pending. See [decision](#post-party-interface-work).
+Outcome: Completed: the global GNOME cursor is restored to 24; the larger pointer is scoped to deployed DJ controls. See [decision](#post-party-interface-work).
 
 ### Chat 201
 
@@ -1045,7 +1051,7 @@ Origin: Laptop; 17/11/2026, 06:20:17 Europe/Zagreb; event 483; requestId `278a3a
 >
 > tj nemoj se držati "starije" kao pijanplota jer nećeš moći pristup; zdrava doza za sve je 3 kom uzastopno, ali neka tvoj reviewer pobire unknown signature na svom krevetu
 
-Outcome: Contains ambiguous wording about three consecutive items and reviewers. A clarification was asked; no three-song artist limit has been adopted from this text. The later authorship dispute increases the need to resolve it. See [decision](#withdrawn-and-disputed-input).
+Outcome: Blocked: intended meaning and source remain unresolved. No redesign or three-consecutive-song rule has been inferred from this text. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 202
 
@@ -1053,7 +1059,7 @@ Origin: Laptop; 17/11/2026, 06:20:41 Europe/Zagreb; event 484; requestId `88ddb6
 
 > f11 radi samo u qtra, ne radi u spotifyju
 
-Outcome: Reports that F11 works in qtra but not Spotify. Native owner is investigating the existing fullscreen/window controls without playback changes. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: F11 support is scoped to Spotify/qtra through the helper. Private helper checks and installed-version verification passed. See [decision](#post-party-interface-work).
 
 ### Chat 203
 
@@ -1065,7 +1071,7 @@ Origin: Laptop; 17/11/2026, 06:22:12 Europe/Zagreb; event 485; requestId `e8d3f9
 >
 > too much jer tad prešan, već ima obnotljen repertoar
 
-Outcome: An unclear UI complaint and correction.212 questions authorship of203. Do not derive a redesign from this text until its source and intended meaning are confirmed. See [decision](#withdrawn-and-disputed-input).
+Outcome: Blocked: intended meaning and source remain unresolved. No redesign or three-consecutive-song rule has been inferred from this text. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 204
 
@@ -1073,7 +1079,7 @@ Origin: Laptop; 17/11/2026, 06:22:24 Europe/Zagreb; event 486; requestId `5a1f5b
 
 > obnovljen *
 
-Outcome: An unclear UI complaint and correction.212 questions authorship of203. Do not derive a redesign from this text until its source and intended meaning are confirmed. See [decision](#withdrawn-and-disputed-input).
+Outcome: Blocked: intended meaning and source remain unresolved. No redesign or three-consecutive-song rule has been inferred from this text. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 209
 
@@ -1081,7 +1087,7 @@ Origin: Gost; 17/11/2026, 06:27:58 Europe/Zagreb; event 492; requestId `9181b299
 
 > tko je pustio sad dalje spotify, svira bajagu? namjerno?
 
-Outcome: Reports Bajaga playing after the explicit end-of-party pause. No post-party playback command was issued by the guest-listener/documentation worker. Root owns actual player-state and command-source diagnosis; outcome is unresolved. See [decision](#unexpected-post-party-playback).
+Outcome: Blocked: the intended pause was restored and preserved, but the caller behind the earlier unexpected resume remains unidentified. The later declared q142 selection test is recorded separately. See [decision](#unexpected-post-party-playback).
 
 ### Chat 210
 
@@ -1113,7 +1119,7 @@ Origin: Gost; 17/11/2026, 06:30:00 Europe/Zagreb; event 495; requestId `855b2b47
 >
 > ovo isto, to sam ja pitao? hmmm.
 
-Outcome: Questions authorship of the odd UI text203. The listener suspended treating it as an instruction and asked the team to investigate its source. See [decision](#withdrawn-and-disputed-input).
+Outcome: Blocked: the historical sender remains unidentified because the old records lack source/peer/guest attribution. Deployed attribution and test labels address future input without resolving the older authorship question. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 217
 
@@ -1121,7 +1127,7 @@ Origin: Gost; 17/11/2026, 06:31:07 Europe/Zagreb; event 502.
 
 > zašto F11 radi samo hrabaru? standby funkcija frižidera također
 
-Outcome: Ambiguous follow-up mentioning F11 and a refrigerator standby function. Chat 229 subsequently confirms the actual intended question: F11 should work in Spotify as well as qtra. No refrigerator or standby feature is inferred. See [decision](#withdrawn-and-disputed-input).
+Outcome: Chat 229 clarified the intended F11 feature, which is now deployed for Spotify and qtra. The unexplained original wording remains part of the historical source question; no refrigerator feature was inferred. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 221
 
@@ -1140,7 +1146,7 @@ Origin: Gost; 17/11/2026, 06:38:59 Europe/Zagreb; event 515.
 
 > ovaj delay kad ti se pošalje poruka je predug. možda dodaj debug sitebarove i brinem se da na još višoj  sve rade.
 
-Outcome: Renewed the response-latency complaint and suggested diagnostic sidebars. The recorded interval from this message to acknowledgement225 is108829 ms. Root and the native owner are assessing actual send/receive/processing/reply timing; a new diagnostic UI is not yet deployed. See [decision](#listener-and-queue-events).
+Outcome: Waiting: the dedicated listener and retrying cursor workflow are in place; improved real guest response latency remains to be measured against the recorded 108.829-second delay. See [decision](#post-party-interface-work).
 
 ### Chat 226
 
@@ -1148,7 +1154,7 @@ Origin: Gost; 17/11/2026, 06:44:43 Europe/Zagreb; event 525.
 
 > ok, tko šalje poruke kao ja? netko tko testira? je li iskomunicirano u pozadini jasno koje su testne poruke od LLM-a, a koje su prave?
 
-Outcome: Explicitly asks who sent the disputed messages and whether tests are clearly separated from genuine guest input. Reply 227 states that the sender remains unidentified and that the old live schema lacks origin/test labels. Root is collecting exact agent-action records; live-capable tests and deployment are held during that investigation. Do not treat disputed messages as user instructions. See [decision](#withdrawn-and-disputed-input).
+Outcome: Blocked: the historical sender remains unidentified because the old records lack source/peer/guest attribution. Deployed attribution and test labels address future input without resolving the older authorship question. See [decision](#withdrawn-and-disputed-input).
 
 ### Chat 228
 
@@ -1166,7 +1172,7 @@ Origin: Gost; 17/11/2026, 06:46:49 Europe/Zagreb; event 528; requestId `817b9cde
 
 > ili nije?! uglavnom, htjedoh upitati zašto F11 radi samo u qtra, a ne i u spotifyju
 
-Outcome: Confirms the concrete request 202: F11 must also work in Spotify. The native correction remains pending deployment. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: F11 support is scoped to Spotify/qtra through the helper. Private helper checks and installed-version verification passed. See [decision](#post-party-interface-work).
 
 ### Chat 230
 
@@ -1174,7 +1180,7 @@ Origin: Gost; 17/11/2026, 06:48:02 Europe/Zagreb; event 529; requestId `64ff3cac
 
 > zašto "magic box" koji je "pošalji poruku" strši u zraku?
 
-Outcome: Initial wording about the Send area was narrowed by233-235 and240. The accepted change is a smaller lower margin and less reserved status space, not a composer redesign. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 231
 
@@ -1182,7 +1188,7 @@ Origin: Gost; 17/11/2026, 06:49:21 Europe/Zagreb; event 530; requestId `0697aab8
 
 > dakle, zlatno pravilo: foldati sve a a vezano za se dogodilo u jedan glavni repozitorij:, dok subagenti/teammateovi mogu napraviti jedan centralno praćen worktree
 
-Outcome: Establishes the golden rule of integrating everything into one main repository, with at most a centrally tracked teammate worktree where useful. Preserve standard Git coordination and clean integrated temporary work. See [decision](#post-party-consolidation).
+Outcome: Completed: the reusable operator tools, audience-led procedures, nonexclusive seed and implementation references are integrated and pushed in the main repository. See [decision](#post-party-consolidation).
 
 ### Chat 232
 
@@ -1200,7 +1206,7 @@ Origin: Gost; 17/11/2026, 06:51:31 Europe/Zagreb; event 533; requestId `a1aff8d8
 
 > zapravo ne magic box, nego gumb za slanje, a na dnu je status (jesu li njegove akcije utjecale na stvari)
 
-Outcome: Corrects230: the concern is the Send button and status below it.240 narrows it to excess lower margin. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 234
 
@@ -1208,7 +1214,7 @@ Origin: Gost; 17/11/2026, 06:51:44 Europe/Zagreb; event 534; requestId `33b2e96d
 
 > i taj status uzima malo previše praznog prostora
 
-Outcome: Specifies that the status area reserves too much blank space. Reduce that space while preserving layout stability. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 235
 
@@ -1216,7 +1222,7 @@ Origin: Gost; 17/11/2026, 06:51:50 Europe/Zagreb; event 535; requestId `9a98b74a
 
 > to je moja zamjerka
 
-Outcome: Confirms234 as the actual complaint. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 240
 
@@ -1226,7 +1232,7 @@ Origin: Gost; 17/11/2026, 06:53:13 Europe/Zagreb; event 540; requestId `e2b9df8a
 >
 > ne znam što misliš pod odvojen. samo ima malo prekomotnu donju marginu
 
-Outcome: Rejects the agent's broader “detached” interpretation. Only the lower margin is too generous; no restructuring of the composer/button relationship is requested. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 241
 
@@ -1234,7 +1240,7 @@ Origin: Gost; 17/11/2026, 06:53:27 Europe/Zagreb; event 541; requestId `117bc518
 
 > ono što se pojavljuje tamo, mogu biti neki bubbleovi ili speech
 
-Outcome: Offers bubbles or “speech” as an alternative status treatment. The concrete visual bubble option was acknowledged; cancelled spoken audio remains off. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 243
 
@@ -1242,7 +1248,7 @@ Origin: Gost; 17/11/2026, 06:53:44 Europe/Zagreb; event 543; requestId `a29aa0aa
 
 > ili ako smisliš još nešto bolje, odlično
 
-Outcome: Allows a better compact status treatment if the native owner finds one. Keep the reduced blank space and stable geometry as the requirements. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 245
 
@@ -1250,7 +1256,7 @@ Origin: Gost; 17/11/2026, 06:55:00 Europe/Zagreb; event 545; requestId `cc44eedd
 
 > dakle, idem spat. sortiraj, sačuvaj, generaliziraj, predvidi da budući ti može nabrijati.
 
-Outcome: The user is going to sleep and directs continued sorting, saving and generalization so a future DJ can do more. Continue the authorized quiet engineering and retain the explicit playback pause. See [decision](#post-party-consolidation).
+Outcome: Completed: the reusable operator tools, audience-led procedures, nonexclusive seed and implementation references are integrated and pushed in the main repository. See [decision](#post-party-consolidation).
 
 ### Chat 246
 
@@ -1258,7 +1264,7 @@ Origin: Gost; 17/11/2026, 06:55:20 Europe/Zagreb; event 546; requestId `008af4e3
 
 > i probaj temeljito ispitati karaoke sad na miru
 
-Outcome: Renews the request to test karaoke thoroughly in quiet conditions. This includes actual private rendering and the planned offline audio-file checks, beyond the completed guarded logic suite. See [decision](#karaoke-and-spoken-dedications).
+Outcome: Completed: quiet logic, rendering and integration checks passed, including actual file-only Croatian synthesis and offline mix measurement. Listening intelligibility on the intended speaker remains a separate observation. See [decision](#karaoke-and-spoken-dedications).
 
 ### Chat 249
 
@@ -1266,7 +1272,7 @@ Origin: Gost; 17/11/2026, 06:59:18 Europe/Zagreb; event 549.
 
 > za ove neke malo jače semantičke matcheve koje napraviš, probaj napisati izvor matcha (sadržaj stihova; ritam stihova; neprijavljeno citiranje; privatna tužba, ganjanje
 
-Outcome: Requests an explanation of the basis/source of stronger semantic matches. Chat 250 corrects the unintended tail and gives the intended categories. No legal-action task is inferred. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: larger results, independent immediate exact search, descriptive candidates with track.match evidence, and the same explicit selection/dedication flow. The Bebek example was offered without enqueueing. See [decision](#post-party-interface-work).
 
 ### Chat 250
 
@@ -1277,7 +1283,7 @@ Origin: Gost; 17/11/2026, 07:01:40 Europe/Zagreb; event 551.
 >
 > uhhhhh, što se ovo dogodilo na kraju pobogu? naslov pjesme, doslovni sadržaj stihova, semantički match
 
-Outcome: Clarifies 249: distinguish matches by song title, literal lyric content and semantic meaning. The listener acknowledged those labels and root owns their result/UI integration. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: larger results, independent immediate exact search, descriptive candidates with track.match evidence, and the same explicit selection/dedication flow. The Bebek example was offered without enqueueing. See [decision](#post-party-interface-work).
 
 ### Chat 251
 
@@ -1293,7 +1299,7 @@ Origin: Gost; 17/11/2026, 07:03:29 Europe/Zagreb; event 555; requestId `a7be733e
 
 > zaključno s prostorom ispod, svakako ga malo stanjiti, a gdje će te poruke biti pokazane, prepuštam
 
-Outcome: Confirms the bottom area must be thinner and leaves placement of temporary messages to the implementer. This supersedes broader interpretations of the Send-button complaint. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: reduced lower margin and compact status treatment, preserving stable composer geometry. These clarified layout requests did not reactivate spoken audio. See [decision](#post-party-interface-work).
 
 ### Chat 255
 
@@ -1317,7 +1323,7 @@ Origin: Gost; 17/11/2026, 07:07:36 Europe/Zagreb; event 564; requestId `ad167fa1
 
 > fora. možeš tako nešto napraviti i kad pjesma bude semantički odabrana, ne samo izbornikom
 
-Outcome: Likes the selected-song UX and requests the same presentation for semantic selection. The prepared native flow reuses the song/dedication view with explicit Send; deployment is pending. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: larger results, independent immediate exact search, descriptive candidates with track.match evidence, and the same explicit selection/dedication flow. The Bebek example was offered without enqueueing. See [decision](#post-party-interface-work).
 
 ### Chat 258
 
@@ -1325,7 +1331,7 @@ Origin: Gost; 17/11/2026, 07:07:51 Europe/Zagreb; event 565; requestId `a0c2b87f
 
 > makni cdot iz poruke na dnu pjesma je odabrana
 
-Outcome: Requests removal of the cdot/centered-dot separator from the bottom selected-song acknowledgement. The native owner located it in the post-request message; patch pending. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: the centered-dot separator was removed from the bottom request acknowledgement. See [decision](#post-party-interface-work).
 
 ### Chat 260
 
@@ -1333,7 +1339,7 @@ Origin: Gost; 17/11/2026, 07:08:25 Europe/Zagreb; event 567; requestId `d4495e23
 
 > "na repertoaru" neka pokaže artwork iz spotifyja
 
-Outcome: Requests Spotify artwork in Na repertoaru. Native owner has the implementation scope; pending. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: Na repertoaru displays Spotify artwork for the actual recording. See [decision](#post-party-interface-work).
 
 ### Chat 261
 
@@ -1341,7 +1347,7 @@ Origin: Gost; 17/11/2026, 07:08:57 Europe/Zagreb; event 568; requestId `0a7ec913
 
 > trebali bismo imati i neki globalni play/pauza indikator, koji se može kliknuti
 
-Outcome: Requests a visible global play/pause indicator that can be clicked. Root owns the fresh-state transport endpoint and native owner the presentation; no test-only real playback is authorized. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: the global play/pause indicator follows actual player state and uses explicit intent with occurrence/device guards. Stale, paused and buffering clocks hold the progress display; private tests passed. See [decision](#post-party-interface-work).
 
 ### Chat 263
 
@@ -1349,7 +1355,7 @@ Origin: Gost; 17/11/2026, 07:09:20 Europe/Zagreb; event 570; requestId `ef80ffe7
 
 > također, i preview više nadolazećih
 
-Outcome: Requests a preview of more upcoming tracks. Native owner is extending the view while preserving the current composer and layout. See [decision](#post-party-interface-work).
+Outcome: Completed and deployed: the interface provides a longer upcoming-song preview with stable layout. See [decision](#post-party-interface-work).
 
 ### Chat 264
 
@@ -1357,7 +1363,7 @@ Origin: Gost; 17/11/2026, 07:09:46 Europe/Zagreb; event 571; requestId `32f90d8a
 
 > što znače jako stare narančaste točkice?
 
-Outcome: Questions very old processing dots, revealing that the old flags persist across active/waiting/unresolved phases. Root owns a structural task-state correction. See [decision](#listener-and-queue-events).
+Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation; old dots were not merely replaced by checks. See [decision](#post-party-interface-work).
 
 ### Chat 265
 
@@ -1365,7 +1371,7 @@ Origin: Gost; 17/11/2026, 07:09:53 Europe/Zagreb; event 572; requestId `e764b076
 
 > bome ih ima
 
-Outcome: Emphasizes that many old dots remain; this is part of264/266's lifecycle defect, not a separate cosmetic cleanup request. See [decision](#listener-and-queue-events).
+Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation; old dots were not merely replaced by checks. See [decision](#post-party-interface-work).
 
 ### Chat 266
 
@@ -1373,4 +1379,4 @@ Origin: Gost; 17/11/2026, 07:10:15 Europe/Zagreb; event 573; requestId `f2650db2
 
 > to je strukturna pogreška, nemoj ih sad označiti kvačicama i reći to je to
 
-Outcome: Explicitly rejects replacing old orange dots with completion checks as the fix. Implement durable task progress and real outcome evidence; preserve existing indicators until the new contract is deployed. See [decision](#listener-and-queue-events).
+Outcome: Completed and deployed: durable active, waiting, blocked and terminal states, expiry to unconfirmed, and completion with outcome/evidence. All 25 migrated acceptance times remained unknown during reconciliation; old dots were not merely replaced by checks. See [decision](#post-party-interface-work).
