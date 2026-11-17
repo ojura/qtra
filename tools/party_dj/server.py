@@ -28,6 +28,8 @@ MOODS = {'chill': ('Lagano', .22), 'groove': ('Groove', .48),
          'dance': ('Plešemo', .74), 'chaos': ('Kaos', .95),
          'singalong': ('Pjevamo', .64)}
 TRACK = re.compile(r'^spotify:track:[A-Za-z0-9]{22}$')
+AUDIO_STYLES = ('ring', 'city', 'waterfall')
+AUDIO_ACT_MS = 45 * 60 * 1000
 
 
 def now_ms():
@@ -99,6 +101,10 @@ class Party:
         self.caption = None
         self.caption_queue = collections.deque()
         self.scene = self.setting('scene', {'mode': 'auto', 'energy': .65, 'palette': 'orange', 'effect': 5})
+        self.scene.setdefault('audioStyle', 'ring')
+        self.scene.setdefault('audioActStartedAt', now_ms())
+        if self.scene['audioStyle'] in ('city', 'waterfall'):
+            self.scene['effect'] = 0
         self.scene_manual_until = 0
         self.mood_votes = {}
         self.captions = self._load_captions()
@@ -370,7 +376,14 @@ class Party:
 
     def _advance_show(self):
         stamp = now_ms()
-        if self.scene.get('mode') == 'auto' and stamp > self.scene_manual_until and stamp - self.last_auto_scene > 75000:
+        if self.scene['audioStyle'] in ('city', 'waterfall'):
+            self.scene['effect'] = 0
+            if stamp - self.scene['audioActStartedAt'] >= AUDIO_ACT_MS:
+                self.scene['audioStyle'] = 'waterfall' if self.scene['audioStyle'] == 'city' else 'city'
+                self.scene['audioActStartedAt'] = stamp
+                self.set_setting('scene', self.scene)
+                self._event('audio_act', {'style': self.scene['audioStyle'], 'startedAt': stamp})
+        elif self.scene.get('mode') == 'auto' and stamp > self.scene_manual_until and stamp - self.last_auto_scene > 75000:
             effects = [1, 6, 3, 0, 7, 2, 5, 4]
             self.scene['effect'] = effects[self.scene_index % len(effects)]
             self.scene_index += 1
@@ -420,12 +433,20 @@ class Party:
                 mode = body.get('mode', self.scene['mode'])
                 if mode not in ('auto', 'orbit', 'laser', 'robots', 'quiet'):
                     raise ValueError('Unknown scene.')
+                style = body.get('audioStyle', self.scene['audioStyle'])
+                if style not in AUDIO_STYLES:
+                    raise ValueError('Choose ring, city or waterfall for audioStyle.')
                 self.scene.update({'mode': mode, 'energy': max(0, min(1, float(body.get('energy', self.scene['energy'])))),
                     'palette': clean(body.get('palette', self.scene['palette']), 30)})
                 if 'effect' in body:
                     self.scene['effect'] = int(body['effect'])
                 if 'graphicsScale' in body:
                     self.scene['graphicsScale'] = max(.75, min(2, float(body['graphicsScale'])))
+                if style != self.scene['audioStyle']:
+                    self.scene['audioActStartedAt'] = now_ms()
+                self.scene['audioStyle'] = style
+                if style in ('city', 'waterfall'):
+                    self.scene['effect'] = 0
                 self.scene_manual_until = now_ms() + int(body.get('holdSeconds', 600)) * 1000
                 self.set_setting('scene', self.scene)
                 self._event('scene', self.scene)

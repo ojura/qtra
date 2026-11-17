@@ -249,6 +249,52 @@ class PartyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.party.message({'requestId': 'one-message-id', 'text': 'Hello DJ'}, role='assistant')
 
+    def test_visual_act_rotates_after_45_minutes_without_restoring_legacy_geometry(self):
+        self.party.admin('scene', {'audioStyle': 'city', 'mode': 'auto', 'effect': 7})
+        started = self.stamp
+        self.assertEqual(self.party.scene['effect'], 0)
+        self.stamp += server.AUDIO_ACT_MS - 1
+        self.party.admin('scene', {'palette': 'ice', 'effect': 6})
+        with self.party.lock:
+            self.party._advance_show()
+        self.assertEqual(self.party.scene['audioStyle'], 'city')
+        self.assertEqual(self.party.scene['effect'], 0)
+        self.assertEqual(self.party.scene['audioActStartedAt'], started)
+        self.stamp += 1
+        with self.party.lock:
+            self.party._advance_show()
+        self.assertEqual(self.party.scene['audioStyle'], 'waterfall')
+        self.assertEqual(self.party.scene['palette'], 'ice')
+        self.assertEqual(self.party.scene['audioActStartedAt'], self.stamp)
+        event = self.party.db.execute("SELECT payload FROM events WHERE kind='audio_act'").fetchone()
+        self.assertEqual(json.loads(event[0])['style'], 'waterfall')
+
+    def test_visual_act_schedule_survives_restart_and_changes_only_once_when_overdue(self):
+        self.party.admin('scene', {'audioStyle': 'waterfall'})
+        started = self.stamp
+        self.stamp += 3 * server.AUDIO_ACT_MS
+        reopened = server.Party(Path(self.directory.name), client=self.client)
+        self.addCleanup(reopened.db.close)
+        self.assertEqual(reopened.scene['audioActStartedAt'], started)
+        with reopened.lock:
+            reopened._advance_show()
+            reopened._advance_show()
+        self.assertEqual(reopened.scene['audioStyle'], 'city')
+        self.assertEqual(reopened.scene['audioActStartedAt'], self.stamp)
+        self.assertEqual(reopened.db.execute("SELECT COUNT(*) FROM events WHERE kind='audio_act'").fetchone()[0], 1)
+
+    def test_ring_retains_geometry_controls_and_invalid_style_leaves_scene_intact(self):
+        self.party.admin('scene', {'audioStyle': 'ring', 'effect': 6, 'mode': 'laser', 'palette': 'ice'})
+        before = self.party.scene.copy()
+        with self.assertRaises(ValueError):
+            self.party.admin('scene', {'audioStyle': 'unknown', 'palette': 'orange'})
+        self.assertEqual(self.party.scene, before)
+        self.stamp += 2 * server.AUDIO_ACT_MS
+        with self.party.lock:
+            self.party._advance_show()
+        self.assertEqual(self.party.scene['audioStyle'], 'ring')
+        self.assertEqual(self.party.scene['effect'], 6)
+
 
 if __name__ == '__main__':
     unittest.main()

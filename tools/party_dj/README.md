@@ -19,7 +19,11 @@ guest URL, service status and native module IDs. Phones must be on a network tha
 can reach the laptop. Scan the QR on the display, or open the printed URL.
 
 On the laptop, press **R** or click **Zatraži pjesmu** for the native search and
-chat panel. **Escape** closes that panel, then leaves fullscreen on the next
+chat panel. The bottom Magic box accepts song searches or messages. Selecting a
+song turns that same box into an optional dedication; Cancel restores the search.
+Enter adds a line, and Ctrl+Enter or the labelled button sends. The panel uses
+23-pixel text and keeps its result area and composer at fixed sizes.
+**Escape** closes that panel, then leaves fullscreen on the next
 press. **F11** toggles fullscreen. A name and song dedication are optional.
 
 A nonempty dedication is also spoken briefly in Croatian as its requested song
@@ -141,7 +145,22 @@ The native scene modes are `auto`, `orbit`, `laser`, `robots` and `quiet`.
 | 6 | Ribbon and wireframe |
 | 7 | Sphere, ribbon and wireframe |
 
-Automatic geometry changes run every 75 seconds outside a manual hold. Book
+The audio composition is selected independently with `scene.audioStyle`:
+`city` draws a spectrum skyline, `waterfall` draws flowing spectral history,
+and `ring` retains the original circular show. The audio module follows this
+field from the same state file without restarting capture. Start a new act with:
+
+```sh
+python3 tools/party_dj/djctl.py scene --json '{"audioStyle":"city","mode":"laser","energy":0.8}'
+```
+
+City and waterfall alternate every 45 minutes. Their start time persists across
+service restarts; palette and energy changes keep the existing schedule. An
+overdue act changes once on recovery. Selecting a different style starts a fresh
+period. Linear acts keep legacy sphere/ribbon geometry off (`effect:0`).
+See [docs/audio-acts.md](../../docs/audio-acts.md) for native controls and rendering.
+
+In ring mode, automatic geometry changes run every 75 seconds outside a manual hold. Book
 rotation runs every 105 seconds, with three original photographs for each page
 preview. The service rereads the catalog on every rotation. Captions have IDs
 and reading time proportional to their length, and incoming lines wait for the
