@@ -81,6 +81,21 @@ sent, including a lost acknowledgement or an unconfirmed timeout. The Python
 wrapper preserves this distinction and never retries. The method has no toggle
 or untargeted fallback; a new action must use a new observation and decision.
 
+### The desktop client without Harmony
+
+The native desktop client's page (`xpui.app.spotify.com`) has no Harmony
+controller. Its PlayerAPI `pause`, `resume`, `skipToNext` and `skipToPrevious`
+drive the client's own player, so `setPaused` and `skip` use them only while that
+local player is the active device: `ConnectDevicesAPI.getActiveDevice()` must
+report `isLocal` and the caller's device ID. Status there comes from PlayerAPI
+(`playbackState.source` is `player-api`). The final synchronous occurrence guard
+reads `PlayerAPI.getState().item`, and the player's own restrictions apply
+(`canPause`, `canResume`, `canSkipNext`, and for previous `canSkipPrevious` or
+`canSeek`). Admission, the single dispatch, `dispatched` and the confirmation by
+actual state are the same as on the Harmony path. PlayerAPI first emits its
+cancellable UI event; a cancelled command is reported as unconfirmed. The web
+player still refuses transport without Harmony.
+
 ## Reordering the explicit queue atomically
 
 `reorderQueue(orderedQueuedUids, expectedQueuedUids, expectedCurrentUid,
@@ -317,7 +332,10 @@ false acknowledgements, device changes, the synthetic-state transfer guard,
 native fallback and retained queue request IDs. Explicit pause-state fixtures
 cover caller identity checks, missing pause flags, invalid/future clocks,
 idempotent fresh no-ops, current/device races, single dispatch and unconfirmed
-results. Queue-move fixtures additionally
+results. Desktop-client fixtures, on the actual `xpui.app.spotify.com` host,
+cover local-device pause/resume, next, previous and restart, remote or
+mismatched devices, occurrence changes, player restrictions and a cancelled
+command. Queue-move fixtures additionally
 cover repeated recordings, UID/anchor validation, atomic permutations, required
 current/device preconditions, stale revisions/order, concurrent changes,
 full context/history retention, no-ops and unconfirmed commands. Python fixtures

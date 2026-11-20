@@ -869,6 +869,95 @@ await web.bridge.control('next');
 assert.deepEqual(web.calls, [{action: 'next'}]);
 ''')
 
+    def test_desktop_set_paused_targets_the_active_local_player_and_confirms_state(self):
+        self.run_js(r'''
+const local = {id: 'local_device', name: 'Desk', type: 'computer', isLocal: true, isActive: true};
+// The desktop client's actual page host also ends in spotify.com.
+const f = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, observedDevice: local});
+for (const paused of [true, false]) {
+  const result = await f.bridge.setPaused(paused, 'occurrence-a', 'local_device');
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.changed, true);
+  assert.equal(result.paused, paused);
+  assert.equal(result.device.id, 'local_device');
+  assert.equal(result.status.playbackState.source, 'player-api');
+  assert.equal(result.status.nowPlaying.uid, 'occurrence-a');
+  assert.equal(result.status.nowPlaying.paused, paused);
+  assert.equal(result.status.nowPlaying.clockValid, true);
+}
+assert.deepEqual(f.calls, [{action: 'wrapperPause'}, {action: 'wrapperResume'}]);
+for (const paused of [true, false]) {
+  const idle = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, observedDevice: local, state: {isPaused: paused}});
+  const result = await idle.bridge.setPaused(paused, 'occurrence-a', 'local_device');
+  assert.equal(result.ok, true); assert.equal(result.changed, false); assert.equal(idle.calls.length, 0);
+}
+''')
+
+    def test_desktop_set_paused_refuses_remote_mismatched_or_restricted_targets_without_dispatch(self):
+        self.run_js(r'''
+const local = {id: 'local_device', name: 'Desk', type: 'computer', isLocal: true, isActive: true};
+for (const [options, expectedUid, expectedDevice, pattern] of [
+  [{observedDevice: {id: 'phone', name: 'Phone', type: 'smartphone', isLocal: false, isActive: true}}, 'occurrence-a', 'phone', /not the active playback device/],
+  [{observedDevice: local}, 'occurrence-a', 'other-device', /differs from the expected/],
+  [{observedDevice: local}, 'occurrence-b', 'local_device', /occurrence changed/],
+  [{observedDevice: local, state: {restrictions: {canPause: false}}}, 'occurrence-a', 'local_device', /disallows pause/],
+]) {
+  const f = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, ...options});
+  const result = await f.bridge.setPaused(true, expectedUid, expectedDevice);
+  assert.match(result.error, pattern);
+  assert.equal(result.dispatched, false);
+  assert.equal(f.calls.length, 0);
+}
+const web = await fixture({withHarmony: false});
+const refused = await web.bridge.setPaused(true, 'occurrence-a', 'standalone');
+assert.match(refused.error, /no targeted, occurrence-checked playback/);
+assert.equal(refused.dispatched, false); assert.equal(web.calls.length, 0);
+const cancelled = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, observedDevice: local});
+cancelled.api.pause = async () => { cancelled.calls.push({action: 'cancelledPause'}); };
+const unconfirmed = await cancelled.bridge.setPaused(true, 'occurrence-a', 'local_device');
+assert.match(unconfirmed.error, /did not confirm/);
+assert.equal(unconfirmed.dispatched, true);
+assert.deepEqual(cancelled.calls, [{action: 'cancelledPause'}]);
+''')
+
+    def test_desktop_skip_confirms_next_previous_and_restart_on_the_local_player(self):
+        self.run_js(r'''
+const local = {id: 'local_device', name: 'Desk', type: 'computer', isLocal: true, isActive: true};
+const next = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, observedDevice: local});
+next.api.skipToNext = async () => {
+  next.calls.push({action: 'desktopNext'}); next.state.item = queuedTrack('after', 'c'); next.state.positionAsOfTimestamp = 0; };
+const advanced = await next.bridge.skip('next', 'occurrence-a', 'local_device');
+assert.equal(advanced.ok, true, JSON.stringify(advanced));
+assert.equal(advanced.outcome, 'next'); assert.equal(advanced.toUid, 'after'); assert.equal(advanced.device.id, 'local_device');
+assert.deepEqual(next.calls, [{action: 'desktopNext'}]);
+const back = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, observedDevice: local});
+back.api.skipToPrevious = async () => {
+  back.calls.push({action: 'desktopPrevious'}); back.state.item = queuedTrack('previous', 'z'); back.state.positionAsOfTimestamp = 0; };
+const previous = await back.bridge.skip('previous', 'occurrence-a', 'local_device');
+assert.equal(previous.ok, true, JSON.stringify(previous));
+assert.equal(previous.outcome, 'previous'); assert.equal(previous.toUid, 'previous');
+assert.deepEqual(back.calls, [{action: 'desktopPrevious'}]);
+const restart = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, observedDevice: local});
+restart.api.skipToPrevious = async () => {
+  restart.calls.push({action: 'desktopPrevious'}); restart.state.positionAsOfTimestamp = 0; restart.state.timestamp += 2000; };
+const restarted = await restart.bridge.skip('previous', 'occurrence-a', 'local_device');
+assert.equal(restarted.ok, true, JSON.stringify(restarted));
+assert.equal(restarted.outcome, 'restarted'); assert.equal(restarted.toUid, 'occurrence-a');
+for (const [direction, restrictions] of [['next', {canSkipNext: false}],
+    ['previous', {canSkipPrevious: false, canSeek: false}]]) {
+  const f = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false, observedDevice: local, state: {restrictions}});
+  f.api.skipToPrevious = async () => { f.calls.push({action: 'desktopPrevious'}); };
+  const result = await f.bridge.skip(direction, 'occurrence-a', 'local_device');
+  assert.match(result.error, /disallows the requested skip/);
+  assert.equal(result.dispatched, false); assert.equal(f.calls.length, 0);
+}
+const remote = await fixture({hostname: 'xpui.app.spotify.com', withHarmony: false,
+  observedDevice: {id: 'phone', name: 'Phone', type: 'smartphone', isLocal: false, isActive: true}});
+const refused = await remote.bridge.skip('next', 'occurrence-a', 'phone');
+assert.match(refused.error, /not the active playback device/);
+assert.equal(refused.dispatched, false); assert.equal(remote.calls.length, 0);
+''')
+
     def test_raw_track_identity_and_existing_queue_idempotence_survive_reload(self):
         self.run_js(r'''
 const operations = new Map([['existing-request', Promise.resolve({queued: true})]]);
