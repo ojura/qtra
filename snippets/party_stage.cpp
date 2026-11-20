@@ -3,6 +3,7 @@
 // follow the LARICS Spomenar robots; their cargo tonight is a record.
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "demo/party_formation.h"
 #include "demo/party_scene.h"
 
 #include <QAction>
@@ -473,8 +474,15 @@ void disc(QPainter& p, QPointF at, double radius, QColor colour, double turn)
     p.restore();
 }
 
-// Vehicle coordinates are independent of the view. Text is drawn after the
-// transform is restored, so labels keep their readable screen size.
+QString robotName(int kind)
+{
+    return kind == 0 ? QStringLiteral("EagleRed") : kind == 1 ? QStringLiteral("VIV")
+        : kind == 2 ? QStringLiteral("Navines") : QStringLiteral("MORUS");
+}
+bool robotFlies(int kind) { return kind == 0 || kind == 3; }
+
+// Vehicle coordinates are independent of the view. The name tag is a separate
+// scene item (see fleetTag), so it keeps its readable screen size and depth.
 void robot(QPainter& p, int kind, QPointF at, double scale, double time,
            double travelled, double direction, double pulse, bool carrying)
 {
@@ -546,14 +554,6 @@ void robot(QPainter& p, int kind, QPointF at, double scale, double time,
     p.drawEllipse(QPointF(-4 + direction * 1.1, air ? -5 : -13), 2, blink);
     p.drawEllipse(QPointF(4 + direction * 1.1, air ? -5 : -13), 2, blink);
     p.restore();
-    p.setFont(stageFont(std::clamp(scale * 10, 14.0, 32.0), true));
-    p.setPen(alpha(light, .82));
-    const QString name = kind == 0 ? QStringLiteral("EagleRed")
-        : kind == 1 ? QStringLiteral("VIV") : kind == 2 ? QStringLiteral("Navines") : QStringLiteral("MORUS");
-    const QFontMetricsF label(p.font());
-    const double labelWidth = label.horizontalAdvance(name) + 24;
-    p.drawText(QRectF(at.x() - labelWidth / 2, at.y() + scale * (carrying && air ? 76 : 34), labelWidth, label.height() + 4),
-               Qt::AlignCenter, name);
 }
 
 struct Cue {
@@ -1743,6 +1743,7 @@ public:
         cursorScope_ = new DjCursorScope(window, this);
         scene_ = party_scene::Scene::acquire(cube_);
         if (scene_) scene_->addOwner(this, [this](party_scene::Frame& frame) { submitScene(frame); });
+        formations_ = party_scene::Formations::acquire(cube_);
         show(); raise();
     }
     ~PartyStage() override
@@ -1835,7 +1836,7 @@ public:
         setProperty("trackTitle", text(now, "title"));
         applyEffect();
         updatePlaybackControl();
-        update();
+        invalidateLayer();
     }
     QJsonObject status() const
     {
@@ -1846,7 +1847,7 @@ public:
                 {QStringLiteral("caption"), cue_.text}, {QStringLiteral("captionSeconds"), cue_.seconds},
                 {QStringLiteral("pendingCaptions"), pending_.size()},
                 {QStringLiteral("effect"), effectIndex_}, {QStringLiteral("effectError"), effectError_},
-                {QStringLiteral("fileError"), fileError_}, {QStringLiteral("paintCount"), QString::number(paints_)},
+                {QStringLiteral("fileError"), fileError_}, {QStringLiteral("paintCount"), QString::number(paints_)}, {QStringLiteral("overlayPaintMs"), paintMs_}, {QStringLiteral("overlayLayerPaints"), qint64(layerPaints_)},
                 {QStringLiteral("requestUrl"), requestUrl()},
                 {QStringLiteral("djCursorPixels"), cube_->window()->cursor().pixmap().width()},
                 {QStringLiteral("windowToggleConfigured"), spotifyAction_->isEnabled()},
@@ -1880,6 +1881,8 @@ public:
         const auto bounds = [](const QRectF& r) { return QJsonArray{r.x(), r.y(), r.width(), r.height()}; };
         result.insert(QStringLiteral("requestCardBounds"), bounds(requestRect_));
         result.insert(QStringLiteral("qrBounds"), bounds(qrBounds_));
+        result.insert(QStringLiteral("bookImageBounds"), bounds(bookImage_));
+        result.insert(QStringLiteral("bookCaptionBounds"), bounds(bookCaption_));
         result.insert(QStringLiteral("playingCardBounds"), bounds(playingBounds_));
         result.insert(QStringLiteral("trackProgressMs"), trackProgress());
         result.insert(QStringLiteral("trackClockValid"), trackClockKnown_ && trackClockTrusted_
@@ -1992,29 +1995,74 @@ protected:
         }
         return QWidget::eventFilter(o, e);
     }
-    void paintEvent(QPaintEvent*) override
+    void paintEvent(QPaintEvent* event) override
     {
         ++paints_;
-        QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-        p.setRenderHint(QPainter::TextAntialiasing);
+        QElapsedTimer paintClock; paintClock.start();
+        // State-driven UI is drawn into a cached layer once per change. A paint
+        // copies the dirty part of that layer and draws the time-driven parts.
+        const qreal ratio = devicePixelRatioF();
+        const QSize pixels(int(std::ceil(width() * ratio)), int(std::ceil(height() * ratio)));
+        if (layerDirty_ || layer_.size() != pixels) {
+            layer_ = QImage(pixels, QImage::Format_ARGB32_Premultiplied);
+            layer_.setDevicePixelRatio(ratio); layer_.fill(Qt::transparent);
+            QPainter layer(&layer_); paintLayer(layer);
+            layerDirty_ = false; ++layerPaints_;
+        }
+        QPainter p(this);
+        const QRect dirty = event->rect();
+        p.drawImage(QRectF(dirty), layer_, QRectF(QPointF(dirty.topLeft()) * ratio, QSizeF(dirty.size()) * ratio));
+        paintAnimated(p, dirty);
+        paintMs_ = paintMs_ * .9 + paintClock.nsecsElapsed() / 1000000.0 * .1;
+    }
+    // Time-driven parts of the overlay, drawn over the cached layer.
+    void paintAnimated(QPainter& p, const QRect& dirty)
+    {
+        p.setRenderHint(QPainter::Antialiasing); p.setRenderHint(QPainter::TextAntialiasing);
         const double w = width(), h = height(), t = seconds();
         const double u = std::clamp(std::min(w / 1280.0, h / 800.0), .65, 2.0);
         const QColor orange = palette() == QStringLiteral("ice") ? QColor("#7bdffc") : QColor("#ff8a42");
-        const QColor cyan("#7de4ed"), lilac("#a79bf5"), white("#f7f2ea");
-        const QString mode = sceneMode();
-        const double energy = unit(number(state_.value(QStringLiteral("scene")).toObject(), "energy", .55));
-        // The host's audio snippet owns scale and tint. We observe those outputs
-        // instead of opening a second audio stream.
-        const double pulse = cube_ ? unit((cube_->m_tint.y() - .5) * 2.2) : 0;
-        const double reaction = .20 + energy * .8;
+        const QRectF bar = progressBar(u);
+        if (!bar.isEmpty() && dirty.intersects(bar.toAlignedRect())) {
+            p.setPen(Qt::NoPen); p.setBrush(orange);
+            p.drawRoundedRect(QRectF(bar.topLeft(), QSizeF(bar.width() * progressFraction(), bar.height())), 1.5, 1.5);
+        }
+        const double mission = t - missionStart_;
+        if (mission >= 0 && mission < 17) drawDeliveryBubble(p, w, h, u, orange, mission);
+        drawKaraoke(p, w, h, u, orange);
+        drawCaption(p, w, h, u, QColor("#f7f2ea"), orange);
+    }
+    QRectF progressBar(double u) const
+    {
+        const auto now = state_.value(QStringLiteral("nowPlaying")).toObject();
+        if (playingBounds_.isEmpty() || number(now, "durationMs", 0) <= 0 || !trackClockKnown_) return {};
+        return QRectF(playingBounds_.x() + 17 * u, playingBounds_.bottom() - 5 * u, playingBounds_.width() - 34 * u, 3 * u);
+    }
+    double progressFraction() const
+    {
+        const double duration = number(state_.value(QStringLiteral("nowPlaying")).toObject(), "durationMs", 0);
+        return duration > 0 ? unit(trackProgress() / duration) : 0;
+    }
+    void invalidateLayer() { layerDirty_ = true; update(); }
+    // State-driven overlay: header, now playing, request card, book photograph and queue.
+    void paintLayer(QPainter& p)
+    {
+        p.setRenderHint(QPainter::Antialiasing); p.setRenderHint(QPainter::TextAntialiasing);
+        const double w = width(), h = height();
+        const double u = std::clamp(std::min(w / 1280.0, h / 800.0), .65, 2.0);
+        const QColor orange = palette() == QStringLiteral("ice") ? QColor("#7bdffc") : QColor("#ff8a42");
+        const QColor cyan("#7de4ed"), white("#f7f2ea");
         const double margin = 34 * u;
         {
             QLinearGradient top(0, 0, 0, h * .34);
             top.setColorAt(0, QColor(6, 10, 22, 235)); top.setColorAt(1, QColor(6, 10, 22, 0));
             p.fillRect(QRectF(0, 0, w, h * .34), top);
-            QLinearGradient bottom(0, h * .62, 0, h);
-            bottom.setColorAt(0, QColor(6, 10, 22, 0)); bottom.setColorAt(1, QColor(6, 10, 22, 235));
-            p.fillRect(QRectF(0, h * .62, w, h * .38), bottom);
+            // The bottom shade only backs the queue strip. Above it the scene's
+            // actors keep their full brightness.
+            QLinearGradient bottom(0, h - 110 * u, 0, h);
+            bottom.setColorAt(0, QColor(6, 10, 22, 0)); bottom.setColorAt(.35, QColor(6, 10, 22, 190));
+            bottom.setColorAt(1, QColor(6, 10, 22, 235));
+            p.fillRect(QRectF(0, h - 110 * u, w, 110 * u), bottom);
 
 
             p.setFont(uiFont(u, UiMetrics::body, true)); p.setPen(orange);
@@ -2052,9 +2100,8 @@ protected:
                        QFontMetrics(p.font()).elidedText(artist, Qt::ElideRight, qRound(infoWidth - textInset - 19 * u)));
             const double duration = number(now, "durationMs", 0);
             if (duration > 0 && trackClockKnown_) {
-                const double progress = unit(trackProgress() / duration);
+                // The filled part is time-driven (paintAnimated).
                 p.setPen(Qt::NoPen); p.setBrush(alpha(orange, .14)); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, infoWidth - 34 * u, 3 * u), 1.5, 1.5);
-                p.setBrush(orange); p.drawRoundedRect(QRectF(playing.x() + 17 * u, playing.bottom() - 5 * u, (infoWidth - 34 * u) * progress, 3 * u), 1.5, 1.5);
             }
 
             const double requestWidth = requestCardWidth(w, u);
@@ -2098,14 +2145,8 @@ protected:
                            QFontMetrics(p.font()).elidedText(guestUrl, Qt::ElideMiddle, qRound(labelWidth)));
             }
 
-            const double mission = t - missionStart_;
-            if (mission >= 0 && mission < 17) drawDelivery(p, w, h, u, t, pulse, orange, mission, true);
-
         }
         drawBook(p, w, h, u, orange);
-        drawKaraoke(p, w, h, u, orange);
-        drawCaption(p, w, h, u, white, orange);
-
         queuePreview_ = {};
         const auto queue = state_.value(QStringLiteral("queue")).toArray();
         if (!queue.isEmpty()) {
@@ -2405,7 +2446,7 @@ private:
                 if (!artwork_.isNull()) artworkCache_.insert(wanted, new QImage(artwork_));
             } else if (artworkError_.isEmpty()) artworkError_ = reply->errorString();
             artworkBytes_.clear(); artworkRetryAt_ = QDateTime::currentMSecsSinceEpoch() + 30000;
-            reply->deleteLater(); update();
+            reply->deleteLater(); invalidateLayer();
         });
     }
 
@@ -2752,8 +2793,7 @@ private:
         const auto frame = sourceLyricsFrame();
         if (sourceLyricsText_ && (!frame.visible || !frame.available || !frame.untimed)) sourceLyricsText_->hide();
         if (!frame.visible) return false;
-        const QRectF card(34 * u, 292 * u, w - 68 * u,
-                          std::min(390 * u, graphicsBottom(w, h, u) - 310 * u));
+        const QRectF card = lyricsCard(w, h, u);
         if (card.height() < 230 * u || card.width() < 240 * u) return true;
         const double v = card.height() / 390;
         const QRectF current = card.adjusted(28 * u, 92 * v, -28 * u, -124 * v);
@@ -2825,8 +2865,7 @@ private:
         if (drawSourceLyrics(p, w, h, u, orange)) return;
         const auto frame = karaokeFrame();
         if (!frame.visible) return;
-        const QRectF card(34 * u, 292 * u, w - 68 * u,
-                          std::min(390 * u, graphicsBottom(w, h, u) - 310 * u));
+        const QRectF card = lyricsCard(w, h, u);
         if (card.height() < 230 * u || card.width() < 240 * u) return;
         const double v = card.height() / 390;
         const QRectF current = card.adjusted(28 * u, 92 * v, -28 * u, -124 * v);
@@ -3012,7 +3051,50 @@ private:
             cueStart_ = t; nextAside_ = t + 48 + (aside_ % 4) * 11;
             setProperty("captionId", cue_.id); setProperty("captionText", cue_.text);
         }
-        update();
+        // The overlay is screen UI above the GL scene. Between state updates only
+        // its time-driven parts change, so only their regions are repainted; the
+        // previous regions are included so that finished elements are erased.
+        const QRegion animated = animatedRegion(t);
+        const bool book = bookVisible();
+        if (book != bookShown_) { bookShown_ = book; invalidateLayer(); }
+        else if (!(animated + animated_).isEmpty()) update(animated + animated_);
+        animated_ = animated;
+    }
+    QRegion animatedRegion(double t)
+    {
+        const double w = width(), h = height();
+        const double u = std::clamp(std::min(w / 1280.0, h / 800.0), .65, 2.0);
+        QRegion region;
+        const auto add = [&region](const QRectF& r) { if (!r.isEmpty()) region += r.toAlignedRect().adjusted(-4, -4, 4, 4); };
+        // The track progress line advances with the playback clock, by about
+        // five pixels a second; it is repainted when its filled width changes.
+        const QRectF bar = progressBar(u);
+        const int filled = bar.isEmpty() ? -1 : int(bar.width() * progressFraction());
+        if (filled != progressPixels_) { add(bar); progressPixels_ = filled; }
+        // Captions fade in and out; between the fades they hold still.
+        if (!cue_.text.isEmpty()) {
+            const double age = t - cueStart_;
+            if (age < .7 || cue_.seconds - age < .75) add(captionRect(w, h, u));
+        }
+        // The delivery bubble's pointer follows its moving robot.
+        const double mission = t - missionStart_;
+        if (mission > 4.4 && mission < 11.1 && !bookShown_) {
+            const auto bubble = deliveryBubble(w, h, u, mission);
+            add(bubble.box.united(QRectF(bubble.anchor, bubble.tip).normalized()));
+        }
+        // Lyrics advance with the playback clock.
+        if (sourceLyricsFrame().visible || karaokeFrame().visible) add(lyricsCard(w, h, u));
+        return region;
+    }
+    bool bookVisible() const
+    {
+        const auto book = state_.value(QStringLiteral("bookMoment")).toObject();
+        const qint64 expires = static_cast<qint64>(number(book, "expiresAt", 0));
+        return !book_.isNull() && (expires <= 0 || QDateTime::currentMSecsSinceEpoch() < expires);
+    }
+    QRectF lyricsCard(double w, double h, double u) const
+    {
+        return QRectF(34 * u, 292 * u, w - 68 * u, std::min(390 * u, graphicsBottom(w, h, u) - 310 * u));
     }
     double graphicsScale() const
     {
@@ -3062,6 +3144,8 @@ private:
         const QColor cyan("#7de4ed");
         const QString mode = sceneMode();
         const double energy = unit(number(state_.value(QStringLiteral("scene")).toObject(), "energy", .55));
+        // The host's audio snippet owns scale and tint. The fleet reads those
+        // outputs instead of opening a second audio stream.
         const double pulse = unit((cube_->m_tint.y() - .5) * 2.2), reaction = .20 + energy * .8;
         // Ambient marks live on one far plane. Bodies are separate submissions,
         // so foreground dancers and the existing 3-D depth can cross the fleet.
@@ -3088,92 +3172,163 @@ private:
             }
 
         });
+        const auto formation = formations_ ? formations_->current() : party_scene::Formation{};
         if (mode == QStringLiteral("robots")) {
-            static const std::array<const char*, 3> names{"EagleRed", "VIV", "Navines"};
-            for (int i = 0; i < 3; ++i) {
-                const double scale = (i == 0 ? 1.05 : 1.15) * u * graphicsScale();
-                const double x = w * (.20 + i * .30) + std::sin(t * .5 + i) * 24 * u;
-                const double y = std::min(h * (.68 + (i == 0 ? -.07 : .03)),
-                                          graphicsBottom(w, h, u) - 42 * scale - 36);
-                const float depth = party_scene::groundDepth((y + 23 * scale) / h);
-                frame.add(QStringLiteral("fleet-") + QString::fromLatin1(names[i]), depth, [&](QPainter& p) {
-                    robot(p, i, QPointF(x, y), scale, t + i, t * 18, std::cos(t + i), pulse, false);
+            for (int kind = 0; kind < 3; ++kind) {
+                const auto pose = fleetPose(kind, w, h, u, t, formation);
+                const QString id = QStringLiteral("fleet-") + robotName(kind);
+                if (pose.flying) frame.ground(id + QStringLiteral("-shadow"), [&](QPainter& p) {
+                    // A flyer's shadow marks the floor point that sets its depth.
+                    p.setPen(Qt::NoPen); p.setBrush(QColor(0, 0, 0, 72));
+                    p.drawEllipse(pose.floor, 30 * pose.scale, 6 * pose.scale);
                 });
+                frame.add(id, pose.depth, [&](QPainter& p) {
+                    robot(p, kind, pose.at, pose.scale, t + kind, t * 18, pose.facing, pulse, pose.carrying);
+                });
+                fleetTag(frame, id, kind, pose, h, u, orange);
             }
         }
         const double mission = t - missionStart_;
         if (mission >= 0 && mission < 17) {
-            // The delivery actor is airborne or driving on the same ground
-            // plane. Its message remains screen UI, independent of scene depth.
-            const float depth = party_scene::groundDepth(missionKind_ == 0 || missionKind_ == 3 ? .68 : .77);
-            frame.add(QStringLiteral("fleet-delivery"), depth, [&](QPainter& p) {
-                drawDelivery(p, w, h, u, t, pulse, orange, mission, false);
+            // The delivery actor flies or drives on the act's crossing lane. Its
+            // speech bubble remains screen UI, independent of scene depth.
+            const auto pose = deliveryPose(w, h, u, mission, formation);
+            frame.add(QStringLiteral("fleet-delivery"), pose.depth, [&](QPainter& p) {
+                robot(p, missionKind_, pose.at, pose.scale, t, pose.at.x(), 1, pulse, mission < 7.5);
+                if (mission >= 7.5 && mission < 13) {
+                    const double fade = std::min(1.0, (13 - mission) / 2), delivered = smooth((mission - 7.5) / 1.3);
+                    const QPointF pickup(pose.at.x() + (missionKind_ == 2 ? 47 * pose.scale : 0),
+                                         pose.at.y() + (robotFlies(missionKind_) ? 54 : missionKind_ == 2 ? -12 : -39) * pose.scale);
+                    const QPointF deck(w * .5, h * .57);
+                    p.save(); p.setOpacity(fade);
+                    disc(p, pickup * (1 - delivered) + deck * delivered, 28 * u * graphicsScale(), orange, t * 36); p.restore();
+                }
             });
+            fleetTag(frame, QStringLiteral("fleet-delivery"), missionKind_, pose, h, u, orange);
         }
     }
-    void drawDelivery(QPainter& p, double w, double h, double u, double t,
-                      double pulse, QColor orange, double age, bool overlay)
+    // Where a fleet robot stands this frame. An act's marks take precedence;
+    // without them the fleet keeps its original spread across the stage.
+    struct FleetPose {
+        QPointF at, floor;        // body reference point and the floor point that sets the depth
+        double scale = 1, facing = 0;
+        float depth = cubeViewDistance;
+        bool carrying = false, flying = false;
+    };
+    FleetPose fleetPose(int kind, double w, double h, double u, double t, const party_scene::Formation& formation) const
     {
-        const bool air = missionKind_ == 0 || missionKind_ == 3;
-        const double approach = smooth(age / 5.5);
-        const double leaving = smooth((age - 11.0) / 5.5);
+        FleetPose pose;
+        pose.scale = (kind == 0 ? 1.05 : 1.15) * u * graphicsScale();
+        const bool flies = robotFlies(kind);
+        const auto& marks = flies ? formation.flyers : formation.walkers;
+        const std::size_t slot = flies ? 0 : std::size_t(kind - 1);
+        if (slot < marks.size()) {
+            const auto& mark = marks[slot];
+            pose.floor = mark.ground; pose.facing = mark.facing; pose.carrying = mark.carrying;
+            pose.flying = flies && mark.altitude > 0;
+            pose.at = mark.ground - QPointF(0, flies ? mark.altitude : 23 * pose.scale);
+        } else {
+            const double x = w * (.20 + kind * .30) + std::sin(t * .5 + kind) * 24 * u;
+            const double y = std::min(h * (.68 + (kind == 0 ? -.07 : .03)), graphicsBottom(w, h, u) - 42 * pose.scale - 36);
+            pose.at = QPointF(x, y); pose.floor = QPointF(x, y + 23 * pose.scale); pose.facing = std::cos(t + kind);
+        }
+        pose.depth = party_scene::groundDepth(pose.floor.y() / h);
+        return pose;
+    }
+    // A walker's tag stands on the floor just in front of its wheels, so the
+    // floor never covers it; a flyer's tag hangs below it at the flyer's depth.
+    void fleetTag(party_scene::Frame& frame, const QString& id, int kind, const FleetPose& pose, double h, double u, QColor accent) const
+    {
+        const QString name = robotName(kind);
+        const QFont font = stageFont(std::clamp(pose.scale * 10, 14.0, 32.0), true);
+        const QSizeF size = party_scene::tagSize(font, name);
+        const bool flies = robotFlies(kind);
+        double top = flies ? pose.at.y() + pose.scale * (pose.carrying ? 76 : 34) : pose.floor.y() + 3 * pose.scale;
+        top = std::min(top, h - 78 * u - size.height());
+        const float depth = flies ? pose.depth : party_scene::groundDepth((top + size.height()) / h);
+        party_scene::addTag(frame, id + QStringLiteral("-tag"), depth, QPointF(pose.at.x(), top), name, font,
+                            QColor("#eaf6ff"), alpha(accent, .55));
+    }
+    // The delivery robot crosses the set: in from the left, a pause at the
+    // centre, then out to the right.
+    FleetPose deliveryPose(double w, double h, double u, double age, const party_scene::Formation& formation) const
+    {
+        FleetPose pose;
+        const bool flies = robotFlies(missionKind_);
+        const double approach = smooth(age / 5.5), leaving = smooth((age - 11.0) / 5.5);
         const double top = 292 * u, bottom = graphicsBottom(w, h, u);
-        const double robotScale = std::min((missionKind_ == 3 ? 3.3 : 1.45) * u * graphicsScale(),
-                                          std::max(.65, (bottom - top - 36) / (air ? 112 : 90)));
-        const double offscreen = 78 * robotScale;
-        const double x = age < 11 ? (-offscreen + approach * (w * .5 + offscreen))
-                                 : w * .5 + leaving * (w * .5 + offscreen);
-        const double minY = top + 32 * robotScale;
-        const double maxY = std::max(minY, bottom - (air ? 80 : 42) * robotScale - 36);
-        const double y = std::clamp(h * (air ? .40 : .69) - (air ? std::sin(approach * pi) * 32 * u : 0), minY, maxY);
-        if (!overlay) robot(p, missionKind_, QPointF(x, y), robotScale, t, x, 1, pulse, age < 7.5);
-        if (!overlay && age >= 7.5 && age < 13) {
-            const double fade = std::min(1.0, (13 - age) / 2);
-            const double delivered = smooth((age - 7.5) / 1.3);
-            const QPointF pickup(x + (missionKind_ == 2 ? 47 * robotScale : 0),
-                                 y + (air ? 54 : missionKind_ == 2 ? -12 : -39) * robotScale);
-            const QPointF deck(w * .5, h * .57);
-            const QPointF position = pickup * (1 - delivered) + deck * delivered;
-            p.save(); p.setOpacity(fade);
-            disc(p, position, 28 * u * graphicsScale(), orange, t * 36); p.restore();
+        pose.scale = std::min((missionKind_ == 3 ? 3.3 : 1.45) * u * graphicsScale(),
+                              std::max(.65, (bottom - top - 36) / (flies ? 112 : 90)));
+        const double offscreen = 78 * pose.scale;
+        const double x = age < 11 ? (-offscreen + approach * (w * .5 + offscreen)) : w * .5 + leaving * (w * .5 + offscreen);
+        const double hop = flies ? std::sin(approach * pi) * 32 * u : 0;
+        pose.facing = 1; pose.carrying = age < 7.5;
+        if (formation.laneY >= 0) {
+            pose.floor = QPointF(x, formation.laneY);
+            pose.at = QPointF(x, formation.laneY - (flies ? formation.laneAltitude + hop : 23 * pose.scale));
+        } else {
+            const double minY = top + 32 * pose.scale, maxY = std::max(minY, bottom - (flies ? 80 : 42) * pose.scale - 36);
+            pose.at = QPointF(x, std::clamp(h * (flies ? .40 : .69) - hop, minY, maxY));
+            pose.floor = QPointF(x, flies ? h * .68 : pose.at.y() + 23 * pose.scale);
         }
-        if (overlay && age > 4.5 && age < 11) {
-            const QRectF bubble(w * .5 - 205 * u, std::max(top, y - 42 * robotScale - 58 * u), 410 * u, 49 * u);
-            panel(p, bubble, orange, .94);
-            const QPointF anchor(std::clamp(x, bubble.left() + 12, bubble.right() - 12), bubble.bottom());
-            line(p, anchor, QPointF(x, y - 28 * robotScale), alpha(orange, .55), 1.2);
-            p.setFont(uiFont(u, UiMetrics::secondary, true)); p.setPen(QColor("#ffe4cc"));
-            const QString words = age < 7.5 ? missionText_ : QStringLiteral("Na tri!  Jedan, dva... refren.");
-            p.drawText(bubble.adjusted(14 * u, 5 * u, -14 * u, -5 * u),
-                       Qt::AlignCenter, QFontMetrics(p.font()).elidedText(words, Qt::ElideRight, qRound(bubble.width() - 28 * u)));
-        }
+        pose.depth = party_scene::groundDepth(pose.floor.y() / h);
+        return pose;
+    }
+    // The speech bubble and its pointer to the delivery robot, in screen space.
+    struct Bubble { QRectF box; QPointF anchor, tip; };
+    Bubble deliveryBubble(double w, double h, double u, double age) const
+    {
+        const auto pose = deliveryPose(w, h, u, age, formations_ ? formations_->current() : party_scene::Formation{});
+        const QRectF box(w * .5 - 205 * u, std::max(292 * u, pose.at.y() - 42 * pose.scale - 58 * u), 410 * u, 49 * u);
+        return {box, QPointF(std::clamp(pose.at.x(), box.left() + 12, box.right() - 12), box.bottom()),
+                QPointF(pose.at.x(), pose.at.y() - 28 * pose.scale)};
+    }
+    void drawDeliveryBubble(QPainter& p, double w, double h, double u, QColor orange, double age)
+    {
+        // The bubble belongs to the scene below a book photograph.
+        if (age <= 4.5 || age >= 11 || bookShown_) return;
+        const auto bubble = deliveryBubble(w, h, u, age);
+        panel(p, bubble.box, orange, .94);
+        line(p, bubble.anchor, bubble.tip, alpha(orange, .55), 1.2);
+        p.setFont(uiFont(u, UiMetrics::secondary, true)); p.setPen(QColor("#ffe4cc"));
+        const QString words = age < 7.5 ? missionText_ : QStringLiteral("Na tri!  Jedan, dva... refren.");
+        p.drawText(bubble.box.adjusted(14 * u, 5 * u, -14 * u, -5 * u),
+                   Qt::AlignCenter, QFontMetrics(p.font()).elidedText(words, Qt::ElideRight, qRound(bubble.box.width() - 28 * u)));
     }
     QRectF drawBook(QPainter& p, double w, double h, double u, QColor orange)
     {
+        bookImage_ = bookCaption_ = QRectF();
+        if (!bookVisible()) return {};
         const auto book = state_.value(QStringLiteral("bookMoment")).toObject();
-        const qint64 expires = static_cast<qint64>(number(book, "expiresAt", 0));
-        if (book_.isNull() || (expires > 0 && QDateTime::currentMSecsSinceEpoch() >= expires)) return {};
         const QRectF card(0, 0, w, h);
-        const QSizeF imageSize = QSizeF(book_.size()).scaled(QSizeF(w * .75, h), Qt::KeepAspectRatio);
-        const QRectF destination((w - imageSize.width()) / 2, h - imageSize.height(), imageSize.width(), imageSize.height());
+        // The caption has its own dark band between the photograph and the queue
+        // cards, so its text never lies on photo content.
+        const QFont titleFont = uiFont(u, UiMetrics::secondary, true), sourceFont = uiFont(u, UiMetrics::small);
+        const QFontMetricsF titleMetrics(titleFont), sourceMetrics(sourceFont);
+        const QString title = text(book, "title"), page = book.value(QStringLiteral("page")).toVariant().toString();
+        const QString source = QStringLiteral("30 godina LARICS-a") + (page.isEmpty() ? QString() : QStringLiteral(" · str. ") + page);
+        const double bandHeight = 12 * u + titleMetrics.height() + 3 * u + sourceMetrics.height() + 10 * u;
+        const double bandBottom = h - 80 * u, imageBottom = bandBottom - bandHeight - 6 * u;
+        const QSizeF imageSize = QSizeF(book_.size()).scaled(QSizeF(w * .75, std::max(1.0, imageBottom)), Qt::KeepAspectRatio);
+        const QRectF destination((w - imageSize.width()) / 2, imageBottom - imageSize.height(), imageSize.width(), imageSize.height());
         p.save();
-        Q_UNUSED(orange);
         p.setRenderHint(QPainter::SmoothPixmapTransform); p.drawImage(destination, book_);
-        QLinearGradient labelShade(0, h - 150 * u, 0, h);
-        labelShade.setColorAt(0, QColor(6, 10, 22, 0)); labelShade.setColorAt(1, QColor(6, 10, 22, 245));
-        p.fillRect(QRectF(0, h - 150 * u, w, 150 * u), labelShade);
-        p.setPen(QColor("#f9e6d5")); p.setFont(uiFont(u, UiMetrics::secondary, true));
-        p.drawText(QRectF(16 * u, h - 126 * u, w - 32 * u, 25 * u),
-                   Qt::AlignCenter, QFontMetrics(p.font()).elidedText(text(book, "title"), Qt::ElideRight, qRound(w - 32 * u)));
-        p.setFont(uiFont(u, UiMetrics::small)); p.setPen(QColor("#a6b6ca"));
-        const QString page = book.value(QStringLiteral("page")).toVariant().toString();
-        p.drawText(QRectF(0, h - 98 * u, w, 21 * u), Qt::AlignCenter,
-                   QStringLiteral("30 godina LARICS-a") + (page.isEmpty() ? QString() : QStringLiteral(" · str. ") + page));
+        const double textWidth = std::max(titleMetrics.horizontalAdvance(title), sourceMetrics.horizontalAdvance(source)) + 36 * u;
+        const double bandWidth = std::min(std::max(destination.width(), textWidth), w - 32 * u);
+        const QRectF band((w - bandWidth) / 2, bandBottom - bandHeight, bandWidth, bandHeight);
+        panel(p, band, orange, .95);
+        bookImage_ = destination; bookCaption_ = band;
+        const QRectF titleRect(band.left() + 18 * u, band.top() + 12 * u, band.width() - 36 * u, titleMetrics.height());
+        p.setFont(titleFont); p.setPen(QColor("#f9e6d5"));
+        p.drawText(titleRect, Qt::AlignCenter, titleMetrics.elidedText(title, Qt::ElideRight, titleRect.width()));
+        p.setFont(sourceFont); p.setPen(QColor("#a6b6ca"));
+        p.drawText(QRectF(band.left(), titleRect.bottom() + 3 * u, band.width(), sourceMetrics.height()), Qt::AlignCenter, source);
         p.restore();
         return card;
     }
     QPointer<CubeWidget> cube_;
     QPointer<party_scene::Scene> scene_;
+    QPointer<party_scene::Formations> formations_;
     QPointer<RequestDesk> desk_;
     QPointer<QWidget> returnFocus_;
     QPointer<QProcess> toggleProcess_;
@@ -3211,7 +3366,7 @@ private:
     QTimer frame_, poll_;
     QAction *requestAction_ = nullptr, *fullAction_ = nullptr, *escapeAction_ = nullptr, *spotifyAction_ = nullptr, *returnAction_ = nullptr, *playbackAction_ = nullptr;
     QAction *previousAction_ = nullptr, *nextAction_ = nullptr, *lyricsAction_ = nullptr;
-    QRectF requestRect_, qrBounds_, playingBounds_;
+    QRectF requestRect_, qrBounds_, playingBounds_, bookImage_, bookCaption_;
     QSet<QString> seenCues_;
     QQueue<Cue> pending_;
     Cue cue_;
@@ -3221,6 +3376,12 @@ private:
     double nextEffectCheck_ = 0;
     std::size_t aside_ = 0;
     quint64 paints_ = 0;
+    double paintMs_ = 0;
+    QRegion animated_;
+    QImage layer_;
+    bool bookShown_ = false, layerDirty_ = true;
+    int progressPixels_ = -1;
+    quint64 layerPaints_ = 0;
     bool menuWasVisible_ = true, statusWasVisible_ = true;
 };
 

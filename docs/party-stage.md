@@ -294,12 +294,13 @@ current audience request govern that choice rather than a fixed taste in code.
 `scene.graphicsScale` defaults to 1. It scales the robot fleet and delivered
 records immediately; 1.5 makes them fifty percent larger. The stage reports the
 applied value as `graphicsScale` in runtime status. Photographs fit within 75% of
-the free main pane's width, after excluding the right panel. They stay centered,
-preserve their aspect ratio, and meet the bottom edge. The visualizer continues
-behind the photo and remains visible around its edges.
-Titles and captions overlay the image. Robot paths retain fixed caption clearance
-behind the photo. Labels grow with the robots. The request controls,
-QR and current-track panel keep their readable size.
+the free main pane's width, after excluding the right panel. They stay centered
+and preserve their aspect ratio. The photo's title and book page sit on their
+own dark band between the photo and the queue strip, so their contrast does not
+depend on the photo's content; the photo ends above that band. The visualizer
+continues behind the photo and remains visible around its edges. The fleet's
+name tags grow with the robots and carry their own dark backing. The request
+controls, QR and current-track panel keep their readable size.
 
 Book images and robot paths keep the same bounds when a caption appears,
 disappears or wraps onto more lines; captions never resize the photo.
@@ -453,9 +454,10 @@ procedures in [the visual plugin seed](../virtual-dj/plugins/visuals.md).
 The launcher loads it with `stateFile` and `agentSocket`. One asynchronous local
 socket subscribes to the existing `audio.beat` events; the module never opens an
 audio device or controls playback. Beat strength gently lifts the geometry's
-brightness, with a 0.55-second decay. Painting is limited to 30 frames per second
-and stops while the window is hidden. No full-screen flashes or blur passes are
-used. Status reports frames, received beats, connection state and paint time.
+brightness, with a 0.55-second decay. The act is drawn for every frame the cube
+renders, about 60 per second, and stops while the window is hidden. No
+full-screen flashes or blur passes are used. Status reports frames, received
+beats, connection state and paint time.
 
 Disco, streamers, conga and stadium retain the current song's large held motif
 and the party toast. Kolo keeps both hands linked; the tram shows passengers
@@ -493,9 +495,11 @@ libraries, including the code belonging to the generation that created the
 registry, while other owners continue to use it.
 
 The frame hook uses the host's current projection, framebuffer and depth buffer.
-Each fleet body and each dancer, prop holder or scenery contribution is its own
-billboard. Wheels, hands, carried props and tram passengers stay with their
-body's drawing. A shared ground-plane depth function relates projected foot
+Each fleet body, fleet name tag and each dancer, prop holder or scenery
+contribution is its own billboard. Wheels, hands, carried props and tram
+passengers stay with their body's drawing. A walking robot's tag stands on the
+floor just in front of its wheels, so the floor rows in front of the robot never
+cover it; a flying robot's tag hangs below it at its depth. A shared ground-plane depth function relates projected foot
 positions to camera distance. Floors and shadows use that ground plane, while
 ambient marks occupy a far plane. Opaque pixels participate in depth testing
 and writes; transparent padding is discarded, and translucent edges and marks
@@ -517,33 +521,82 @@ Providers only draw their prepared buffers during slices; analysis, history,
 animation clocks and beat events advance once per frame.
 
 Delivery speech bubbles, photographs, lyrics, captions and request controls
-remain screen UI above the scene.
+remain screen UI above the scene. The stage draws its state-driven UI (header,
+current track, request card and QR, photograph and queue) into a cached layer
+once per state change. A repaint copies the changed part of that layer and draws
+only the time-driven parts on top: the track's progress line when its filled
+width changes, caption fades, the delivery bubble while its pointer follows the
+robot, and lyrics. The delivery bubble belongs to the scene, so it is hidden
+while a photograph is shown. Status reports `overlayPaintMs` and
+`overlayLayerPaints`.
 
-The compositor records at most 96 bounded drawings and rasterizes at most 30
-times per second. Before allocating images it measures the entire frame, then
-reduces one shared sampling scale when necessary to remain below 12 million
-raster pixels and 4096 pixels per texture side. Large viewports preserve all
-submitted actors rather than dropping the last ones. GL program/buffer/texture,
-sampler, blending, depth/range, point-size, rasterization and pixel-unpack state are restored for
-neighboring render callbacks. Stage status exposes `sceneDepth` with owner and
-frame counts, actor bounds/depth, raster pixels/scale/time, transparent draw
-counts and errors. Audio reports `framesPrepared`, `backgroundDraws` and
+The compositor records and draws every actor for each frame the cube renders,
+so actors move at the cube's frame rate, about 60 per second. Each actor's
+QPainter commands are recorded in memory by a paint engine that also measures
+their device bounds, text included. Qt's OpenGL paint engine replays the
+recordings into a window-sized, 4x multisampled page; the page is resolved into
+one atlas texture holding up to four pages. Nothing is rasterized on the CPU or
+uploaded. A shared sampling scale shrinks only when the actors would need more
+than four pages, so large viewports keep every submitted actor. At most 96
+actors are accepted per frame. A ground sprite drawn for one depth interval
+covers only the screen rows whose floor depth lies in that interval.
+
+Qt's paint engine sets the GL state it uses and assumes defaults for the rest.
+The compositor therefore disables face culling (the cube enables it, and the
+flipped page reverses the winding of every glyph quad), sampler objects and the
+pixel-unpack buffer before painting a page. It binds the page through
+QOpenGLFramebufferObject, which records it as the context's current
+framebuffer: Qt's glyph cache copies through a framebuffer of its own and then
+rebinds that recorded one. GL program/buffer/texture, sampler, blending,
+depth/range, stencil, viewport, scissor, framebuffer, clear-value, point-size,
+rasterization and pixel-unpack state are restored for neighboring render
+callbacks. Stage status exposes `sceneDepth` with owner and frame counts, actor
+bounds/depth, atlas pages, raster pixels and scale, per-frame `timingMs` for
+recording, page painting and compositing, transparent draw counts and errors. Audio reports `framesPrepared`, `backgroundDraws` and
 `sliceDraws`. Entry points reject a wrong QObject thread before touching their
 owner; releases that need GL also require the cube's own current context.
+
+### Fleet marks
+
+`include/demo/party_formation.h` owns a second shared object, `partyFormations`.
+An act publishes marks: floor points where visiting walkers stand, floor points
+under visiting flyers with their height, and a floor lane for performers who
+cross the set. The dance module provides the marks for the current act, computed
+from the same set geometry its drawing uses. The stage's fleet reads them every
+frame: EagleRed takes the first flyer mark, VIV and Navines the walker marks,
+and the delivery robot drives or flies along the lane. Each robot's depth comes
+from its floor point, and a flyer casts a floor shadow there. Without a
+provider the fleet keeps its original spread across the stage.
+
+| Act | Walkers | Flyer | Lane |
+| --- | --- | --- | --- |
+| disco | dance on the floor in front of the fans | circles the disco ball, passing in front of and behind it | in front of the fans |
+| streamers | dance between the fans | weaves along the ribbons | in front of the fans |
+| conga | join the end of the line | leads the line with a record | in front of the line |
+| stadium | stand in the aisle between the rows | sweeps above the crowd | the aisle |
+| kolo | turn a small ring inside the kolo, against its direction | circles above the dancers with a record | in front of the ring |
+| tram | wait on the platform in front of the tram | patrols above the roof, in front of the wire | the platform |
 
 The focused private checks are:
 
 ```sh
 python3 -m unittest discover -s tests -p test_party_stage.py -k shared_scene_crosses -v
 python3 -m unittest discover -s tests -p test_party_stage.py -k shared_scene_transparency -v
+python3 -m unittest discover -s tests -p test_party_stage.py -k book_caption_band -v
 python3 -m unittest discover -s tests -p test_party_dance.py -k shared_scene_budget -v
 python3 -m unittest discover -s tests -p test_party_dance.py -k shared_scene_rejects -v
+python3 -m unittest discover -s tests -p test_party_dance.py -k acts_place -v
 ```
 
 They draw a controlled real GL plane in front of and behind the fleet, check
 transparent padding and neighboring GL state, retain the editor and lyric mode,
-exercise 4K streamers under the allocation ceiling, and release/reload distinct
-module generations in both acquisition orders. The transparency case uses the
+exercise 4K streamers within four atlas pages, and release/reload distinct
+module generations in both acquisition orders. The marks case checks that the
+tram's walkers stand nearer than the tram and below its wheels, that its flyer
+stays above the roof, and that the kolo's inner pair stays inside the ring and
+moves. The caption case shows a photograph with a white lower edge and checks
+that the photo ends above its caption band, that the band is dark beside its
+text, and that an unchanged state does not redraw the overlay layer. The transparency case uses the
 real Möbius/orbit providers, partial-alpha peers, tilted ground and reversed
 provider replacement order. Its audio child preloads a bounded synthetic Pulse
 reader that accepts only the fixture's device token, with an unreachable Pulse

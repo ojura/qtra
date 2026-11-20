@@ -688,6 +688,55 @@ extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet
         probe(restore=True)
 
 
+    def test_book_caption_band_and_state_layer(self):
+        self.run_stage(stateFile=str(self.state_file))
+        windows = subprocess.check_output(["xdotool", "search", "--pid", str(self.process.pid), "--name", "LARICS"],
+                                          env=self.environment, text=True).splitlines()
+        subprocess.run(["xdotool", "windowsize", "--sync", windows[-1], "2560", "1600"], env=self.environment, check=True)
+        self.eventually(lambda: int(self.run_stage()["paintCount"]) > 2, "the overlay did not paint")
+        time.sleep(.6)
+        # State-driven UI is drawn into a layer once per change; the progress
+        # line keeps repainting its own region without redrawing that layer.
+        before = self.run_stage()
+        time.sleep(1.5)
+        after = self.run_stage()
+        self.assertEqual(after["overlayLayerPaints"], before["overlayLayerPaints"], "an unchanged state redrew the overlay layer")
+        self.assertGreater(int(after["paintCount"]), int(before["paintCount"]), "the progress line did not advance")
+
+        # A photograph whose lower part is white, like a scanned book page.
+        photo = self.folder / "white-bottom.ppm"
+        width, height = 160, 100
+        photo.write_bytes(b"P6\n%d %d\n255\n" % (width, height) + bytes(
+            component for y in range(height) for x in range(width) for component in ((250, 250, 250) if y >= 60 else (40, 45, 60))))
+        self.state["revision"] += 1
+        self.state["bookMoment"] = {"imagePath": str(photo), "title": "Glasovi ROBOBAND-a", "page": 307,
+                                    "expiresAt": int(time.time() * 1000) + 60000}
+        self.write_state()
+        self.eventually(lambda: self.run_stage()["bookCaptionBounds"][3] > 0, "the photograph and caption did not show")
+        shown = self.run_stage()
+        self.assertGreater(shown["overlayLayerPaints"], after["overlayLayerPaints"])
+        image, caption = shown["bookImageBounds"], shown["bookCaptionBounds"]
+        self.assertLessEqual(image[1] + image[3], caption[1], "the photograph reaches into its caption band")
+        capture = self.folder / "book.ppm"
+        self.run_stage(capture=str(capture))
+        # Qt writes binary PPM as three header lines (P6, the size, 255) and then RGB rows.
+        data = capture.read_bytes()
+        magic, size, depth, pixels = data.split(b"\n", 3)
+        self.assertEqual((magic, depth), (b"P6", b"255"))
+        columns = int(size.split()[0])
+        offset = len(data) - len(pixels)
+
+        def luminance(x, y):
+            index = offset + (int(y) * columns + int(x)) * 3
+            red, green, blue = data[index:index + 3]
+            return .2126 * red + .7152 * green + .0722 * blue
+
+        self.assertGreater(luminance(image[0] + 6, image[1] + image[3] - 6), 200, "the test photograph's white edge is not where expected")
+        # The caption's band is dark next to and between its lines of text.
+        middle = caption[1] + caption[3] / 2
+        for x in (caption[0] + 8, caption[0] + caption[2] - 8):
+            self.assertLess(luminance(x, middle), 60, "the caption band does not back its text")
+
     def test_cursor_scope_covers_tooltips_dynamic_roles_and_release(self):
         # All pointer input stays on the fixture-owned Xvfb/PID, including a real
         # Qt tooltip surface; observe the native bitmap rather than a QCursor cache.

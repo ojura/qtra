@@ -15,9 +15,11 @@ or require every show to use robots, photographs or cocktail glasses.
 | `tools/launch_party_stage.py` | Explicit session startup and module registration | Recorded host/socket/module identities |
 | `tests/test_party_dance.py` | Private renderer fixture and synthetic beat source | Silent preview and regression entry point |
 
-The dance layer is transparent, mouse-transparent and confined to the free main
-pane. It sits below the stage, preserving the guest panel, captions and fleet.
-It owns one asynchronous local socket subscription, its timers and its widget.
+The dance layer is mouse-transparent and confined to the free main pane. It
+submits its actors to the shared scene, which orders them by depth with the
+fleet, and it offers each act's marks to the visiting fleet (see
+[Fleet marks](../../docs/party-stage.md#fleet-marks)). It owns one asynchronous
+local socket subscription, its poll timer and its widget.
 It consumes beat strength/count/BPM; it does not open an audio device. Releasing
 this layer leaves the other modules running.
 
@@ -125,8 +127,8 @@ silhouettes. Check hand-held props at 1280×800 too. Keep captions and current
 track labels readable, preserve the composer's fixed bounds, and avoid new
 layout movement while search or chat updates.
 
-The baseline uses a 34 ms animation timer, stops painting when hidden, and caps
-confetti at 24 pieces. Prefer reducing tiny details before adding expensive
+The act is drawn for every frame the cube renders, about 60 per second, stops
+when hidden, and caps confetti at 24 pieces. Prefer reducing tiny details before adding expensive
 effects. Use smooth movement and soft fades; keep full-screen flashes and blur
 out of this seed. `frames`, `beats`, `audioConnected`, `stateError` and `drawMs`
 make real progress and rendering cost observable. Empty status calls do not

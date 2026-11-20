@@ -117,7 +117,9 @@ class PartyDance(unittest.TestCase):
         self.assertEqual(active["bpm"], 128)
         self.assertEqual(active["width"], active["parentWidth"])
         self.assertLess(active["width"], 2560)
-        time.sleep(.18)  # No status call may supply the animation's repaint.
+        # No status call may supply the animation's repaint. The private display
+        # renders the multisampled scene in software, so allow half a second.
+        time.sleep(.5)
         self.assertGreater(self.run_dance()["frames"], active["frames"] + 2, "animation timer stopped")
         capture = os.environ.get("PARTY_DANCE_CAPTURE")
         if capture:
@@ -226,6 +228,44 @@ class PartyDance(unittest.TestCase):
                          or self.stage.server.message_attempts, "a visual form issued a playback or guest action")
         self.run_dance(restore=True)
 
+    def test_acts_place_the_fleet_on_their_marks(self):
+        self.run_dance(stateFile=str(self.stage.state_file), agentSocket=self.beats.path, act="tram")
+
+        def actors():
+            return {a["name"]: a for a in self.stage.run_stage()["sceneDepth"]["actors"]}
+
+        def bottom(actor):
+            return actor["bounds"][1] + actor["bounds"][3]
+
+        self.stage.eventually(lambda: {"dance.tram.body", "fleet-VIV"} <= actors().keys(), "the tram act did not render")
+        scene = actors()
+        tram = scene["dance.tram.body"]
+        for walker in ("fleet-VIV", "fleet-Navines"):
+            # Walkers wait on the platform: nearer than the tram and below its wheels.
+            self.assertLess(scene[walker]["depth"], tram["depth"], walker)
+            self.assertGreater(bottom(scene[walker]), bottom(tram), walker)
+        # The flyer stays above the roof, in front of the overhead wire.
+        drone = scene["fleet-EagleRed"]
+        self.assertLess(drone["depth"], tram["depth"])
+        self.assertLessEqual(bottom(drone), tram["bounds"][1] + 4)
+        for name in ("EagleRed", "VIV", "Navines"):
+            self.assertIn(f"fleet-{name}-tag", scene)
+
+        self.run_dance(act="kolo")
+        self.stage.eventually(lambda: any(n.startswith("dance.kolo.dancer.") for n in actors()), "the kolo did not render")
+        scene = actors()
+        dancers = [a for n, a in scene.items() if n.startswith("dance.kolo.dancer.")]
+        left = min(a["bounds"][0] for a in dancers)
+        right = max(a["bounds"][0] + a["bounds"][2] for a in dancers)
+        for walker in ("fleet-VIV", "fleet-Navines"):
+            # The pair turns its own ring inside the kolo instead of standing in its path.
+            box = scene[walker]["bounds"]
+            self.assertLess(left, box[0]); self.assertGreater(right, box[0] + box[2])
+        self.assertIn("fleet-EagleRed-shadow", scene)
+        first = scene["fleet-VIV"]["bounds"]
+        self.stage.eventually(lambda: actors()["fleet-VIV"]["bounds"][:2] != first[:2], "the inner pair did not move")
+        self.run_dance(restore=True)
+
     def test_shared_scene_budget_and_independent_generation_release(self):
         self.stage.run_stage(composerDraft={"text": "Jedan zajednički prostor, isti nacrt.", "cursor": 20, "anchor": 4})
         draft = self.stage.editor_draft()
@@ -244,14 +284,21 @@ class PartyDance(unittest.TestCase):
         scene = self.stage.run_stage()["sceneDepth"]
         self.assertEqual(scene["error"], "")
         self.assertTrue(any(a["name"].startswith("dance.kolo.dancer.") for a in scene["actors"]))
-        self.assertTrue(any(a["name"] == "fleet-VIV" for a in scene["actors"]))
-        self.assertLessEqual(len(scene["actors"]), 46)
+        names = {a["name"] for a in scene["actors"]}
+        self.assertIn("fleet-VIV", names)
+        # Name tags are separate scene items, so the floor in front of a robot
+        # cannot cover its tag; the flyer's floor shadow marks its depth.
+        self.assertTrue({"fleet-EagleRed-tag", "fleet-VIV-tag", "fleet-Navines-tag", "fleet-EagleRed-shadow"} <= names, names)
+        # The busiest act uses 41 items; the fleet adds at most ten (ambience,
+        # three bodies, their tags, the flyer's shadow, a delivery and its tag).
+        self.assertLessEqual(len(scene["actors"]), 51)
         capture = os.environ.get("PARTY_DEPTH_CAPTURE")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".kolo.png")))
 
-        # A real4K widget exercises the wide streamer path under the same12M
-        # allocation ceiling. All seven ribbons and both prop holders survive.
+        # A real 4K widget exercises the wide streamer path. Every actor is drawn
+        # into at most four window-sized atlas pages; all seven ribbons and both
+        # prop holders survive.
         window = subprocess.check_output(["xdotool", "search", "--pid", str(self.stage.process.pid), "--name", "LARICS"],
                                          env=self.stage.environment, text=True).splitlines()[-1]
         subprocess.run(["xdotool", "windowsize", "--sync", window, "3840", "2160"],
@@ -264,8 +311,9 @@ class PartyDance(unittest.TestCase):
         names = [a["name"] for a in large["actors"]]
         self.assertEqual(sum(n.startswith("dance.streamer.") for n in names), 7, large)
         self.assertEqual(sum(n.startswith("dance.fan.") for n in names), 2, large)
-        self.assertLess(large["rasterScale"], 1, "the oversize scene did not adapt its total sampling budget")
-        self.assertLessEqual(large["rasterPixels"], 12000000)
+        atlas = large["atlas"]
+        self.assertLessEqual(atlas["pages"], 4, large)
+        self.assertLessEqual(large["rasterPixels"], atlas["pages"] * atlas["width"] * atlas["pageHeight"], large)
         self.assertEqual(large["error"], "")
         if capture:
             self.stage.run_stage(capture=str(Path(capture).with_suffix(".streamers4k.png")))

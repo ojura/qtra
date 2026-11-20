@@ -2,6 +2,7 @@
 // stream and submits its actors to the shared scene.
 #include "agent/agent_abi.h"
 #include "cube_widget.h"
+#include "demo/party_formation.h"
 #include "demo/party_scene.h"
 
 #include <QApplication>
@@ -45,6 +46,10 @@ bool supportedTheme(const QString& theme)
     return themes.contains(theme);
 }
 
+// Set geometry shared by an act's drawing and the marks it offers visitors.
+struct KoloSet { QPointF center; double rx, ry; };
+struct TramSet { double rail, x, y, width, height, wire; };
+
 class PartyDance final : public QWidget {
 public:
     PartyDance(CubeWidget* cube, party_scene::Scene* scene) : QWidget(cube), cube_(cube), scene_(scene)
@@ -71,11 +76,9 @@ public:
         act_ = cube->window()->property("partyDanceAct").toString();
         if (act_ != QStringLiteral("auto") && !danceActs().contains(act_)) act_ = QStringLiteral("auto");
         saveFormCycle();
-        clock_.start(); frameClock_.start(); frame_.setInterval(34); frame_.setTimerType(Qt::PreciseTimer);
-        connect(&frame_, &QTimer::timeout, this, [this] {
-            const double dt = std::clamp(frameClock_.restart() / 1000.0, 0.0, .1);
-            pulse_ *= std::exp(-dt / .55); invalidateScene();
-        });
+        // The shared scene records every rendered frame; this layer needs no
+        // repaint timer of its own.
+        clock_.start(); frameClock_.start();
         connect(&socket_, &QLocalSocket::connected, this, [this] {
             audioError_.clear();
             socket_.write("{\"id\":1,\"command\":\"event.subscribe\",\"params\":{\"prefixes\":[\"audio.beat\"]}}\n");
@@ -87,11 +90,14 @@ public:
         poll_.setInterval(500);
         connect(&poll_, &QTimer::timeout, this, [this] { rotateForms(); readState(); connectAudio(); });
         scene_->addOwner(this, [this](party_scene::Frame& frame) { submit(frame); });
+        formations_ = party_scene::Formations::acquire(cube);
+        if (formations_) formations_->setProvider(this, [this] { return formation(); });
         poll_.start(); show(); stackBelowStage();
     }
     ~PartyDance() override
     {
-        frame_.stop(); poll_.stop();
+        poll_.stop();
+        if (formations_) formations_->clear(this);
         if (scene_) scene_->removeOwner(this);
         if (cube_) cube_->removeEventFilter(this);
         socket_.abort();
@@ -134,7 +140,7 @@ public:
                 {QStringLiteral("audioError"), audioError_}, {QStringLiteral("stateError"), stateError_},
                 {QStringLiteral("width"), width()}, {QStringLiteral("height"), height()},
                 {QStringLiteral("parentWidth"), cube_ ? cube_->width() : 0},
-                {QStringLiteral("fpsLimit"), 30}, {QStringLiteral("particleLimit"), 24},
+                {QStringLiteral("particleLimit"), 24},
                 {QStringLiteral("theme"), theme_}, {QStringLiteral("songKey"), songKey_},
                 {QStringLiteral("themeSource"), themeSource_}, {QStringLiteral("automaticTheme"), automaticTheme_},
                 {QStringLiteral("songRevision"), songRevision_}};
@@ -147,20 +153,20 @@ protected:
         }
         return QWidget::eventFilter(object, event);
     }
-    void showEvent(QShowEvent* event) override
-    {
-        frameClock_.restart(); frame_.start(); invalidateScene(); QWidget::showEvent(event);
-    }
-    void hideEvent(QHideEvent* event) override
-    {
-        frame_.stop(); invalidateScene(); QWidget::hideEvent(event);
-    }
+    void showEvent(QShowEvent* event) override { invalidateScene(); QWidget::showEvent(event); }
+    void hideEvent(QHideEvent* event) override { invalidateScene(); QWidget::hideEvent(event); }
     void paintEvent(QPaintEvent*) override {}
 private:
     void invalidateScene() { if (scene_) scene_->invalidate(); }
+    // Beats raise the pulse; it decays with elapsed time between frames.
+    void decayPulse()
+    {
+        pulse_ *= std::exp(-std::max(0.0, frameClock_.restart() / 1000.0) / .55);
+    }
     void submit(party_scene::Frame& frame)
     {
         if (!isVisible()) return;
+        decayPulse();
         QElapsedTimer work; work.start();
         const double w = width(), h = height(), u = std::min(w / 1440.0, h / 1000.0);
         const double t = clock_.elapsed() / 1000.0;
@@ -225,6 +231,7 @@ private:
             if (count == beats_) continue;
             beats_ = count;
             const double strength = data.value(QStringLiteral("strength")).toDouble();
+            decayPulse();
             if (std::isfinite(strength)) pulse_ = std::max(pulse_, std::clamp(strength, 0.0, 1.5));
             const double bpm = data.value(QStringLiteral("bpm")).toDouble();
             if (std::isfinite(bpm)) bpm_ = std::clamp(bpm, 0.0, 240.0);
@@ -276,6 +283,79 @@ private:
         cube_->window()->setProperty("partyDanceAutomaticTheme", automaticTheme_);
         cube_->window()->setProperty("partyDanceTheme", theme_);
         cube_->window()->setProperty("partyDanceThemeSource", themeSource_);
+    }
+    KoloSet koloSet(double w, double h) const { return {QPointF(w * .5, h * .65), w * .32, h * .13}; }
+    TramSet tramSet(double w, double h, double u, double t) const
+    {
+        const double rail = h * .79, width = w * .79, height = 245 * u;
+        const double x = w * .5 - width * .5 + w * .065 * std::sin(t * .17);
+        const double y = rail - height - 24 * u + 2 * u * std::sin(t * 4);
+        return {rail, x, y, width, height, y - 65 * u};
+    }
+    QPointF congaPoint(double w, double h, double t, double progress) const
+    {
+        return {w * (progress * 1.3 - .15), h * (.63 + .07 * std::sin(progress * 2 * pi + t * .20))};
+    }
+    // Marks for visiting performers. Each act places them where they take part
+    // in its scene instead of standing in its dancers' path.
+    party_scene::Formation formation() const
+    {
+        party_scene::Formation result;
+        const double w = width(), h = height(), u = std::min(w / 1440.0, h / 1000.0), t = clock_.elapsed() / 1000.0;
+        if (!isVisible() || w < 2 || h < 2) return result;
+        const auto facing = [](double velocity) { return velocity < 0 ? -1.0 : 1.0; };
+        const QString act = currentAct();
+        if (act == QStringLiteral("kolo")) {
+            // Two walkers turn a small ring inside the kolo, against its
+            // direction; the flyer circles above the dancers with a record.
+            const auto set = koloSet(w, h);
+            for (int k = 0; k < 2; ++k) {
+                const double a = -t * .34 + k * pi;
+                result.walkers.push_back({set.center + QPointF(set.rx * .42 * std::cos(a), set.ry * .42 * std::sin(a)), 0,
+                                          facing(std::sin(a)), false});
+            }
+            const double b = t * .21;
+            result.flyers.push_back({set.center + QPointF(set.rx * .62 * std::cos(b), set.ry * .62 * std::sin(b)), h * .27,
+                                     facing(-std::sin(b)), true});
+            result.laneY = set.center.y() + set.ry + h * .07; result.laneAltitude = result.laneY - h * .40;
+        } else if (act == QStringLiteral("tram")) {
+            // Walkers wait on the platform in front of the tram; the flyer
+            // patrols above its roof, in front of the overhead wire.
+            const auto set = tramSet(w, h, u, t);
+            const double platform = set.rail + 70 * u, flight = set.wire - 70 * u, s = t * .23;
+            result.walkers = {{QPointF(w * .30, platform), 0, 1, false}, {QPointF(w * .70, platform), 0, -1, false}};
+            result.flyers.push_back({QPointF(w * (.5 + .30 * std::sin(s)), set.rail + 34 * u), set.rail + 34 * u - flight,
+                                     facing(std::cos(s)), false});
+            result.laneY = platform; result.laneAltitude = platform - flight;
+        } else if (act == QStringLiteral("conga")) {
+            // The walkers join the end of the line; the flyer leads it.
+            for (int k = 0; k < 2; ++k)
+                result.walkers.push_back({congaPoint(w, h, t, fraction(.8 + t * .018 - (6 + k) * .11)), 0, 1, false});
+            result.flyers.push_back({congaPoint(w, h, t, fraction(.8 + t * .018 + .07)), h * .24, 1, true});
+            result.laneY = h * .80; result.laneAltitude = h * .40;
+        } else if (act == QStringLiteral("stadium")) {
+            // Walkers stand in the aisle between the rows; the flyer films the crowd.
+            const double s = t * .19;
+            result.walkers = {{QPointF(w * .28, h * .63), 0, 1, false}, {QPointF(w * .72, h * .63), 0, -1, false}};
+            result.flyers.push_back({QPointF(w * (.5 + .34 * std::sin(s)), h * .63), h * .27, facing(std::cos(s)), false});
+            result.laneY = h * .63; result.laneAltitude = h * .25;
+        } else if (act == QStringLiteral("streamers")) {
+            // Walkers dance between the fans; the flyer weaves along the ribbons.
+            const double s = t * .2;
+            result.walkers = {{QPointF(w * .40, h * .78), 0, 1, false}, {QPointF(w * .60, h * .78), 0, -1, false}};
+            result.flyers.push_back({QPointF(w * (.5 + .32 * std::sin(s)), h * .74), h * (.20 + .05 * std::sin(s * 2.3)),
+                                     facing(std::cos(s)), false});
+            result.laneY = h * .80; result.laneAltitude = h * .40;
+        } else {
+            // Walkers dance on the floor in front of the fans; the flyer
+            // circles the disco ball, passing in front of and behind it.
+            const double b = t * .5;
+            result.walkers = {{QPointF(w * .41, h * .79), 0, 1, false}, {QPointF(w * .59, h * .79), 0, -1, false}};
+            result.flyers.push_back({QPointF(w * (.5 + .17 * std::cos(b)), h * (.62 + .045 * std::sin(b))), h * .26,
+                                     facing(-std::sin(b)), false});
+            result.laneY = h * .80; result.laneAltitude = h * .40;
+        }
+        return result;
     }
     QColor color(int index) const
     {
@@ -466,17 +546,15 @@ private:
     {
         QPainterPath trail;
         for (int point = 0; point <= 64; ++point) {
-            const double x = point / 64.0;
-            const double y = h * (.63 + .07 * std::sin((x + .15) / 1.3 * 2 * pi + t * .20));
-            point ? trail.lineTo(x * w, y + 8 * u) : trail.moveTo(x * w, y + 8 * u);
+            const QPointF at = congaPoint(w, h, t, (point / 64.0 + .15) / 1.3) + QPointF(0, 8 * u);
+            point ? trail.lineTo(at) : trail.moveTo(at);
         }
         frame.ground(QStringLiteral("dance.conga.trail"), [&](QPainter& p) {
             p.setBrush(Qt::NoBrush); p.setPen(QPen(opacity(color(0), .23), 2 * u, Qt::DashLine)); p.drawPath(trail);
         });
         for (int robot = 5; robot >= 0; --robot) {
-            const double progress = fraction(.8 + t * .018 - robot * .11);
-            const double x = w * (progress * 1.3 - .15);
-            const double y = h * (.63 + .07 * std::sin(progress * 2 * pi + t * .20));
+            const QPointF position = congaPoint(w, h, t, fraction(.8 + t * .018 - robot * .11));
+            const double x = position.x(), y = position.y();
             const double gait = std::sin(t * 3.2 - robot * .64);
             const double bounce = 4 * std::abs(gait) + 2 * pulse_;
             const QColor accent = color(robot);
@@ -534,8 +612,9 @@ private:
         struct Dancer { QPointF foot, shoulder; double scale, step, bounce; int id; };
         std::array<Dancer, 8> dancers;
         std::array<QPointF, 8> hands;
-        const QPointF center(w * .5, h * .65);
-        const double rx = w * .32, ry = h * .13;
+        const auto set = koloSet(w, h);
+        const QPointF center = set.center;
+        const double rx = set.rx, ry = set.ry;
         frame.ground(QStringLiteral("dance.kolo.floor"), [&](QPainter& p) {
             p.setBrush(QColor(8, 20, 34, 70)); p.setPen(QPen(opacity(color(0), .26), 3 * u));
             p.drawEllipse(center + QPointF(0, 9 * u), rx + 35 * u, ry + 20 * u);
@@ -605,7 +684,8 @@ private:
                 }
             });
         }
-        const double rail = h * .79;
+        const auto set = tramSet(w, h, u, t);
+        const double rail = set.rail;
         frame.ground(QStringLiteral("dance.tram.rails"), [&](QPainter& p) {
             p.setPen(QPen(QColor("#92b9ca"), 3 * u)); p.drawLine(QPointF(0, rail), QPointF(w, rail));
             p.drawLine(QPointF(0, rail + 17 * u), QPointF(w, rail + 17 * u));
@@ -614,13 +694,11 @@ private:
                 p.setPen(QPen(QColor(72, 93, 108, 150), 4 * u)); p.drawLine(QPointF(x, rail), QPointF(x - 8 * u, rail + 17 * u));
             }
         });
-        const double tw = w * .79, th = 245 * u;
-        const double x = w * .5 - tw * .5 + w * .065 * std::sin(t * .17);
-        const double y = rail - th - 24 * u + 2 * u * std::sin(t * 4);
+        const double tw = set.width, th = set.height, x = set.x, y = set.y;
         const float depth = party_scene::groundDepth(rail / h);
         frame.add(QStringLiteral("dance.tram.wire"), depth, [&](QPainter& p) {
             p.setPen(QPen(QColor("#c5e0ea"), 3 * u));
-            p.drawLine(QPointF(0, y - 65 * u), QPointF(w, y - 65 * u));
+            p.drawLine(QPointF(0, set.wire), QPointF(w, set.wire));
         });
         frame.add(QStringLiteral("dance.tram.body"), depth, [&](QPainter& p) {
             p.setPen(QPen(QColor("#c5e0ea"), 3 * u));
@@ -672,7 +750,8 @@ private:
     }
     QPointer<CubeWidget> cube_;
     QPointer<party_scene::Scene> scene_;
-    QTimer frame_, poll_; QElapsedTimer clock_, frameClock_; QLocalSocket socket_;
+    QPointer<party_scene::Formations> formations_;
+    QTimer poll_; QElapsedTimer clock_, frameClock_; QLocalSocket socket_;
     QByteArray buffer_, bytes_; QString stateFile_, socketPath_, audioError_, stateError_, act_, songKey_;
     QString theme_ = QStringLiteral("record"), automaticTheme_ = QStringLiteral("record"), themeSource_ = QStringLiteral("automatic");
     quint64 frames_ = 0, beats_ = 0; qint64 formStartedAt_ = 0, formIntervalMs_ = 60000;
