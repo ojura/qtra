@@ -124,15 +124,18 @@ async function fixture(options = {}) {
   const map = new Map([[Symbol('PlayerAPI'), api], [Symbol('ConnectDevicesAPI'), connect]]);
   const registry = {_map: map, resolve: symbol => map.get(symbol)};
   const location = {hostname: options.hostname || 'open.spotify.com', pathname: options.path || '/search/previous/tracks'};
+  const history = {location: {pathname: options.path || '/search/previous/tracks'}};
+  if (options.desktopRouting) location.pathname = '/index.html';
   const catalogue = {query: 'previous', requestId: 'previous-response', tracks: [], mainText: '', visible: true, pushes: []};
   const showSearch = (query, tracks, requestId = 'response-' + query) => {
     catalogue.query = query; catalogue.tracks = tracks; catalogue.requestId = requestId; catalogue.mainText = '';
   };
   const platform = {getRegistry: () => registry, getSession: async () => ({isAnonymous: false}),
     getHistory: () => ({push: destination => {
-      catalogue.pushes.push(destination); location.pathname = destination;
+      catalogue.pushes.push(destination);
+      if (options.desktopRouting) history.location.pathname = destination; else location.pathname = destination;
       if (options.onNavigate) options.onNavigate({destination, catalogue, showSearch, location});
-    }})};
+    }, ...(options.desktopRouting ? {location: history.location} : {})})};
   const element = {'__reactFiber$fixture': {memoizedProps: {value: platform}}};
   const page = {'__reactFiber$search': {get memoizedProps() {
     return {results: {requestId: catalogue.topRequestId ?? catalogue.requestId,
@@ -165,7 +168,7 @@ async function fixture(options = {}) {
   assert.equal(ready.ready, true);
   return {bridge: window.__laricsDJ, calls, raw, state, devices, harmony, api, manager, queue, internal, syncQueue,
     lastQueuePayload: () => lastQueuePayload,
-    advance: milliseconds => { clock += milliseconds; }, catalogue, showSearch, location, timerCalls, skipCalls,
+    advance: milliseconds => { clock += milliseconds; }, catalogue, showSearch, location, history, timerCalls, skipCalls,
     enqueueRunnerCalls, wrapperAddCalls: () => wrapperAddCalls, localActivations: () => localActivations};
 }
 '''
@@ -194,6 +197,23 @@ class BridgeTransportTests(unittest.TestCase):
           assert.equal(f.bridge.pollSearch(id).state, 'cancelled');
           assert.deepEqual(f.catalogue.pushes, ['/search/mirna%20pjesma/tracks']);
           assert.deepEqual(f.calls, []);
+        ''')
+
+    def test_desktop_client_search_follows_the_in_app_route(self):
+        self.run_js(r'''
+          const f = await fixture({desktopRouting: true});
+          const id = 'catalogue-desktop';
+          f.bridge.beginSearch('motherboard', id);
+          assert.equal(f.location.pathname, '/index.html');
+          assert.equal(f.history.location.pathname, '/search/motherboard/tracks');
+          assert.equal(f.bridge.pollSearch(id).state, 'pending');
+          f.showSearch('motherboard', [queuedTrack('board', 'b')]);
+          const result = f.bridge.pollSearch(id);
+          assert.equal(result.state, 'complete'); assert.equal(result.tracks[0].uid, 'board');
+          f.bridge.beginSearch('left behind', 'catalogue-desktop-left');
+          f.history.location.pathname = '/album/user-selected';
+          assert.equal(f.bridge.pollSearch('catalogue-desktop-left').state, 'cancelled');
+          assert.deepEqual(f.calls, []); assert.deepEqual(f.timerCalls, []);
         ''')
 
     def test_old_catalogue_result_or_cancel_cannot_replace_a_new_search(self):

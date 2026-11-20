@@ -1,5 +1,5 @@
 (async () => {
-  if (window.__laricsDJ?.version === 16) return {ready: true};
+  if (window.__laricsDJ?.version === 17) return {ready: true};
   if (!/spotify\.com$/.test(location.hostname) && !location.hostname.includes('xpui')) {
     return {ready: false, error: 'Waiting for the Spotify client.'};
   }
@@ -281,12 +281,19 @@
   const operations = window.__laricsDJ?.operations || new Map();
   let searchJob = null;
   let legacySearchSequence = 0;
+  // The desktop client serves every view from /index.html and keeps its route
+  // only in its own history object; the web player mirrors that route in the URL.
+  const currentRoute = () => {
+    let routed;
+    try { routed = platform.getHistory()?.location?.pathname; } catch {}
+    return typeof routed === 'string' ? routed : location.pathname;
+  };
   const sameSearchRoute = destination => {
-    try { return decodeURIComponent(location.pathname) === decodeURIComponent(destination); }
+    try { return decodeURIComponent(currentRoute()) === decodeURIComponent(destination); }
     catch { return false; }
   };
   const bridge = {
-    version: 16,
+    version: 17,
     operations,
     async status() {
       if (browserController) ensureActualState();
