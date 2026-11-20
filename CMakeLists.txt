@@ -189,10 +189,16 @@ if(BUILD_HOTPATCH_SELFTEST)
              COMMAND hotpatch_selftest $<TARGET_FILE:cube_patch_reverse>)
 endif()
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS
+find_package(Qt6 6.2 REQUIRED COMPONENTS
     Core Gui Widgets Network Concurrent OpenGL OpenGLWidgets)
 
-qt_standard_project_setup()
+if(COMMAND qt_standard_project_setup)
+    qt_standard_project_setup()
+else()
+    set(CMAKE_AUTOMOC ON)
+    set(CMAKE_AUTOUIC ON)
+    set(CMAKE_AUTORCC ON)
+endif()
 
 qt_add_executable(qt_runtime_cube
     src/main.cpp
