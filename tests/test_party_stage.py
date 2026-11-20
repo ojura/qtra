@@ -988,10 +988,12 @@ extern "C" RUNTIME_AGENT_EXPORT const RuntimeAgentSnippet* runtime_agent_snippet
                         "uncertain next did not refresh the actual resulting occurrence")
         self.assertIn("Ishod provjeravam", self.run_stage()["panelNotice"])
         self.assertEqual(len(self.server.skip_requests), 2, "uncertain navigation was retried")
-        self.server.skip_error = {"error": "Native playback restriction", "dispatched": False}
+        # A long service error stays complete: the bubble grows to its wrapped text.
+        refusal = "Spotify has no targeted, occurrence-checked skip connection on this player right now."
+        self.server.skip_error = {"error": refusal, "dispatched": False}
         self.key("ctrl+b")
         self.eventually(lambda: control()["enabled"] and self.server.state_reads == 3, "undispatched restriction did not finish refresh")
-        self.assertIn("Nije promijenjeno", self.run_stage()["panelNotice"])
+        self.assertEqual(self.run_stage()["panelNotice"], "Nije promijenjeno: " + refusal)
         self.assertEqual(len(self.server.skip_requests), 3)
         self.assertEqual(self.server.skip_commands, ["previous", "next"])
         self.assertFalse(self.server.playback_requests)

@@ -972,18 +972,32 @@ private:
             (suggestionState_ == QStringLiteral("results") || suggestionState_ == QStringLiteral("loading"));
         suggestionArea_->setVisible(selected || results || descriptionActive_);
         if (selected || results || descriptionActive_) suggestionArea_->raise();
-        notice_->setGeometry(chat.x() + 8, chat.y() + 8,
-                             std::max(1, chat.width() - 16), std::min(88, chat.height() - 16));
+        // The bubble's height follows its wrapped text in the label's own
+        // stylesheet font, up to the height of the chat area.
+        const int noticeWidth = std::max(1, chat.width() - 16);
+        notice_->ensurePolished();
+        notice_->setGeometry(chat.x() + 8, chat.y() + 8, noticeWidth,
+                             std::clamp(notice_->heightForWidth(noticeWidth), 1, std::max(1, chat.height() - 16)));
         if (notice_->isVisible()) notice_->raise();
     }
+    // The notice shows its whole message. Only a message taller than the chat
+    // area is shortened, by whole words and with an ellipsis.
     void setNotice(const QString& words)
     {
         notice_->setToolTip(words);
-        const int lineWidth = std::max(120, chat_->width() - 54);
-        notice_->setText(QFontMetrics(stageFont(26)).elidedText(words, Qt::ElideRight, lineWidth * 2));
+        notice_->setText(words);
         notice_->setVisible(!words.isEmpty());
-        if (words.isEmpty()) noticeDismiss_.stop();
-        else { updateSuggestionOverlay(); notice_->raise(); noticeDismiss_.start(); }
+        if (words.isEmpty()) { noticeDismiss_.stop(); return; }
+        updateSuggestionOverlay();
+        QString shown = words;
+        while (notice_->heightForWidth(notice_->width()) > notice_->height() && shown.size() > 1) {
+            const int cut = shown.lastIndexOf(QLatin1Char(' '), shown.size() - 2);
+            shown.truncate(cut > 0 ? cut : shown.size() - 1);
+            notice_->setText(shown + QStringLiteral("…"));
+        }
+        notice_->raise();
+        // Longer messages stay up longer.
+        noticeDismiss_.start(std::clamp(int(4000 + words.size() * 45), 6000, 14000));
     }
     void suggestionHint(const QString& words, const QString& state)
     {
